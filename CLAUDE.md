@@ -1,6 +1,6 @@
 # Kesha TG Bot
 
-Telegram-бот — обёртка над Claude Code CLI через официальный `claude-agent-sdk`.
+Telegram-бот на `ClaudeSDKClient` (persistent connection) из официального `claude-agent-sdk`.
 
 ## Архитектура
 
