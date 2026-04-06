@@ -148,8 +148,67 @@ async def schedule_message(args):
     return {"content": [{"type": "text", "text": f"Scheduled: отправлю через {time_str}"}]}
 
 
+@tool("send_video", "Send a video to the user in Telegram (with player/preview)", {"path": str, "caption": str})
+async def send_video(args):
+    path = args["path"]
+    caption = args.get("caption", "")
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    p = Path(path)
+    if not p.exists():
+        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        from aiogram.types import FSInputFile
+        video = FSInputFile(str(p))
+        await _bot_ref.bot.send_video(chat_id=chat_id, video=video, caption=caption or None)
+        logger.info(f"Sent video {path} to {chat_id}")
+        return {"content": [{"type": "text", "text": f"Video sent: {p.name}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to send video: {e}"}], "is_error": True}
+
+
+@tool("send_audio", "Send an audio file to the user in Telegram (with player)", {"path": str, "caption": str})
+async def send_audio(args):
+    path = args["path"]
+    caption = args.get("caption", "")
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    p = Path(path)
+    if not p.exists():
+        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        from aiogram.types import FSInputFile
+        audio = FSInputFile(str(p))
+        await _bot_ref.bot.send_audio(chat_id=chat_id, audio=audio, caption=caption or None)
+        logger.info(f"Sent audio {path} to {chat_id}")
+        return {"content": [{"type": "text", "text": f"Audio sent: {p.name}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to send audio: {e}"}], "is_error": True}
+
+
+@tool("send_voice", "Send a voice message to the user in Telegram", {"path": str})
+async def send_voice(args):
+    path = args["path"]
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    p = Path(path)
+    if not p.exists():
+        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        from aiogram.types import FSInputFile
+        voice = FSInputFile(str(p))
+        await _bot_ref.bot.send_voice(chat_id=chat_id, voice=voice)
+        logger.info(f"Sent voice {path} to {chat_id}")
+        return {"content": [{"type": "text", "text": f"Voice sent: {p.name}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to send voice: {e}"}], "is_error": True}
+
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
     tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot,
-           send_photo, send_file, schedule_message],
+           send_photo, send_file, send_video, send_audio, send_voice, schedule_message],
 )

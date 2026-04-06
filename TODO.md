@@ -18,5 +18,5 @@
 - [ ] Webhook вместо polling (для production)
 - [ ] Rate limiting
 - [ ] Per-user сессии (dict[user_id → ClaudeSession])
-- [ ] MCP image generation (OpenRouter)
-- [ ] Отправка видео/аудио из тулзов
+- [x] MCP image generation (OpenRouter) — generate_image тул в websearch MCP
+- [x] Отправка видео/аудио/голосовых из тулзов (send_video, send_audio, send_voice)
