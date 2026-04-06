@@ -12,6 +12,8 @@
 - [x] Album support (aiogram-media-group)
 - [x] MCP tools: send_photo, send_file, schedule_message, set_model, set_debounce, toggle_debug, get_bot_status, restart_bot
 - [x] Reply context в промптах
+- [x] Native streaming via `sendMessageDraft` (Bot API 9.5) — no more editMessage flickering
+- [x] Smart tool/text flow: text blocks stay, tools ephemeral, text after tool replaces tool message
 
 ## Open
 - [ ] Inline кнопки для частых действий

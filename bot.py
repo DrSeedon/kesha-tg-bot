@@ -14,6 +14,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram_media_group import media_group_handler
 from aiogram.filters import CommandStart, Command
+from aiogram.methods import SendMessageDraft
 from aiogram.types import BotCommand, BotCommandScopeDefault
 from dotenv import load_dotenv
 
@@ -297,6 +298,9 @@ async def transcribe(path: str) -> tuple[str, str | None]:
         if "err_msg" in data:
             return "", data["err_msg"]
         text = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        duration = data.get("metadata", {}).get("duration", 0)
+        cost = duration / 60 * 0.0043
+        logger.info(f"Deepgram: {duration:.1f}s, ${cost:.4f}, {len(text)} chars")
         return text, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         raw = out.decode(errors="replace")[:200]
@@ -474,53 +478,106 @@ async def enqueue(msg: types.Message, prompt: str):
 
 async def _send_safe(message: types.Message, text: str):
     try:
-        await message.answer(text)
+        return await message.answer(text)
     except Exception:
-        await message.answer(text, parse_mode=None)
+        return await message.answer(text, parse_mode=None)
 
 
-STREAM_EDIT_INTERVAL = 1.5
+STREAM_DRAFT_INTERVAL = 0.3
+_draft_counter = 0
+
+
+def _next_draft_id() -> int:
+    global _draft_counter
+    _draft_counter += 1
+    return _draft_counter
+
+
+async def _clear_draft(chat_id: int, did: int):
+    try:
+        await bot(SendMessageDraft(chat_id=chat_id, draft_id=did, text=" "))
+    except Exception:
+        pass
 
 
 async def _ask(message: types.Message, prompt: str):
     cid = message.chat.id
     typer = asyncio.create_task(typing_loop(cid))
-    parts = []
-    has_deltas = False
     retries = 0
-    stream_msg = None
-    last_edit_time = 0.0
-    last_edit_len = 0
 
-    async def _stream_update(final: bool = False):
-        nonlocal stream_msg, last_edit_time, last_edit_len
+    # --- Streaming state ---
+    parts = []              # text chunks for current block
+    has_deltas = False
+    draft_id = _next_draft_id()
+    last_draft_time = 0.0
+    last_draft_len = 0
+
+    current_msg = None      # real TG message being edited (text or tool)
+    current_is_tool = False  # what's in current_msg right now
+    finalized = []          # message_ids that are done, don't touch
+
+    async def _draft_update():
+        nonlocal last_draft_time, last_draft_len
         text = "".join(parts)
         if not text:
             return
         now = time.time()
-        if not final and (now - last_edit_time) < STREAM_EDIT_INTERVAL:
+        if (now - last_draft_time) < STREAM_DRAFT_INTERVAL:
             return
-        if not final and len(text) == last_edit_len:
+        if len(text) == last_draft_len:
             return
-        chunk_text = text[:TG_MSG_LIMIT]
         try:
-            if stream_msg is None:
-                stream_msg = await message.answer(chunk_text, parse_mode=None)
-            else:
-                await bot.edit_message_text(chunk_text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
-        except Exception:
-            pass
-        last_edit_time = now
-        last_edit_len = len(text)
+            await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text[:TG_MSG_LIMIT]))
+        except Exception as e:
+            logger.debug(f"Draft update error: {e}")
+        last_draft_time = now
+        last_draft_len = len(text)
+
+    async def _finalize_current_text():
+        """Send current text parts as real message, freeze it, reset state."""
+        nonlocal current_msg, current_is_tool, parts, has_deltas, draft_id, last_draft_time, last_draft_len
+        text = "".join(parts)
+        if not text:
+            return
+        await _clear_draft(cid, draft_id)
+        if current_msg and current_is_tool:
+            # Reuse tool message — edit it to text with markdown
+            try:
+                await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id)
+            except Exception:
+                try:
+                    await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                except Exception:
+                    pass
+            finalized.append(current_msg.message_id)
+            current_msg = None
+        else:
+            # No existing msg or current is already text — send new
+            if current_msg:
+                finalized.append(current_msg.message_id)
+                current_msg = None
+            for p in split_msg(text):
+                m = await _send_safe(message, p)
+                if m:
+                    finalized.append(m.message_id)
+        parts = []
+        has_deltas = False
+        current_is_tool = False
+        draft_id = _next_draft_id()
+        last_draft_time = 0.0
+        last_draft_len = 0
 
     while retries <= MAX_RETRIES:
         try:
             async for chunk in claude.send_message(prompt):
                 ct = chunk["type"]
                 if ct == "text_delta":
+                    if not has_deltas and current_msg and current_is_tool:
+                        # First text after tool — will reuse tool msg via edit
+                        pass
                     has_deltas = True
                     parts.append(chunk["content"])
-                    await _stream_update()
+                    await _draft_update()
                 elif ct == "text" and not has_deltas:
                     parts.append(chunk["content"])
                 elif ct == "tool":
@@ -537,18 +594,26 @@ async def _ask(message: types.Message, prompt: str):
                         elif "prompt" in tool_input:
                             tool_hint = f" `{str(tool_input['prompt'])[:40]}`"
                     logger.info(f"Chat {cid} tool: {tool_name}{tool_hint}")
-                    if parts and has_deltas:
-                        parts.clear()
-                        has_deltas = False
-                    try:
-                        tool_text = f"🔧 {tool_name}{tool_hint}"
-                        if stream_msg:
-                            await bot.edit_message_text(tool_text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
-                        else:
-                            stream_msg = await message.answer(tool_text, parse_mode=None)
-                        last_edit_time = time.time()
-                    except Exception:
-                        pass
+                    tool_text = f"🔧 {tool_name}{tool_hint}"
+
+                    if has_deltas and parts:
+                        # Had text streaming — finalize it first
+                        await _finalize_current_text()
+                        # New message for tool
+                        current_msg = await message.answer(tool_text, parse_mode=None)
+                        current_is_tool = True
+                    elif current_msg and current_is_tool:
+                        # Already showing a tool — just edit it
+                        try:
+                            await bot.edit_message_text(tool_text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                        except Exception:
+                            pass
+                    else:
+                        # First thing or after nothing — new message
+                        if current_msg:
+                            finalized.append(current_msg.message_id)
+                        current_msg = await message.answer(tool_text, parse_mode=None)
+                        current_is_tool = True
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
@@ -571,31 +636,60 @@ async def _ask(message: types.Message, prompt: str):
                 break
 
     typer.cancel()
-    text = "".join(parts) or t(message, "empty")
 
-    logger.info(f"Chat {cid}: response {len(text)} chars")
+    # --- Finalize ---
+    text = "".join(parts)
+    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}")
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
-    if stream_msg:
-        if len(text) <= TG_MSG_LIMIT:
-            try:
-                await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id)
-            except Exception:
+    if text:
+        await _clear_draft(cid, draft_id)
+        if current_msg and current_is_tool:
+            # Text after last tool — replace tool msg with final text
+            if len(text) <= TG_MSG_LIMIT:
                 try:
-                    await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+                    await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id)
+                except Exception:
+                    try:
+                        await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await bot.delete_message(cid, current_msg.message_id)
                 except Exception:
                     pass
+                for p in split_msg(text):
+                    await _send_safe(message, p)
+        elif current_msg:
+            # Was streaming text into draft — send as final msg
+            if len(text) <= TG_MSG_LIMIT:
+                try:
+                    await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id)
+                except Exception:
+                    try:
+                        await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await bot.delete_message(cid, current_msg.message_id)
+                except Exception:
+                    pass
+                for p in split_msg(text):
+                    await _send_safe(message, p)
         else:
-            try:
-                await bot.delete_message(cid, stream_msg.message_id)
-            except Exception:
-                pass
             for p in split_msg(text):
                 await _send_safe(message, p)
-    else:
-        for p in split_msg(text):
-            await _send_safe(message, p)
+    elif current_msg and current_is_tool:
+        # Ended on a tool with no text after — delete tool indicator
+        try:
+            await bot.delete_message(cid, current_msg.message_id)
+        except Exception:
+            pass
+    elif not finalized:
+        await _send_safe(message, t(message, "empty"))
 
 
 # --- Commands ---
@@ -663,7 +757,9 @@ async def h_status(msg: types.Message):
     sid = claude.session_id
     rl = claude.rate_limit
     if rl:
-        rl_str = f"{rl['status']} ({rl['type']}) {int(rl['utilization']*100)}%"
+        util = rl.get('utilization')
+        util_str = f" {int(util*100)}%" if util is not None else ""
+        rl_str = f"{rl.get('status', '?')} ({rl.get('type', '?')}){util_str}"
     else:
         rl_str = "n/a"
     await _send_safe(msg, t(msg, "status",

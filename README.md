@@ -23,8 +23,8 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 - **Stickers** — passes emoji to Claude
 - **Forwards** — tagged with [Forwarded from Name]
 - **Replies** — quoted text included as [reply: "..."]
-- **Streaming** — responses appear in real-time, editing every 1.5s
-- **Tool display** — shows `🔧 Read`, `🔧 Bash` etc. during processing
+- **Native streaming** — real-time via `sendMessageDraft` (Bot API 9.5), no edit flickering
+- **Smart tool display** — tools shown in ephemeral message, replaced by next text block
 - **Persistent session** — survives bot restarts via `./storage/session_id`
 - **Debounce** — batches rapid messages into one prompt (configurable delay)
 - **Queue merge** — messages during processing merged into single batch
@@ -99,7 +99,7 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
                                   Real-time edit in TG
 ```
 
-- `bot.py` — handlers, streaming, debounce, media cache, album support, i18n
+- `bot.py` — handlers, native draft streaming, debounce, media cache, album support, i18n
 - `claude_session.py` — SDK wrapper with resume, streaming, rate limit tracking
 - `kesha_tools.py` — MCP tools (send_photo, send_file, schedule_message, self-config)
 - `system_prompt.txt` — Claude's TG context and formatting rules
@@ -108,7 +108,7 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 ## Stack
 
 - Python 3.11+
-- aiogram 3.x + aiogram-media-group
+- aiogram 3.27+ (sendMessageDraft support) + aiogram-media-group
 - claude-agent-sdk (official Anthropic)
 - Deepgram Nova-2 (STT)
 - ffmpeg (video note audio extraction)
@@ -134,8 +134,8 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 - **Стикеры** — передаёт emoji
 - **Пересланные** — [Forwarded from Name]
 - **Реплаи** — цитата [reply: "..."]
-- **Стриминг** — ответы появляются в реальном времени, edit каждые 1.5 сек
-- **Tool display** — показывает `🔧 Read`, `🔧 Bash` во время обработки
+- **Нативный стриминг** — через `sendMessageDraft` (Bot API 9.5), без мерцания от editMessage
+- **Умный показ тулов** — тулы в отдельном сообщении, заменяется следующим текстом
 - **Persistent session** — переживает рестарт бота
 - **Дебаунс** — склейка сообщений в один промпт (настраиваемая задержка)
 - **Merge очереди** — сообщения во время обработки склеиваются в один батч
