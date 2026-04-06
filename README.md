@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="banner.png" alt="Kesha TG Bot" width="100%">
+</p>
+
 # Kesha TG Bot
 
 Telegram bot powered by **Claude Agent SDK** (official Anthropic SDK). A full Claude Code CLI experience, but through Telegram.
