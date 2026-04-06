@@ -1,11 +1,12 @@
-"""Claude session via claude-agent-sdk with resume support."""
+"""Claude session via ClaudeSDKClient — persistent connection with interrupt support."""
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from claude_agent_sdk import (
-    query,
+    ClaudeSDKClient,
     ClaudeAgentOptions,
     AssistantMessage,
     ResultMessage,
@@ -39,6 +40,8 @@ class ClaudeSession:
         self.last_duration_ms: int = 0
         self.last_num_turns: int = 0
         self.last_stop_reason: Optional[str] = None
+        self._client: Optional[ClaudeSDKClient] = None
+        self._connected = False
 
     def _load_session(self) -> Optional[str]:
         if SESSION_FILE.exists():
@@ -52,7 +55,7 @@ class ClaudeSession:
         SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         SESSION_FILE.write_text(self.session_id or "")
 
-    async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
+    def _make_options(self) -> ClaudeAgentOptions:
         options = ClaudeAgentOptions(
             model=self.model,
             cwd=self.cwd,
@@ -60,23 +63,43 @@ class ClaudeSession:
             permission_mode="bypassPermissions",
             include_partial_messages=True,
         )
-
         if self.system_prompt:
             options.system_prompt = self.system_prompt
-
         if self.mcp_servers:
             options.mcp_servers = self.mcp_servers
-
         if self.session_id:
             options.resume = self.session_id
-            logger.info(f"Resuming session {self.session_id[:8]}...")
-        else:
-            logger.info("Starting new session...")
+        return options
 
+    async def _ensure_connected(self, prompt: str):
+        if self._client and self._connected:
+            await self._client.query(prompt)
+            return
+
+        if self._client:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+
+        options = self._make_options()
+        self._client = ClaudeSDKClient(options=options)
+
+        if self.session_id:
+            logger.info(f"Connecting with resume {self.session_id[:8]}...")
+        else:
+            logger.info("Connecting new session...")
+
+        await self._client.connect(prompt)
+        self._connected = True
+
+    async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
 
         try:
-            async for msg in query(prompt=text, options=options):
+            await self._ensure_connected(text)
+
+            async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
@@ -103,6 +126,7 @@ class ClaudeSession:
                     logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
+                    break
                 elif isinstance(msg, StreamEvent):
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
@@ -121,9 +145,46 @@ class ClaudeSession:
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
         except Exception as e:
             logger.error(f"SDK error: {e}", exc_info=True)
+            self._connected = False
+            self._client = None
             yield {"type": "error", "content": str(e)}
+
+    async def interrupt(self):
+        if self._client and self._connected:
+            try:
+                await self._client.interrupt()
+                logger.info("Interrupt sent")
+            except Exception as e:
+                logger.error(f"Interrupt error: {e}")
+
+    async def set_model_live(self, model: str):
+        self.model = model
+        if self._client and self._connected:
+            try:
+                await self._client.set_model(model)
+                logger.info(f"Model changed live to {model}")
+            except Exception as e:
+                logger.error(f"set_model error: {e}")
+
+    async def get_context_usage(self) -> Optional[dict]:
+        if self._client and self._connected:
+            try:
+                return await self._client.get_context_usage()
+            except Exception as e:
+                logger.error(f"get_context_usage error: {e}")
+        return None
 
     def reset(self):
         self.session_id = None
         self._save_session()
+        self._connected = False
+        if self._client:
+            asyncio.create_task(self._safe_disconnect())
+            self._client = None
         logger.info("Session reset")
+
+    async def _safe_disconnect(self):
+        try:
+            await self._client.disconnect()
+        except Exception:
+            pass

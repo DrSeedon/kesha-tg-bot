@@ -19,7 +19,7 @@ def set_bot_ref(bot_module):
 @tool("set_model", "Change Claude model for this bot", {"model": str})
 async def set_model(args):
     model = args["model"]
-    _bot_ref.claude.model = model
+    await _bot_ref.claude.set_model_live(model)
     logger.info(f"Model changed to {model}")
     return {"content": [{"type": "text", "text": f"Model changed to {model}"}]}
 
@@ -54,6 +54,8 @@ async def get_bot_status(args):
     else:
         rl_str = "unknown"
     dur = f"{c.last_duration_ms/1000:.1f}s" if c.last_duration_ms else "n/a"
+    ctx = await c.get_context_usage()
+    ctx_str = f"{ctx['percentage']:.0f}% ({ctx['totalTokens']}/{ctx['maxTokens']})" if ctx else "n/a"
     status = (
         f"Model: {c.model}\n"
         f"Session: {c.session_id or 'none'}\n"
@@ -62,6 +64,7 @@ async def get_bot_status(args):
         f"CWD: {_bot_ref.WORK_DIR}\n"
         f"Rate limit: {rl_str}\n"
         f"Session cost: ${c.total_cost_usd:.4f}\n"
+        f"Context: {ctx_str}\n"
         f"Last response: {dur}, {c.last_num_turns} turns, stop={c.last_stop_reason}\n"
         f"Media files: {_bot_ref.media_count()}\n"
         f"Log size: {_bot_ref.log_size()}"

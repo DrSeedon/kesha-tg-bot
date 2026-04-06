@@ -393,8 +393,16 @@ async def _debounce_fire(chat_id: int):
         return
 
     if chat_id in _processing:
-        _queue.setdefault(chat_id, []).append(batch)
-        logger.debug(f"Chat {chat_id}: queued batch ({len(batch)} msgs), processing busy")
+        combined = "\n\n".join(e["prompt"] for e in batch)
+        logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
+        if claude._client and claude._connected:
+            try:
+                await claude._client.query(combined)
+            except Exception as e:
+                logger.error(f"Inject error: {e}")
+                _queue.setdefault(chat_id, []).append(batch)
+        else:
+            _queue.setdefault(chat_id, []).append(batch)
         return
 
     await _process_batch(chat_id, batch)
@@ -862,7 +870,8 @@ async def h_stop(msg: types.Message):
     cid = msg.chat.id
     if cid in _processing:
         _cancel.add(cid)
-        await _send_safe(msg, "Stopping current request...")
+        await claude.interrupt()
+        await _send_safe(msg, "Stopping...")
     else:
         await _send_safe(msg, "Nothing to stop.")
 
