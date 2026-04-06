@@ -187,14 +187,17 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def cleanup_media():
+    global _file_cache
     cutoff = time.time() - MEDIA_MAX_AGE_H * 3600
     count = 0
     for f in MEDIA_DIR.iterdir():
-        if f.is_file() and f.stat().st_mtime < cutoff:
+        if f.is_file() and f.name != ".cache.json" and f.stat().st_mtime < cutoff:
             f.unlink()
             count += 1
     if count:
         logger.info(f"Cleaned up {count} old media files")
+        _file_cache = {k: v for k, v in _file_cache.items() if Path(v).exists()}
+        _save_cache(_file_cache)
 
 
 def media_count() -> int:
@@ -301,7 +304,33 @@ async def transcribe(path: str) -> tuple[str, str | None]:
         return "", str(e)
 
 
-async def download_file(file_id: str, name: str) -> str:
+CACHE_FILE = MEDIA_DIR / ".cache.json"
+
+
+def _load_cache() -> dict[str, str]:
+    if CACHE_FILE.exists():
+        try:
+            data = json.loads(CACHE_FILE.read_text())
+            return {k: v for k, v in data.items() if Path(v).exists()}
+        except Exception:
+            pass
+    return {}
+
+
+def _save_cache(cache: dict[str, str]):
+    CACHE_FILE.write_text(json.dumps(cache))
+
+
+_file_cache: dict[str, str] = _load_cache()
+
+
+async def download_file(file_id: str, name: str, unique_id: str = "") -> str:
+    if unique_id and unique_id in _file_cache:
+        cached = _file_cache[unique_id]
+        if Path(cached).exists():
+            logger.info(f"Cache hit: {unique_id} → {Path(cached).name}")
+            return cached
+        del _file_cache[unique_id]
     f = await bot.get_file(file_id)
     path = MEDIA_DIR / name
     if path.exists():
@@ -312,6 +341,9 @@ async def download_file(file_id: str, name: str) -> str:
             path = MEDIA_DIR / f"{stem}_{i}{suffix}"
             i += 1
     await bot.download_file(f.file_path, str(path))
+    if unique_id:
+        _file_cache[unique_id] = str(path)
+        _save_cache(_file_cache)
     return str(path)
 
 
@@ -375,9 +407,29 @@ async def _process_batch(chat_id: int, batch: list[dict]):
                 for i, e in enumerate(batch)
             )
 
-        logger.info(f"Chat {chat_id}: sending batch ({len(batch)} msgs, {len(combined)} chars)")
+        previews = []
+        for e in batch:
+            p = e["prompt"]
+            if "[photo:" in p:
+                previews.append("photo")
+            elif "[voice:" in p:
+                previews.append("voice")
+            elif "[video_note:" in p:
+                previews.append("videonote")
+            elif "[video:" in p:
+                previews.append("video")
+            elif "[document:" in p:
+                previews.append("doc")
+            elif "[audio:" in p:
+                previews.append("audio")
+            elif "[sticker:" in p:
+                previews.append("sticker")
+            else:
+                txt = p.split("]: ", 1)[-1][:40].replace("\n", " ")
+                previews.append(f'"{txt}"')
+        logger.info(f"Chat {chat_id}: sending {len(batch)} msgs [{', '.join(previews)}] ({len(combined)} chars)")
         if DEBUG:
-            logger.debug(f"Chat {chat_id} prompt: {combined}")
+            logger.debug(f"Chat {chat_id} full prompt:\n{combined}")
 
         await _ask(last_msg, combined)
     except Exception as e:
@@ -388,12 +440,18 @@ async def _process_batch(chat_id: int, batch: list[dict]):
             pass
     finally:
         _processing.discard(chat_id)
-        queued = _queue.get(chat_id)
-        if queued:
-            next_batch = queued.pop(0)
-            if not queued:
-                del _queue[chat_id]
-            asyncio.create_task(_process_batch(chat_id, next_batch))
+        queued = _queue.pop(chat_id, None)
+        pending = _pending.pop(chat_id, [])
+        timer = _pending_timers.pop(chat_id, None)
+        if timer and not timer.done():
+            timer.cancel()
+        if queued or pending:
+            merged = []
+            for b in (queued or []):
+                merged.extend(b)
+            merged.extend(pending)
+            if merged:
+                asyncio.create_task(_process_batch(chat_id, merged))
 
 
 async def enqueue(msg: types.Message, prompt: str):
@@ -437,7 +495,18 @@ async def _ask(message: types.Message, prompt: str):
                         logger.debug(f"Chat {cid} chunk: {chunk['content'][:100]}")
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
-                    logger.info(f"Chat {cid} tool: {tool_name}")
+                    tool_input = chunk.get("input", {})
+                    tool_hint = ""
+                    if isinstance(tool_input, dict):
+                        if "command" in tool_input:
+                            tool_hint = f": {str(tool_input['command'])[:80]}"
+                        elif "file_path" in tool_input:
+                            tool_hint = f": {tool_input['file_path']}"
+                        elif "pattern" in tool_input:
+                            tool_hint = f": {tool_input['pattern']}"
+                        elif "prompt" in tool_input:
+                            tool_hint = f": {str(tool_input['prompt'])[:60]}"
+                    logger.info(f"Chat {cid} tool: {tool_name}{tool_hint}")
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
@@ -626,7 +695,7 @@ async def h_restart(msg: types.Message):
 async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg))
+    path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
     await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
     text, err = await transcribe(path)
     if not text:
@@ -644,7 +713,7 @@ async def h_photo_album(messages: list[types.Message]):
         return
     parts = []
     for m in messages:
-        path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m))
+        path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
         parts.append(f"[photo: {path}]")
     caption = ""
     for m in messages:
@@ -663,7 +732,7 @@ async def h_video_album(messages: list[types.Message]):
         return
     parts = []
     for m in messages:
-        path = await download_file(m.video.file_id, _media_name("video", ".mp4", m))
+        path = await download_file(m.video.file_id, _media_name("video", ".mp4", m), m.video.file_unique_id)
         parts.append(f"[video: {path}]")
     caption = ""
     for m in messages:
@@ -684,7 +753,7 @@ async def h_document_album(messages: list[types.Message]):
     for m in messages:
         doc = m.document
         ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
-        path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m))
+        path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m), doc.file_unique_id)
         parts.append(f"[document: {path} ({doc.file_name})]")
     caption = ""
     for m in messages:
@@ -700,7 +769,7 @@ async def h_document_album(messages: list[types.Message]):
 async def h_photo(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg))
+    path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg), msg.photo[-1].file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[photo: {path}]{caption}")
 
@@ -709,7 +778,7 @@ async def h_photo(msg: types.Message):
 async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg))
+    path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if DEEPGRAM:
         audio_path = path.replace(".mp4", ".oga")
         p = await asyncio.create_subprocess_exec(
@@ -732,7 +801,7 @@ async def h_document(msg: types.Message):
         return
     doc = msg.document
     ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
-    path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg))
+    path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg), doc.file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[document: {path} ({doc.file_name})]{caption}")
 
@@ -749,7 +818,7 @@ async def h_sticker(msg: types.Message):
 async def h_video(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg))
+    path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg), msg.video.file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[video: {path}]{caption}")
 
@@ -760,7 +829,7 @@ async def h_audio(msg: types.Message):
         return
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
     name = msg.audio.file_name or _media_name("audio", ext, msg)
-    path = await download_file(msg.audio.file_id, name)
+    path = await download_file(msg.audio.file_id, name, msg.audio.file_unique_id)
     await enqueue(msg, f"[audio: {path} ({name})]")
 
 

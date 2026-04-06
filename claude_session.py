@@ -10,6 +10,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     RateLimitEvent,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
     ToolResultBlock,
@@ -34,6 +35,9 @@ class ClaudeSession:
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
         self.rate_limit: Optional[dict[str, Any]] = None
+        self.last_duration_ms: int = 0
+        self.last_num_turns: int = 0
+        self.last_stop_reason: Optional[str] = None
 
     def _load_session(self) -> Optional[str]:
         if SESSION_FILE.exists():
@@ -90,8 +94,15 @@ class ClaudeSession:
                         self.total_cost_usd += msg.total_cost_usd
                     if hasattr(msg, 'usage') and msg.usage:
                         self.last_usage = msg.usage
+                    self.last_duration_ms = getattr(msg, 'duration_ms', 0) or 0
+                    self.last_num_turns = getattr(msg, 'num_turns', 0) or 0
+                    self.last_stop_reason = getattr(msg, 'stop_reason', None)
+                    dur_s = self.last_duration_ms / 1000
+                    logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
+                elif isinstance(msg, SystemMessage):
+                    logger.info(f"System: {msg.subtype}")
                 elif isinstance(msg, RateLimitEvent):
                     rl = msg.rate_limit_info
                     self.rate_limit = {

@@ -46,7 +46,13 @@ async def toggle_debug(args):
 async def get_bot_status(args):
     c = _bot_ref.claude
     rl = c.rate_limit
-    rl_str = f"{rl['status']} ({rl['type']}) {int(rl['utilization']*100)}%" if rl else "unknown"
+    if rl:
+        util = rl.get('utilization')
+        util_str = f" {int(util*100)}%" if util is not None else ""
+        rl_str = f"{rl.get('status', '?')} ({rl.get('type', '?')}){util_str}"
+    else:
+        rl_str = "unknown"
+    dur = f"{c.last_duration_ms/1000:.1f}s" if c.last_duration_ms else "n/a"
     status = (
         f"Model: {c.model}\n"
         f"Session: {c.session_id or 'none'}\n"
@@ -55,6 +61,7 @@ async def get_bot_status(args):
         f"CWD: {_bot_ref.WORK_DIR}\n"
         f"Rate limit: {rl_str}\n"
         f"Session cost: ${c.total_cost_usd:.4f}\n"
+        f"Last response: {dur}, {c.last_num_turns} turns, stop={c.last_stop_reason}\n"
         f"Media files: {_bot_ref.media_count()}\n"
         f"Log size: {_bot_ref.log_size()}"
     )
