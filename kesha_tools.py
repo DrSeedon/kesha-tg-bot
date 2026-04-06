@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
@@ -81,7 +82,74 @@ async def restart_bot(args):
     return {"content": [{"type": "text", "text": "Bot restarting..."}]}
 
 
+@tool("send_photo", "Send a photo to the user in Telegram", {"path": str, "caption": str})
+async def send_photo(args):
+    path = args["path"]
+    caption = args.get("caption", "")
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    p = Path(path)
+    if not p.exists():
+        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        from aiogram.types import FSInputFile
+        photo = FSInputFile(str(p))
+        await _bot_ref.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption or None)
+        logger.info(f"Sent photo {path} to {chat_id}")
+        return {"content": [{"type": "text", "text": f"Photo sent: {p.name}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to send photo: {e}"}], "is_error": True}
+
+
+@tool("send_file", "Send any file/document to the user in Telegram", {"path": str, "caption": str})
+async def send_file(args):
+    path = args["path"]
+    caption = args.get("caption", "")
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    p = Path(path)
+    if not p.exists():
+        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        from aiogram.types import FSInputFile
+        doc = FSInputFile(str(p))
+        await _bot_ref.bot.send_document(chat_id=chat_id, document=doc, caption=caption or None)
+        logger.info(f"Sent file {path} to {chat_id}")
+        return {"content": [{"type": "text", "text": f"File sent: {p.name}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to send file: {e}"}], "is_error": True}
+
+
+@tool("schedule_message", "Schedule a message to be sent after a delay", {"message": str, "delay_seconds": int})
+async def schedule_message(args):
+    message = args["message"]
+    delay = args["delay_seconds"]
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    if delay < 1 or delay > 86400:
+        return {"content": [{"type": "text", "text": "Delay must be 1-86400 seconds (max 24h)"}], "is_error": True}
+
+    async def _send_later():
+        await asyncio.sleep(delay)
+        try:
+            await _bot_ref.bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Scheduled message sent to {chat_id} after {delay}s")
+        except Exception as e:
+            logger.error(f"Scheduled message failed: {e}")
+
+    asyncio.create_task(_send_later())
+    mins = delay // 60
+    secs = delay % 60
+    time_str = f"{mins}м {secs}с" if mins else f"{secs}с"
+    logger.info(f"Scheduled message in {delay}s for {chat_id}")
+    return {"content": [{"type": "text", "text": f"Scheduled: отправлю через {time_str}"}]}
+
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
-    tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot],
+    tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot,
+           send_photo, send_file, schedule_message],
 )

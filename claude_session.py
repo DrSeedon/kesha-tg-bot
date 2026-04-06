@@ -10,6 +10,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     RateLimitEvent,
+    StreamEvent,
     SystemMessage,
     TextBlock,
     ToolUseBlock,
@@ -57,6 +58,7 @@ class ClaudeSession:
             cwd=self.cwd,
             max_turns=25,
             permission_mode="bypassPermissions",
+            include_partial_messages=True,
         )
 
         if self.system_prompt:
@@ -101,6 +103,12 @@ class ClaudeSession:
                     logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
+                elif isinstance(msg, StreamEvent):
+                    evt = msg.event
+                    if evt.get("type") == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            yield {"type": "text_delta", "content": delta.get("text", "")}
                 elif isinstance(msg, SystemMessage):
                     logger.info(f"System: {msg.subtype}")
                 elif isinstance(msg, RateLimitEvent):

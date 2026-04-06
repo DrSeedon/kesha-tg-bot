@@ -10,19 +10,24 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 
 ## Features
 
-- **Text** — regular messages → Claude responds
-- **Photos** — downloaded, sent to Claude for analysis
+- **Text** — regular messages → Claude responds with streaming
+- **Photos** — downloaded, sent to Claude for analysis. Albums grouped correctly
 - **Voice** — Deepgram STT → text → Claude
-- **Documents** — downloads file, Claude can read it
-- **Video / Audio** — downloads media
-- **Video notes** — downloads mp4 circles
+- **Video notes** — ffmpeg extracts audio → Deepgram STT → transcription
+- **Documents** — downloads with original filename, Claude can read
+- **Video / Audio** — downloads media with original names
 - **Stickers** — passes emoji to Claude
 - **Forwards** — tagged with [Forwarded from Name]
-- **Persistent session** — resume between messages, context preserved
-- **Auto-retry** — on session error, auto-recreates (2 attempts)
-- **Typing indicator** — spinning while Claude thinks
-- **Debounce** — waits 3 sec to batch multiple messages into one prompt
+- **Replies** — quoted text included as [reply: "..."]
+- **Streaming** — responses appear in real-time, editing every 1.5s
+- **Tool display** — shows `🔧 Read`, `🔧 Bash` etc. during processing
+- **Persistent session** — survives bot restarts via `./storage/session_id`
+- **Debounce** — batches rapid messages into one prompt (configurable delay)
+- **Queue merge** — messages during processing merged into single batch
+- **Media cache** — same file not re-downloaded (`file_unique_id` cache, persistent)
 - **i18n** — Russian and English UI based on Telegram language
+- **MCP tools** — send_photo, send_file, schedule_message, self-config
+- **Auto-retry** — on session error, auto-recreates (2 attempts)
 - **Debug mode** — toggle with `/debug`, full logging to file
 - **Media storage** — local `./storage/media/` with auto-cleanup (24h)
 
@@ -31,10 +36,14 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 | Command | Description |
 |---------|-------------|
 | `/start` | Bot status & session info |
+| `/help` | Command reference |
+| `/status` | Detailed status (model, uptime, rate limit, cost) |
 | `/clear` | Reset session (new context) |
 | `/ping` | Check if bot is alive |
-| `/model claude-opus-4-6` | Change Claude model |
+| `/model <name>` | Change Claude model |
+| `/debounce <sec>` | Message batching delay (0-30s) |
 | `/debug` | Toggle debug logging |
+| `/restart` | Restart bot service |
 
 ## Quick Start
 
@@ -61,10 +70,11 @@ python bot.py
 | `ALLOWED_USERS` | Telegram user IDs, comma-separated | all |
 | `CLAUDE_MODEL` | Claude model | claude-sonnet-4-6 |
 | `WORK_DIR` | Working directory (with CLAUDE.md) | `.` (current) |
-| `DEEPGRAM_API_KEY` | Deepgram key for voice messages | optional |
+| `DEEPGRAM_API_KEY` | Deepgram key for voice/video note transcription | optional |
 | `DEBUG` | Enable debug logging | false |
 | `MEDIA_DIR` | Media storage path | ./storage/media |
 | `LOG_DIR` | Log files path | ./logs |
+| `DEBOUNCE_SEC` | Message batching delay | 3 |
 
 ## Systemd (auto-start)
 
@@ -79,22 +89,25 @@ sudo systemctl start kesha-bot
 
 ```
 Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk → claude CLI (OAuth)
-                                       ↓
-                                 resume=session_id
-                                       ↓
-                              Persistent conversation
+                          ↓              ↓
+                   kesha_tools.py   StreamEvent (text_delta)
+                   (MCP server)         ↓
+                                  Real-time edit in TG
 ```
 
-- `bot.py` — Aiogram handlers for all media types, debounce, i18n
-- `claude_session.py` — wrapper over `claude-agent-sdk` with resume
+- `bot.py` — handlers, streaming, debounce, media cache, album support, i18n
+- `claude_session.py` — SDK wrapper with resume, streaming, rate limit tracking
+- `kesha_tools.py` — MCP tools (send_photo, send_file, schedule_message, self-config)
+- `system_prompt.txt` — Claude's TG context and formatting rules
 - `setup_wizard.py` — interactive first-run configuration
 
 ## Stack
 
 - Python 3.11+
-- aiogram 3.x
+- aiogram 3.x + aiogram-media-group
 - claude-agent-sdk (official Anthropic)
 - Deepgram Nova-2 (STT)
+- ffmpeg (video note audio extraction)
 
 ---
 
@@ -108,31 +121,40 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 
 ## Возможности
 
-- **Текст** — обычные сообщения → Claude отвечает
-- **Фото** — скачивает, передаёт Claude для анализа
+- **Текст** — сообщения → Claude отвечает со стримингом
+- **Фото** — скачивает, передаёт Claude. Альбомы группируются
 - **Голосовые** — Deepgram STT → текст → Claude
-- **Документы** — скачивает файл, Claude может прочитать
-- **Видео / Аудио** — скачивает медиа
-- **Видеокружки** — скачивает mp4
+- **Видеокружки** — ffmpeg → Deepgram → транскрипция
+- **Документы** — скачивает с оригинальным именем
+- **Видео / Аудио** — скачивает с оригинальным именем
 - **Стикеры** — передаёт emoji
-- **Пересланные** — помечает [Переслано от Имя]
-- **Persistent session** — resume между сообщениями, контекст сохраняется
-- **Auto-retry** — при ошибке сессии автоматически пересоздаёт (2 попытки)
-- **Typing indicator** — крутится пока Claude думает
-- **Дебаунс** — ждёт 3 сек для склейки нескольких сообщений в один промпт
-- **i18n** — русский и английский интерфейс по языку Telegram
-- **Debug режим** — вкл/выкл через `/debug`, полное логирование в файл
-- **Хранилище медиа** — локальное `./storage/media/` с автоочисткой (24ч)
+- **Пересланные** — [Forwarded from Name]
+- **Реплаи** — цитата [reply: "..."]
+- **Стриминг** — ответы появляются в реальном времени, edit каждые 1.5 сек
+- **Tool display** — показывает `🔧 Read`, `🔧 Bash` во время обработки
+- **Persistent session** — переживает рестарт бота
+- **Дебаунс** — склейка сообщений в один промпт (настраиваемая задержка)
+- **Merge очереди** — сообщения во время обработки склеиваются в один батч
+- **Кеш медиа** — не перекачивает файлы повторно (persistent cache)
+- **i18n** — русский и английский по языку Telegram
+- **MCP tools** — send_photo, send_file, schedule_message, самонастройка
+- **Auto-retry** — при ошибке сессии пересоздаёт (2 попытки)
+- **Debug** — `/debug`, полное логирование в файл
+- **Хранилище медиа** — `./storage/media/` с автоочисткой (24ч)
 
 ## Команды
 
 | Команда | Описание |
 |---------|----------|
 | `/start` | Статус бота и сессии |
-| `/clear` | Сбросить сессию (новый контекст) |
+| `/help` | Справка по командам |
+| `/status` | Подробный статус (модель, uptime, rate limit, стоимость) |
+| `/clear` | Сбросить сессию |
 | `/ping` | Проверить что бот жив |
-| `/model claude-opus-4-6` | Сменить модель |
+| `/model <name>` | Сменить модель |
+| `/debounce <sec>` | Задержка склейки (0-30 сек) |
 | `/debug` | Вкл/выкл debug логирование |
+| `/restart` | Перезапустить бота |
 
 ## Быстрый старт
 
@@ -159,7 +181,8 @@ python bot.py
 | `ALLOWED_USERS` | Telegram user IDs через запятую | все |
 | `CLAUDE_MODEL` | Модель Claude | claude-sonnet-4-6 |
 | `WORK_DIR` | Рабочая директория (с CLAUDE.md) | `.` (текущая) |
-| `DEEPGRAM_API_KEY` | Ключ Deepgram для голосовых | опционально |
+| `DEEPGRAM_API_KEY` | Ключ Deepgram для голосовых/кружочков | опционально |
 | `DEBUG` | Включить debug логирование | false |
 | `MEDIA_DIR` | Путь для хранения медиа | ./storage/media |
 | `LOG_DIR` | Путь для логов | ./logs |
+| `DEBOUNCE_SEC` | Задержка склейки сообщений | 3 |

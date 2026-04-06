@@ -479,34 +479,76 @@ async def _send_safe(message: types.Message, text: str):
         await message.answer(text, parse_mode=None)
 
 
+STREAM_EDIT_INTERVAL = 1.5
+
+
 async def _ask(message: types.Message, prompt: str):
     cid = message.chat.id
     typer = asyncio.create_task(typing_loop(cid))
     parts = []
+    has_deltas = False
     retries = 0
+    stream_msg = None
+    last_edit_time = 0.0
+    last_edit_len = 0
+
+    async def _stream_update(final: bool = False):
+        nonlocal stream_msg, last_edit_time, last_edit_len
+        text = "".join(parts)
+        if not text:
+            return
+        now = time.time()
+        if not final and (now - last_edit_time) < STREAM_EDIT_INTERVAL:
+            return
+        if not final and len(text) == last_edit_len:
+            return
+        chunk_text = text[:TG_MSG_LIMIT]
+        try:
+            if stream_msg is None:
+                stream_msg = await message.answer(chunk_text, parse_mode=None)
+            else:
+                await bot.edit_message_text(chunk_text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+        except Exception:
+            pass
+        last_edit_time = now
+        last_edit_len = len(text)
 
     while retries <= MAX_RETRIES:
         try:
             async for chunk in claude.send_message(prompt):
                 ct = chunk["type"]
-                if ct in ("text", "text_delta"):
+                if ct == "text_delta":
+                    has_deltas = True
                     parts.append(chunk["content"])
-                    if DEBUG:
-                        logger.debug(f"Chat {cid} chunk: {chunk['content'][:100]}")
+                    await _stream_update()
+                elif ct == "text" and not has_deltas:
+                    parts.append(chunk["content"])
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
                     tool_hint = ""
                     if isinstance(tool_input, dict):
                         if "command" in tool_input:
-                            tool_hint = f": {str(tool_input['command'])[:80]}"
+                            tool_hint = f" `{str(tool_input['command'])[:60]}`"
                         elif "file_path" in tool_input:
-                            tool_hint = f": {tool_input['file_path']}"
+                            tool_hint = f" `{tool_input['file_path']}`"
                         elif "pattern" in tool_input:
-                            tool_hint = f": {tool_input['pattern']}"
+                            tool_hint = f" `{tool_input['pattern']}`"
                         elif "prompt" in tool_input:
-                            tool_hint = f": {str(tool_input['prompt'])[:60]}"
+                            tool_hint = f" `{str(tool_input['prompt'])[:40]}`"
                     logger.info(f"Chat {cid} tool: {tool_name}{tool_hint}")
+                    if parts and has_deltas:
+                        parts.clear()
+                        has_deltas = False
+                    try:
+                        tool_text = f"🔧 {tool_name}{tool_hint}"
+                        if stream_msg:
+                            await bot.edit_message_text(tool_text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+                        else:
+                            stream_msg = await message.answer(tool_text, parse_mode=None)
+                        last_edit_time = time.time()
+                    except Exception:
+                        pass
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
@@ -535,8 +577,25 @@ async def _ask(message: types.Message, prompt: str):
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
-    for p in split_msg(text):
-        await _send_safe(message, p)
+    if stream_msg:
+        if len(text) <= TG_MSG_LIMIT:
+            try:
+                await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id)
+            except Exception:
+                try:
+                    await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+                except Exception:
+                    pass
+        else:
+            try:
+                await bot.delete_message(cid, stream_msg.message_id)
+            except Exception:
+                pass
+            for p in split_msg(text):
+                await _send_safe(message, p)
+    else:
+        for p in split_msg(text):
+            await _send_safe(message, p)
 
 
 # --- Commands ---
