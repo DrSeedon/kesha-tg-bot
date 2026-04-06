@@ -30,7 +30,12 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 - **Queue merge** — messages during processing merged into single batch
 - **Media cache** — same file not re-downloaded (`file_unique_id` cache, persistent)
 - **i18n** — Russian and English UI based on Telegram language
-- **MCP tools** — send_photo, send_file, schedule_message, self-config
+- **Message injection** — send messages while Claude is thinking, like in Claude Code CLI
+- **Native interrupt** — `/stop` gracefully interrupts via SDK, preserves partial text
+- **Persistent connection** — `ClaudeSDKClient` keeps connection alive between messages
+- **Live model switch** — change model mid-conversation without losing context
+- **Context tracking** — context usage percentage available via `get_bot_status`
+- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, schedule_message, self-config
 - **Auto-retry** — on session error, auto-recreates (2 attempts)
 - **Debug mode** — toggle with `/debug`, full logging to file
 - **Media storage** — local `./storage/media/` with auto-cleanup (24h)
@@ -141,7 +146,12 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 - **Merge очереди** — сообщения во время обработки склеиваются в один батч
 - **Кеш медиа** — не перекачивает файлы повторно (persistent cache)
 - **i18n** — русский и английский по языку Telegram
-- **MCP tools** — send_photo, send_file, schedule_message, самонастройка
+- **Вклинивание сообщений** — пиши пока Claude думает, как в Claude Code CLI
+- **Нативный interrupt** — `/stop` мягко прерывает через SDK, сохраняет текст
+- **Persistent connection** — `ClaudeSDKClient` держит соединение между сообщениями
+- **Live смена модели** — меняй модель без потери контекста
+- **Контекст** — процент использования контекста через `get_bot_status`
+- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, schedule_message, самонастройка
 - **Auto-retry** — при ошибке сессии пересоздаёт (2 попытки)
 - **Debug** — `/debug`, полное логирование в файл
 - **Хранилище медиа** — `./storage/media/` с автоочисткой (24ч)
