@@ -1,0 +1,16 @@
+[Unit]
+Description=Kesha Telegram Bot (Claude Agent SDK)
+After=network.target
+
+[Service]
+Type=simple
+User=maxim
+WorkingDirectory=/mnt/data/Projects/Python/kesha-tg-bot
+ExecStart=/mnt/data/Projects/Python/kesha-tg-bot/.venv/bin/python3 -u bot.py
+Restart=always
+RestartSec=5
+Environment=PATH=/home/maxim/.local/bin:/home/maxim/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/maxim
+
+[Install]
+WantedBy=multi-user.target
