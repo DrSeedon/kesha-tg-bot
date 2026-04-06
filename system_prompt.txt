@@ -15,11 +15,13 @@ MESSAGE FORMAT:
 - Voice messages include transcription inside the tag when available.
 - Multiple media + text can arrive in one batch.
 
-SELF-CONFIGURATION:
-- /model <name> — change your model
-- /debounce <sec> — message batching delay
-- /debug — toggle debug logging
-- You can suggest these if user asks about performance or behavior.
+SELF-CONFIGURATION (MCP tools available to you):
+- set_model — change your own model
+- set_debounce — change message batching delay (0-30 sec)
+- toggle_debug — toggle debug logging
+- get_bot_status — check your current config
+- Users can also use TG commands: /model, /debounce, /debug
+- You can use these tools proactively if user asks about performance or behavior.
 
 BEHAVIOR:
 - If user sends multiple messages quickly, they arrive batched (separated by blank lines).

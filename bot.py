@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -11,11 +12,13 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
+from aiogram_media_group import media_group_handler
 from aiogram.filters import CommandStart, Command
 from aiogram.types import BotCommand, BotCommandScopeDefault
 from dotenv import load_dotenv
 
 from claude_session import ClaudeSession
+from kesha_tools import kesha_server, set_bot_ref
 
 load_dotenv()
 
@@ -75,26 +78,33 @@ STRINGS = {
         "empty": "🤷 Пустой ответ",
         "voice_fail": "🎙️ Не удалось расшифровать голосовое.",
         "deepgram_error": "🎙️ Ошибка транскрипции: {err}",
+        "restarting": "🔄 Перезапускаюсь...",
+        "started": "🦜 Кеша запущен!",
         "help": (
             "🦜 *Kesha Bot — команды:*\n\n"
             "/start — статус бота\n"
             "/help — эта справка\n"
             "/clear — сбросить сессию\n"
             "/ping — проверить сессию\n"
+            "/status — подробный статус\n"
             "/model `<name>` — сменить модель\n"
             "/debounce `<sec>` — задержка склейки сообщений\n"
-            "/debug — вкл/выкл debug логирование\n\n"
+            "/debug — вкл/выкл debug логирование\n"
+            "/restart — перезапустить бота\n\n"
             "📎 Поддерживаю: текст, фото, голосовые, видео, документы, аудио, видеокружки, стикеры, пересланные сообщения."
         ),
         "status": (
             "📊 *Статус Kesha:*\n\n"
-            "🤖 Model: `{model}`\n"
-            "📌 Session: `{session}`\n"
+            "🤖 Модель: `{model}`\n"
+            "📌 Сессия: `{session}`\n"
             "📂 CWD: `{cwd}`\n"
-            "⏱ Debounce: `{debounce}s`\n"
+            "⏱ Дебаунс: `{debounce}s`\n"
             "🐛 Debug: `{debug}`\n"
-            "📁 Media: `{media_count}` файлов\n"
-            "📝 Log: `{log_size}`"
+            "⏳ Аптайм: `{uptime}`\n"
+            "📊 Rate limit: `{rate_limit}`\n"
+            "💰 Стоимость сессии: `${cost}`\n"
+            "📁 Медиа: `{media_count}` файлов\n"
+            "📝 Лог: `{log_size}`"
         ),
     },
     "en": {
@@ -120,15 +130,19 @@ STRINGS = {
         "empty": "🤷 Empty response",
         "voice_fail": "🎙️ Could not transcribe voice message.",
         "deepgram_error": "🎙️ Transcription error: {err}",
+        "restarting": "🔄 Restarting...",
+        "started": "🦜 Kesha started!",
         "help": (
             "🦜 *Kesha Bot — commands:*\n\n"
             "/start — bot status\n"
             "/help — this help\n"
             "/clear — reset session\n"
             "/ping — check session\n"
+            "/status — detailed status\n"
             "/model `<name>` — change model\n"
             "/debounce `<sec>` — message batching delay\n"
-            "/debug — toggle debug logging\n\n"
+            "/debug — toggle debug logging\n"
+            "/restart — restart bot\n\n"
             "📎 Supports: text, photos, voice, video, documents, audio, video notes, stickers, forwarded messages."
         ),
         "status": (
@@ -138,6 +152,9 @@ STRINGS = {
             "📂 CWD: `{cwd}`\n"
             "⏱ Debounce: `{debounce}s`\n"
             "🐛 Debug: `{debug}`\n"
+            "⏳ Uptime: `{uptime}`\n"
+            "📊 Rate limit: `{rate_limit}`\n"
+            "💰 Session cost: `${cost}`\n"
             "📁 Media: `{media_count}` files\n"
             "📝 Log: `{log_size}`"
         ),
@@ -204,7 +221,11 @@ claude = ClaudeSession(
     cwd=WORK_DIR,
     model=MODEL,
     system_prompt=load_system_prompt(),
+    mcp_servers={"kesha": kesha_server},
 )
+
+import sys
+set_bot_ref(sys.modules[__name__])
 
 
 def allowed(uid: int) -> bool:
@@ -235,6 +256,16 @@ def forward_meta(msg: types.Message) -> str:
     elif msg.forward_sender_name:
         fwd += f" from {msg.forward_sender_name}"
     return f"[{fwd}] "
+
+
+def reply_meta(msg: types.Message) -> str:
+    r = msg.reply_to_message
+    if not r:
+        return ""
+    text = r.text or r.caption or ""
+    if len(text) > 200:
+        text = text[:200] + "..."
+    return f"[reply: \"{text}\"]\n"
 
 
 async def typing_loop(chat_id: int):
@@ -270,11 +301,23 @@ async def transcribe(path: str) -> tuple[str, str | None]:
         return "", str(e)
 
 
-async def download_file(file_id: str, ext: str, msg_id: int) -> str:
+async def download_file(file_id: str, name: str) -> str:
     f = await bot.get_file(file_id)
-    path = MEDIA_DIR / f"kesha_{msg_id}{ext}"
+    path = MEDIA_DIR / name
+    if path.exists():
+        stem = path.stem
+        suffix = path.suffix
+        i = 1
+        while path.exists():
+            path = MEDIA_DIR / f"{stem}_{i}{suffix}"
+            i += 1
     await bot.download_file(f.file_path, str(path))
     return str(path)
+
+
+def _media_name(prefix: str, ext: str, msg: types.Message) -> str:
+    ts = msg.date.strftime("%Y%m%d_%H%M%S") if msg.date else str(msg.message_id)
+    return f"{prefix}_{ts}_{msg.message_id}{ext}"
 
 
 def split_msg(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
@@ -324,13 +367,25 @@ async def _process_batch(chat_id: int, batch: list[dict]):
     _processing.add(chat_id)
     try:
         last_msg = batch[-1]["msg"]
-        combined = "\n\n".join(e["prompt"] for e in batch)
+        if len(batch) == 1:
+            combined = batch[0]["prompt"]
+        else:
+            combined = "\n\n".join(
+                f"--- message {i+1}/{len(batch)} ---\n{e['prompt']}"
+                for i, e in enumerate(batch)
+            )
 
         logger.info(f"Chat {chat_id}: sending batch ({len(batch)} msgs, {len(combined)} chars)")
         if DEBUG:
             logger.debug(f"Chat {chat_id} prompt: {combined}")
 
         await _ask(last_msg, combined)
+    except Exception as e:
+        logger.error(f"Chat {chat_id} batch error: {e}", exc_info=True)
+        try:
+            await bot.send_message(chat_id, f"Bot error: {e}", parse_mode=None)
+        except Exception:
+            pass
     finally:
         _processing.discard(chat_id)
         queued = _queue.get(chat_id)
@@ -343,9 +398,10 @@ async def _process_batch(chat_id: int, batch: list[dict]):
 
 async def enqueue(msg: types.Message, prompt: str):
     chat_id = msg.chat.id
-    prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{prompt}"
+    prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
 
-    logger.info(f"Chat {chat_id}: received from {msg.from_user.id}")
+    mg = msg.media_group_id
+    logger.info(f"Chat {chat_id}: received from {msg.from_user.id} (media_group={mg})")
     if DEBUG:
         logger.debug(f"Chat {chat_id} raw prompt: {prompt}")
 
@@ -425,6 +481,7 @@ COMMANDS_RU = [
     BotCommand(command="model", description="Сменить модель"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
+    BotCommand(command="restart", description="Перезапустить бота"),
 ]
 
 COMMANDS_EN = [
@@ -436,10 +493,13 @@ COMMANDS_EN = [
     BotCommand(command="model", description="Change model"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
+    BotCommand(command="restart", description="Restart bot"),
 ]
 
 
 async def set_commands():
+    await bot.delete_my_commands(scope=BotCommandScopeDefault())
+    await bot.delete_my_commands(scope=BotCommandScopeDefault(), language_code="ru")
     await bot.set_my_commands(COMMANDS_EN, scope=BotCommandScopeDefault())
     await bot.set_my_commands(COMMANDS_RU, scope=BotCommandScopeDefault(), language_code="ru")
     logger.info("Bot commands set (RU + EN)")
@@ -473,12 +533,20 @@ async def h_status(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     sid = claude.session_id
+    rl = claude.rate_limit
+    if rl:
+        rl_str = f"{rl['status']} ({rl['type']}) {int(rl['utilization']*100)}%"
+    else:
+        rl_str = "n/a"
     await _send_safe(msg, t(msg, "status",
         model=claude.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
         debounce=DEBOUNCE_SEC,
         debug="on" if DEBUG else "off",
+        uptime=uptime_str(),
+        rate_limit=rl_str,
+        cost=f"{claude.total_cost_usd:.4f}",
         media_count=media_count(),
         log_size=log_size(),
     ))
@@ -542,11 +610,23 @@ async def h_debug(msg: types.Message):
         await _send_safe(msg, t(msg, "debug_off"))
 
 
+@dp.message(Command("restart"))
+async def h_restart(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    await _send_safe(msg, t(msg, "restarting"))
+    p = await asyncio.create_subprocess_exec(
+        "sudo", "systemctl", "restart", "kesha-bot",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await p.communicate()
+
+
 @dp.message(F.voice)
 async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.voice.file_id, ".oga", msg.message_id)
+    path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg))
     await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
     text, err = await transcribe(path)
     if not text:
@@ -557,11 +637,70 @@ async def h_voice(msg: types.Message):
     await enqueue(msg, f"[voice: {path} | {text}]")
 
 
+@dp.message(F.media_group_id, F.photo)
+@media_group_handler
+async def h_photo_album(messages: list[types.Message]):
+    if not allowed(messages[0].from_user.id):
+        return
+    parts = []
+    for m in messages:
+        path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m))
+        parts.append(f"[photo: {path}]")
+    caption = ""
+    for m in messages:
+        if m.caption:
+            caption = f"\n{m.caption}"
+            break
+    fwd = forward_meta(messages[0])
+    media_block = "\n".join(parts)
+    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
+
+
+@dp.message(F.media_group_id, F.video)
+@media_group_handler
+async def h_video_album(messages: list[types.Message]):
+    if not allowed(messages[0].from_user.id):
+        return
+    parts = []
+    for m in messages:
+        path = await download_file(m.video.file_id, _media_name("video", ".mp4", m))
+        parts.append(f"[video: {path}]")
+    caption = ""
+    for m in messages:
+        if m.caption:
+            caption = f"\n{m.caption}"
+            break
+    fwd = forward_meta(messages[0])
+    media_block = "\n".join(parts)
+    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
+
+
+@dp.message(F.media_group_id, F.document)
+@media_group_handler
+async def h_document_album(messages: list[types.Message]):
+    if not allowed(messages[0].from_user.id):
+        return
+    parts = []
+    for m in messages:
+        doc = m.document
+        ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
+        path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m))
+        parts.append(f"[document: {path} ({doc.file_name})]")
+    caption = ""
+    for m in messages:
+        if m.caption:
+            caption = f"\n{m.caption}"
+            break
+    fwd = forward_meta(messages[0])
+    media_block = "\n".join(parts)
+    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
+
+
 @dp.message(F.photo)
 async def h_photo(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.photo[-1].file_id, ".jpg", msg.message_id)
+    path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg))
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[photo: {path}]{caption}")
 
@@ -570,7 +709,20 @@ async def h_photo(msg: types.Message):
 async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.video_note.file_id, ".mp4", msg.message_id)
+    path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg))
+    if DEEPGRAM:
+        audio_path = path.replace(".mp4", ".oga")
+        p = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-i", path, "-vn", "-acodec", "libopus", "-y", audio_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await p.communicate()
+        if p.returncode == 0:
+            await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
+            text, err = await transcribe(audio_path)
+            if text:
+                await enqueue(msg, f"[video_note: {path} | {text}]")
+                return
     await enqueue(msg, f"[video_note: {path}]")
 
 
@@ -580,7 +732,7 @@ async def h_document(msg: types.Message):
         return
     doc = msg.document
     ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
-    path = await download_file(doc.file_id, ext, msg.message_id)
+    path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg))
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[document: {path} ({doc.file_name})]{caption}")
 
@@ -597,7 +749,7 @@ async def h_sticker(msg: types.Message):
 async def h_video(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    path = await download_file(msg.video.file_id, ".mp4", msg.message_id)
+    path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg))
     caption = f"\n{msg.caption}" if msg.caption else ""
     await enqueue(msg, f"[video: {path}]{caption}")
 
@@ -607,8 +759,8 @@ async def h_audio(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
-    path = await download_file(msg.audio.file_id, ext, msg.message_id)
-    name = msg.audio.file_name or "audio"
+    name = msg.audio.file_name or _media_name("audio", ext, msg)
+    path = await download_file(msg.audio.file_id, name)
     await enqueue(msg, f"[audio: {path} ({name})]")
 
 
@@ -621,11 +773,39 @@ async def h_text(msg: types.Message):
 
 # --- Main ---
 
+BOT_START_TIME = None
+
+
+def uptime_str() -> str:
+    if not BOT_START_TIME:
+        return "unknown"
+    delta = int(time.time() - BOT_START_TIME)
+    days, rem = divmod(delta, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 async def main():
+    global BOT_START_TIME
+    BOT_START_TIME = time.time()
     cleanup_media()
     await set_commands()
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL} | Debug={DEBUG}")
     logger.info(f"Allowed: {ALLOWED or 'all'} | Media: {MEDIA_DIR} | Logs: {LOG_DIR}")
+    for uid in ALLOWED:
+        try:
+            await bot.send_message(uid, STRINGS["ru"]["started"])
+        except Exception:
+            pass
     await dp.start_polling(bot)
 
 
