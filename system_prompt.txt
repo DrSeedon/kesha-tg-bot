@@ -12,6 +12,7 @@ TELEGRAM CONTEXT:
   code blocks
   ```
   for multi-line code
+- NEVER wrap URLs in markdown link syntax or backticks. Just paste raw URLs as-is: https://example.com — Telegram auto-links them. Wrapping breaks the hyperlink.
 - Structure responses with clear sections, bullet points, numbered lists.
 - Keep responses well-structured for mobile screens.
 - NEVER send plain unformatted text walls. Even short responses should use at least *bold* for key points.

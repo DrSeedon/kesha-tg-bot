@@ -377,6 +377,7 @@ def split_msg(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
 _pending: dict[int, list[dict]] = {}
 _pending_timers: dict[int, asyncio.Task] = {}
 _processing: set[int] = set()
+_cancel: set[int] = set()
 _queue: dict[int, list[list[dict]]] = {}
 
 
@@ -527,7 +528,10 @@ async def _ask(message: types.Message, prompt: str):
         if len(text) == last_draft_len:
             return
         try:
-            await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text[:TG_MSG_LIMIT]))
+            if current_msg and current_is_tool:
+                await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+            else:
+                await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text[:TG_MSG_LIMIT]))
         except Exception as e:
             logger.debug(f"Draft update error: {e}")
         last_draft_time = now
@@ -570,6 +574,11 @@ async def _ask(message: types.Message, prompt: str):
     while retries <= MAX_RETRIES:
         try:
             async for chunk in claude.send_message(prompt):
+                if cid in _cancel:
+                    _cancel.discard(cid)
+                    if parts:
+                        parts.append("\n\n_(stopped)_")
+                    break
                 ct = chunk["type"]
                 if ct == "text_delta":
                     if not has_deltas and current_msg and current_is_tool:
@@ -844,6 +853,18 @@ async def h_restart(msg: types.Message):
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await p.communicate()
+
+
+@dp.message(Command("stop"))
+async def h_stop(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    cid = msg.chat.id
+    if cid in _processing:
+        _cancel.add(cid)
+        await _send_safe(msg, "Stopping current request...")
+    else:
+        await _send_safe(msg, "Nothing to stop.")
 
 
 @dp.message(F.voice)
