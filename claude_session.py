@@ -57,13 +57,15 @@ class ClaudeSession:
         SESSION_FILE.write_text(self.session_id or "")
 
     def _make_options(self) -> ClaudeAgentOptions:
+        model = self.model
+        if "[1m]" not in model:
+            model = f"{model}[1m]"
         options = ClaudeAgentOptions(
-            model=self.model,
+            model=model,
             cwd=self.cwd,
             max_turns=25,
             permission_mode="bypassPermissions",
             include_partial_messages=True,
-            betas=["context-1m-2025-08-07"],
         )
         if self.system_prompt:
             options.system_prompt = self.system_prompt
