@@ -32,8 +32,8 @@ DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
 DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 TG_MSG_LIMIT = 4096
-MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media"))
-LOG_DIR = Path(os.getenv("LOG_DIR", "./logs"))
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
+LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
 MEDIA_MAX_AGE_H = 24
 
 # --- Logging ---
@@ -379,6 +379,7 @@ _pending_timers: dict[int, asyncio.Task] = {}
 _processing: set[int] = set()
 _cancel: set[int] = set()
 _queue: dict[int, list[list[dict]]] = {}
+current_batch_message_ids: dict[int, list[int]] = {}
 
 
 def _make_entry(msg: types.Message, prompt: str) -> dict:
@@ -394,6 +395,8 @@ async def _debounce_fire(chat_id: int):
 
     if chat_id in _processing:
         combined = "\n\n".join(e["prompt"] for e in batch)
+        new_ids = [e["msg"].message_id for e in batch]
+        current_batch_message_ids.setdefault(chat_id, []).extend(new_ids)
         logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
         if claude._client and claude._connected:
             try:
@@ -410,15 +413,21 @@ async def _debounce_fire(chat_id: int):
 
 async def _process_batch(chat_id: int, batch: list[dict]):
     _processing.add(chat_id)
+    current_batch_message_ids[chat_id] = [e["msg"].message_id for e in batch]
     try:
         last_msg = batch[-1]["msg"]
+        from datetime import timezone, timedelta
+        krsk = timezone(timedelta(hours=7))
+        batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%H:%M")
+        time_prefix = f"[{batch_time}] "
         if len(batch) == 1:
-            combined = batch[0]["prompt"]
+            combined = time_prefix + batch[0]["prompt"]
         else:
             combined = "\n\n".join(
-                f"--- message {i+1}/{len(batch)} ---\n{e['prompt']}"
+                f"--- message {i+1}/{len(batch)} [msg_id={e['msg'].message_id}] ---\n{e['prompt']}"
                 for i, e in enumerate(batch)
             )
+            combined = time_prefix + combined
 
         previews = []
         for e in batch:
