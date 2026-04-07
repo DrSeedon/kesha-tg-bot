@@ -328,27 +328,31 @@ def _save_cache(cache: dict[str, str]):
 _file_cache: dict[str, str] = _load_cache()
 
 
-async def download_file(file_id: str, name: str, unique_id: str = "") -> str:
+async def download_file(file_id: str, name: str, unique_id: str = "") -> str | None:
     if unique_id and unique_id in _file_cache:
         cached = _file_cache[unique_id]
         if Path(cached).exists():
             logger.info(f"Cache hit: {unique_id} → {Path(cached).name}")
             return cached
         del _file_cache[unique_id]
-    f = await bot.get_file(file_id)
-    path = MEDIA_DIR / name
-    if path.exists():
-        stem = path.stem
-        suffix = path.suffix
-        i = 1
-        while path.exists():
-            path = MEDIA_DIR / f"{stem}_{i}{suffix}"
-            i += 1
-    await bot.download_file(f.file_path, str(path))
-    if unique_id:
-        _file_cache[unique_id] = str(path)
-        _save_cache(_file_cache)
-    return str(path)
+    try:
+        f = await bot.get_file(file_id)
+        path = MEDIA_DIR / name
+        if path.exists():
+            stem = path.stem
+            suffix = path.suffix
+            i = 1
+            while path.exists():
+                path = MEDIA_DIR / f"{stem}_{i}{suffix}"
+                i += 1
+        await bot.download_file(f.file_path, str(path))
+        if unique_id:
+            _file_cache[unique_id] = str(path)
+            _save_cache(_file_cache)
+        return str(path)
+    except Exception as e:
+        logger.warning(f"download_file failed for {name}: {e}")
+        return None
 
 
 def _media_name(prefix: str, ext: str, msg: types.Message) -> str:
@@ -890,6 +894,9 @@ async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
+    if not path:
+        await enqueue(msg, "[voice: файл слишком большой]")
+        return
     await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
     text, err = await transcribe(path)
     if not text:
@@ -908,7 +915,8 @@ async def h_photo_album(messages: list[types.Message]):
     parts = []
     for m in messages:
         path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
-        parts.append(f"[photo: {path}]")
+        tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
+        parts.append(tag)
     caption = ""
     for m in messages:
         if m.caption:
@@ -927,7 +935,8 @@ async def h_video_album(messages: list[types.Message]):
     parts = []
     for m in messages:
         path = await download_file(m.video.file_id, _media_name("video", ".mp4", m), m.video.file_unique_id)
-        parts.append(f"[video: {path}]")
+        tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
+        parts.append(tag)
     caption = ""
     for m in messages:
         if m.caption:
@@ -948,7 +957,8 @@ async def h_document_album(messages: list[types.Message]):
         doc = m.document
         ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
         path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m), doc.file_unique_id)
-        parts.append(f"[document: {path} ({doc.file_name})]")
+        tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
+        parts.append(tag)
     caption = ""
     for m in messages:
         if m.caption:
@@ -965,7 +975,8 @@ async def h_photo(msg: types.Message):
         return
     path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg), msg.photo[-1].file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
-    await enqueue(msg, f"[photo: {path}]{caption}")
+    tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
+    await enqueue(msg, f"{tag}{caption}")
 
 
 @dp.message(F.video_note)
@@ -973,6 +984,9 @@ async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
+    if not path:
+        await enqueue(msg, "[video_note: файл слишком большой]")
+        return
     if DEEPGRAM:
         audio_path = path.replace(".mp4", ".oga")
         p = await asyncio.create_subprocess_exec(
@@ -997,7 +1011,8 @@ async def h_document(msg: types.Message):
     ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
     path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg), doc.file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
-    await enqueue(msg, f"[document: {path} ({doc.file_name})]{caption}")
+    tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
+    await enqueue(msg, f"{tag}{caption}")
 
 
 @dp.message(F.sticker)
@@ -1014,7 +1029,8 @@ async def h_video(msg: types.Message):
         return
     path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg), msg.video.file_unique_id)
     caption = f"\n{msg.caption}" if msg.caption else ""
-    await enqueue(msg, f"[video: {path}]{caption}")
+    tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
+    await enqueue(msg, f"{tag}{caption}")
 
 
 @dp.message(F.audio)
@@ -1024,7 +1040,8 @@ async def h_audio(msg: types.Message):
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
     name = msg.audio.file_name or _media_name("audio", ext, msg)
     path = await download_file(msg.audio.file_id, name, msg.audio.file_unique_id)
-    await enqueue(msg, f"[audio: {path} ({name})]")
+    tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
+    await enqueue(msg, tag)
 
 
 @dp.message(F.text)
@@ -1032,6 +1049,17 @@ async def h_text(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     await enqueue(msg, msg.text)
+
+
+@dp.message()
+async def h_fallback(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    text = msg.text or msg.caption or ""
+    content_type = msg.content_type or "unknown"
+    logger.warning(f"Chat {msg.chat.id}: unhandled message type={content_type}, text={text[:100]}")
+    if text:
+        await enqueue(msg, text)
 
 
 # --- Main ---

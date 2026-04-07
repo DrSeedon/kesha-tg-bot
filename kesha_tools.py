@@ -210,8 +210,50 @@ async def send_voice(args):
         return {"content": [{"type": "text", "text": f"Failed to send voice: {e}"}], "is_error": True}
 
 
+@tool("react", "Set emoji reactions on user messages. Two modes: 1) Pass 'emoji' alone to react to ALL messages in current batch with same emoji. 2) Pass 'reactions' array to set DIFFERENT emojis on different messages: [{\"msg_id\": 123, \"emoji\": \"😂\"}, {\"msg_id\": 456, \"emoji\": \"🔥\"}]. msg_id values come from [msg_id=X] tags in batched messages. Standard emojis only (😂🔥👍🤔💀🫡🦧🤡👀💪🏆✅❤️🥞🦜 etc).", {
+    "emoji": str,
+    "reactions": list,
+})
+async def react(args):
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    try:
+        from aiogram.types import ReactionTypeEmoji
+
+        reaction_list = args.get("reactions")
+        if reaction_list:
+            pairs = reaction_list
+        else:
+            emoji = args.get("emoji", "👍")
+            batch_ids = list(_bot_ref.current_batch_message_ids.get(chat_id, []))
+            if not batch_ids:
+                return {"content": [{"type": "text", "text": "No messages to react to"}], "is_error": True}
+            pairs = [{"msg_id": mid, "emoji": emoji} for mid in batch_ids]
+
+        reacted = []
+        for p in pairs:
+            mid = p.get("msg_id")
+            em = p.get("emoji", "👍")
+            if not mid:
+                continue
+            try:
+                await _bot_ref.bot.set_message_reaction(
+                    chat_id=chat_id, message_id=mid,
+                    reaction=[ReactionTypeEmoji(emoji=em)]
+                )
+                reacted.append(f"{em}→{mid}")
+            except Exception as e:
+                logger.debug(f"React failed for msg {mid} {em}: {e}")
+
+        logger.info(f"Reacted to {len(reacted)} messages: {reacted}")
+        return {"content": [{"type": "text", "text": f"Reacted: {', '.join(reacted)}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"React failed: {e}"}], "is_error": True}
+
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
     tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot,
-           send_photo, send_file, send_video, send_audio, send_voice, schedule_message],
+           send_photo, send_file, send_video, send_audio, send_voice, schedule_message, react],
 )
