@@ -63,6 +63,7 @@ class ClaudeSession:
             max_turns=25,
             permission_mode="bypassPermissions",
             include_partial_messages=True,
+            betas=["context-1m-2025-08-07"],
         )
         if self.system_prompt:
             options.system_prompt = self.system_prompt
