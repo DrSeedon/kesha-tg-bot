@@ -18,23 +18,28 @@ def set_bot_ref(bot_module):
 
 ALLOWED_MODELS = {
     "opus": "claude-opus-4-6",
+    "opus 1m": "claude-opus-4-6",
+    "opus 200k": "claude-opus-4-6",
     "sonnet": "claude-sonnet-4-6",
+    "sonnet 1m": "claude-sonnet-4-6",
+    "sonnet 200k": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
-    "claude-opus-4-6": "claude-opus-4-6",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
 }
 
 
-@tool("set_model", "Change Claude model. Use: opus, sonnet, haiku", {"model": str})
+@tool("set_model", "Change Claude model. Options: opus, sonnet, haiku. Default 1M context. Add '200k' for standard context (e.g. 'sonnet 200k')", {"model": str})
 async def set_model(args):
     name = args["model"].strip().lower()
+    use_200k = "200k" in name
+    name = name.replace("200k", "").replace("1m", "").strip()
     model_id = ALLOWED_MODELS.get(name)
     if not model_id:
-        return {"content": [{"type": "text", "text": f"Unknown model '{name}'. Available: opus, sonnet, haiku"}], "is_error": True}
+        return {"content": [{"type": "text", "text": f"Unknown model '{name}'. Available: opus, sonnet, haiku (+ '200k' for standard context)"}], "is_error": True}
+    _bot_ref.claude.use_1m = not use_200k
     await _bot_ref.claude.set_model_live(model_id)
-    logger.info(f"Model changed to {model_id}")
-    return {"content": [{"type": "text", "text": f"Model changed to {model_id}"}]}
+    ctx = "200K" if use_200k else "1M"
+    logger.info(f"Model changed to {model_id} ({ctx})")
+    return {"content": [{"type": "text", "text": f"Model changed to {model_id} ({ctx} context)"}]}
 
 
 @tool("set_debounce", "Change message debounce delay in seconds (0-30)", {"seconds": int})

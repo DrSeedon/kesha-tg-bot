@@ -43,6 +43,7 @@ class ClaudeSession:
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
         self._got_result = True
+        self.use_1m = True
 
     def _load_session(self) -> Optional[str]:
         if SESSION_FILE.exists():
@@ -58,7 +59,7 @@ class ClaudeSession:
 
     def _make_options(self) -> ClaudeAgentOptions:
         model = self.model
-        if "[1m]" not in model:
+        if self.use_1m and "[1m]" not in model:
             model = f"{model}[1m]"
         options = ClaudeAgentOptions(
             model=model,

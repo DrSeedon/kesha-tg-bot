@@ -844,13 +844,16 @@ async def h_model(msg: types.Message):
     args = msg.text.split(maxsplit=1)
     if len(args) > 1:
         name = args[1].strip().lower()
-        model_id = ALLOWED_MODELS.get(name)
+        use_200k = "200k" in name
+        name_clean = name.replace("200k", "").replace("1m", "").strip()
+        model_id = ALLOWED_MODELS.get(name_clean)
         if not model_id:
-            models_list = ", ".join(["opus", "sonnet", "haiku"])
-            await _send_safe(msg, f"Unknown model. Available: {models_list}")
+            await _send_safe(msg, "Unknown model. Available: opus, sonnet, haiku (+ 200k)")
             return
+        claude.use_1m = not use_200k
         claude.model = model_id
-        await _send_safe(msg, t(msg, "model_set", model=claude.model))
+        ctx = "200K" if use_200k else "1M"
+        await _send_safe(msg, t(msg, "model_set", model=f"{claude.model} ({ctx})"))
     else:
         await _send_safe(msg, t(msg, "model_usage", model=claude.model))
 
