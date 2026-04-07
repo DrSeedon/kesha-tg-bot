@@ -225,7 +225,12 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOW
 dp = Dispatcher()
 def _load_global_mcp() -> dict:
     servers = {"kesha": kesha_server}
-    for path in [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]:
+    sources = [
+        Path.home() / ".claude.json",
+        Path.home() / ".claude" / "settings.json",
+        Path(WORK_DIR) / ".mcp.json",
+    ]
+    for path in sources:
         if path.exists():
             try:
                 data = json.loads(path.read_text())
