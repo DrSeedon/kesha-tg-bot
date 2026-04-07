@@ -75,14 +75,19 @@ class ClaudeSession:
     async def _ensure_connected(self, prompt: str):
         if self._client and self._connected:
             if not self._got_result:
-                logger.info("Waiting for previous result before new query...")
-                async for msg in self._client.receive_messages():
-                    if isinstance(msg, ResultMessage):
-                        self._got_result = True
-                        break
-            self._got_result = False
-            await self._client.query(prompt)
-            return
+                logger.info("Draining previous response...")
+                try:
+                    async for msg in self._client.receive_messages():
+                        logger.debug(f"Drain: {type(msg).__name__}")
+                        if isinstance(msg, ResultMessage):
+                            break
+                except Exception as e:
+                    logger.warning(f"Drain error: {e}, reconnecting...")
+                    self._connected = False
+            if self._connected:
+                self._got_result = False
+                await self._client.query(prompt)
+                return
 
         if self._client:
             try:
@@ -157,6 +162,10 @@ class ClaudeSession:
             self._connected = False
             self._client = None
             yield {"type": "error", "content": str(e)}
+
+        if not self._got_result:
+            logger.warning("No ResultMessage received — connection may be stale, marking for reconnect")
+            self._connected = False
 
     async def interrupt(self):
         if self._client and self._connected:
