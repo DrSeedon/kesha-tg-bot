@@ -57,11 +57,8 @@ class ClaudeSession:
         SESSION_FILE.write_text(self.session_id or "")
 
     def _make_options(self) -> ClaudeAgentOptions:
-        model = self.model
-        if "[1m]" not in model:
-            model = f"{model}[1m]"
         options = ClaudeAgentOptions(
-            model=model,
+            model=self.model,
             cwd=self.cwd,
             max_turns=25,
             permission_mode="bypassPermissions",
