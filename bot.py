@@ -649,8 +649,8 @@ async def _ask(message: types.Message, prompt: str):
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
-                        logger.warning(f"Session error, resetting: {err}")
-                        claude.reset()
+                        logger.warning(f"Session error, reconnecting: {err}")
+                        claude.reconnect()
                         retries += 1
                         if retries <= MAX_RETRIES:
                             await _send_safe(message, t(message, "reconnecting", n=retries))
@@ -661,7 +661,7 @@ async def _ask(message: types.Message, prompt: str):
             logger.error(f"Error: {e}", exc_info=True)
             retries += 1
             if retries <= MAX_RETRIES:
-                claude.reset()
+                claude.reconnect()
                 await _send_safe(message, t(message, "error_retry", n=retries))
             else:
                 parts.append(f"Error: {e}")

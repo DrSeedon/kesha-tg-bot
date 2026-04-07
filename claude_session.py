@@ -192,14 +192,18 @@ class ClaudeSession:
                 logger.error(f"get_context_usage error: {e}")
         return None
 
-    def reset(self):
-        self.session_id = None
-        self._save_session()
+    def reconnect(self):
         self._connected = False
         if self._client:
             asyncio.create_task(self._safe_disconnect())
             self._client = None
-        logger.info("Session reset")
+        logger.info("Session reconnecting (keeping session_id)")
+
+    def reset(self):
+        self.session_id = None
+        self._save_session()
+        self.reconnect()
+        logger.info("Session reset (cleared session_id)")
 
     async def _safe_disconnect(self):
         try:
