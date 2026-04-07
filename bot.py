@@ -223,11 +223,26 @@ def log_size() -> str:
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
+def _load_global_mcp() -> dict:
+    servers = {"kesha": kesha_server}
+    for path in [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                for name, cfg in data.get("mcpServers", {}).items():
+                    if name not in servers:
+                        servers[name] = cfg
+            except Exception:
+                pass
+    logger.info(f"MCP servers loaded: {list(servers.keys())}")
+    return servers
+
+
 claude = ClaudeSession(
     cwd=WORK_DIR,
     model=MODEL,
     system_prompt=load_system_prompt(),
-    mcp_servers={"kesha": kesha_server},
+    mcp_servers=_load_global_mcp(),
 )
 
 import sys
