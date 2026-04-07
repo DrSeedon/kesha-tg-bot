@@ -102,6 +102,7 @@ STRINGS = {
             "⏱ Дебаунс: `{debounce}s`\n"
             "🐛 Debug: `{debug}`\n"
             "⏳ Аптайм: `{uptime}`\n"
+            "🧠 Контекст: `{context}`\n"
             "📊 Rate limit: `{rate_limit}`\n"
             "💰 Стоимость сессии: `${cost}`\n"
             "📁 Медиа: `{media_count}` файлов\n"
@@ -154,6 +155,7 @@ STRINGS = {
             "⏱ Debounce: `{debounce}s`\n"
             "🐛 Debug: `{debug}`\n"
             "⏳ Uptime: `{uptime}`\n"
+            "🧠 Context: `{context}`\n"
             "📊 Rate limit: `{rate_limit}`\n"
             "💰 Session cost: `${cost}`\n"
             "📁 Media: `{media_count}` files\n"
@@ -792,6 +794,11 @@ async def h_status(msg: types.Message):
         rl_str = f"{rl.get('status', '?')} ({rl.get('type', '?')}){util_str}"
     else:
         rl_str = "n/a"
+    ctx = await claude.get_context_usage()
+    if ctx:
+        ctx_str = f"{ctx['percentage']:.0f}% ({ctx['totalTokens']}/{ctx['maxTokens']})"
+    else:
+        ctx_str = "n/a"
     await _send_safe(msg, t(msg, "status",
         model=claude.model,
         session=sid[:8] + "..." if sid else "none",
@@ -799,6 +806,7 @@ async def h_status(msg: types.Message):
         debounce=DEBOUNCE_SEC,
         debug="on" if DEBUG else "off",
         uptime=uptime_str(),
+        context=ctx_str,
         rate_limit=rl_str,
         cost=f"{claude.total_cost_usd:.4f}",
         media_count=media_count(),
@@ -819,13 +827,29 @@ async def h_ping(msg: types.Message):
     await _send_safe(msg, t(msg, "ping", session=claude.session_id or "none"))
 
 
+ALLOWED_MODELS = {
+    "opus": "claude-opus-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+    "claude-opus-4-6": "claude-opus-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+}
+
+
 @dp.message(Command("model"))
 async def h_model(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     args = msg.text.split(maxsplit=1)
     if len(args) > 1:
-        claude.model = args[1].strip()
+        name = args[1].strip().lower()
+        model_id = ALLOWED_MODELS.get(name)
+        if not model_id:
+            models_list = ", ".join(["opus", "sonnet", "haiku"])
+            await _send_safe(msg, f"Unknown model. Available: {models_list}")
+            return
+        claude.model = model_id
         await _send_safe(msg, t(msg, "model_set", model=claude.model))
     else:
         await _send_safe(msg, t(msg, "model_usage", model=claude.model))

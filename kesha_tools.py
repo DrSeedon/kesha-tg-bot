@@ -16,12 +16,25 @@ def set_bot_ref(bot_module):
     _bot_ref = bot_module
 
 
-@tool("set_model", "Change Claude model for this bot", {"model": str})
+ALLOWED_MODELS = {
+    "opus": "claude-opus-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+    "claude-opus-4-6": "claude-opus-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+}
+
+
+@tool("set_model", "Change Claude model. Use: opus, sonnet, haiku", {"model": str})
 async def set_model(args):
-    model = args["model"]
-    await _bot_ref.claude.set_model_live(model)
-    logger.info(f"Model changed to {model}")
-    return {"content": [{"type": "text", "text": f"Model changed to {model}"}]}
+    name = args["model"].strip().lower()
+    model_id = ALLOWED_MODELS.get(name)
+    if not model_id:
+        return {"content": [{"type": "text", "text": f"Unknown model '{name}'. Available: opus, sonnet, haiku"}], "is_error": True}
+    await _bot_ref.claude.set_model_live(model_id)
+    logger.info(f"Model changed to {model_id}")
+    return {"content": [{"type": "text", "text": f"Model changed to {model_id}"}]}
 
 
 @tool("set_debounce", "Change message debounce delay in seconds (0-30)", {"seconds": int})
