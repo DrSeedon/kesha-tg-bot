@@ -42,6 +42,7 @@ class ClaudeSession:
         self.last_stop_reason: Optional[str] = None
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
+        self._got_result = True
 
     def _load_session(self) -> Optional[str]:
         if SESSION_FILE.exists():
@@ -73,6 +74,13 @@ class ClaudeSession:
 
     async def _ensure_connected(self, prompt: str):
         if self._client and self._connected:
+            if not self._got_result:
+                logger.info("Waiting for previous result before new query...")
+                async for msg in self._client.receive_messages():
+                    if isinstance(msg, ResultMessage):
+                        self._got_result = True
+                        break
+            self._got_result = False
             await self._client.query(prompt)
             return
 
@@ -124,6 +132,7 @@ class ClaudeSession:
                     self.last_stop_reason = getattr(msg, 'stop_reason', None)
                     dur_s = self.last_duration_ms / 1000
                     logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
+                    self._got_result = True
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
                     break
