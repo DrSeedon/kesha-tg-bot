@@ -1,4 +1,4 @@
-"""Claude session via ClaudeSDKClient — persistent connection with interrupt support."""
+"""Claude session via ClaudeSDKClient — persistent connection with receive_response()."""
 
 import asyncio
 import logging
@@ -42,7 +42,6 @@ class ClaudeSession:
         self.last_stop_reason: Optional[str] = None
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
-        self._got_result = True
         self.use_1m = True
 
     def _load_session(self) -> Optional[str]:
@@ -76,33 +75,31 @@ class ClaudeSession:
             options.resume = self.session_id
         return options
 
-    async def _ensure_connected(self, prompt: str):
+    async def _ensure_connected(self):
+        if self._client and self._connected:
+            return
         if self._client:
             try:
                 await self._client.disconnect()
             except Exception:
                 pass
-            self._client = None
-
         options = self._make_options()
         self._client = ClaudeSDKClient(options=options)
-
         if self.session_id:
             logger.info(f"Connecting with resume {self.session_id[:8]}...")
         else:
             logger.info("Connecting new session...")
-
-        await self._client.connect(prompt)
+        await self._client.connect()
         self._connected = True
-        self._got_result = False
 
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
 
         try:
-            await self._ensure_connected(text)
+            await self._ensure_connected()
+            await self._client.query(text)
 
-            async for msg in self._client.receive_messages():
+            async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
@@ -127,10 +124,8 @@ class ClaudeSession:
                     self.last_stop_reason = getattr(msg, 'stop_reason', None)
                     dur_s = self.last_duration_ms / 1000
                     logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
-                    self._got_result = True
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
-                    break
                 elif isinstance(msg, StreamEvent):
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
@@ -153,9 +148,13 @@ class ClaudeSession:
             self._client = None
             yield {"type": "error", "content": str(e)}
 
-        if not self._got_result:
-            logger.warning("No ResultMessage received — connection may be stale, marking for reconnect")
-            self._connected = False
+    async def inject(self, text: str):
+        if self._client and self._connected:
+            try:
+                await self._client.query(text)
+                logger.info(f"Injected: {text[:80]}...")
+            except Exception as e:
+                logger.error(f"Inject error: {e}")
 
     async def interrupt(self):
         if self._client and self._connected:

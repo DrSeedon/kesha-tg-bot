@@ -424,14 +424,7 @@ async def _debounce_fire(chat_id: int):
         new_ids = [e["msg"].message_id for e in batch]
         current_batch_message_ids.setdefault(chat_id, []).extend(new_ids)
         logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
-        if claude._client and claude._connected:
-            try:
-                await claude._client.query(combined)
-            except Exception as e:
-                logger.error(f"Inject error: {e}")
-                _queue.setdefault(chat_id, []).append(batch)
-        else:
-            _queue.setdefault(chat_id, []).append(batch)
+        await claude.inject(combined)
         return
 
     await _process_batch(chat_id, batch)
