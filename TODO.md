@@ -21,6 +21,8 @@
 - [x] Context usage через client.get_context_usage()
 - [x] /stop — мягкий interrupt с сохранением текста
 - [x] Deepgram cost logging
+- [x] Fix stale response buffer — receive_messages() + ResultMessage counting
+- [x] Injection turn separation — каждый turn в отдельном TG бабле
 
 ## Open
 - [ ] Inline кнопки для частых действий

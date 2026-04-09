@@ -1,4 +1,4 @@
-"""Claude session via ClaudeSDKClient — persistent connection with receive_response()."""
+"""Claude session via ClaudeSDKClient — persistent connection with injection support."""
 
 import asyncio
 import logging
@@ -43,6 +43,8 @@ class ClaudeSession:
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
         self.use_1m = True
+        self._expected_results = 0
+        self._is_processing = False
 
     def _load_session(self) -> Optional[str]:
         if SESSION_FILE.exists():
@@ -98,8 +100,10 @@ class ClaudeSession:
         try:
             await self._ensure_connected()
             await self._client.query(text)
+            self._expected_results = 1
+            self._is_processing = True
 
-            async for msg in self._client.receive_response():
+            async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
@@ -126,6 +130,11 @@ class ClaudeSession:
                     logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
                     if msg.is_error and msg.result:
                         yield {"type": "error", "content": str(msg.result)}
+                    self._expected_results -= 1
+                    if self._expected_results <= 0:
+                        break
+                    else:
+                        yield {"type": "turn_done"}
                 elif isinstance(msg, StreamEvent):
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
@@ -147,12 +156,15 @@ class ClaudeSession:
             self._connected = False
             self._client = None
             yield {"type": "error", "content": str(e)}
+        finally:
+            self._is_processing = False
 
     async def inject(self, text: str):
-        if self._client and self._connected:
+        if self._client and self._connected and self._is_processing:
             try:
                 await self._client.query(text)
-                logger.info(f"Injected: {text[:80]}...")
+                self._expected_results += 1
+                logger.info(f"Injected (expect {self._expected_results} results): {text[:80]}...")
             except Exception as e:
                 logger.error(f"Inject error: {e}")
 

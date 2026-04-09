@@ -659,6 +659,9 @@ async def _ask(message: types.Message, prompt: str):
                             finalized.append(current_msg.message_id)
                         current_msg = await message.answer(tool_text, parse_mode=None)
                         current_is_tool = True
+                elif ct == "turn_done":
+                    if parts:
+                        await _finalize_current_text()
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():

@@ -4,6 +4,8 @@
 
 # Kesha TG Bot
 
+**v1.1.0** | [Changelog](CHANGELOG.md)
+
 Telegram bot powered by **Claude Agent SDK** (official Anthropic SDK). A full Claude Code CLI experience, but through Telegram.
 
 *[Русский](#русский) ниже.*
@@ -105,7 +107,7 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 ```
 
 - `bot.py` — handlers, native draft streaming, debounce, media cache, album support, i18n
-- `claude_session.py` — SDK wrapper with resume, streaming, rate limit tracking
+- `claude_session.py` — SDK wrapper with resume, streaming, injection, rate limit tracking
 - `kesha_tools.py` — MCP tools (send_photo, send_file, schedule_message, self-config)
 - `system_prompt.txt` — Claude's TG context and formatting rules
 - `setup_wizard.py` — interactive first-run configuration
