@@ -77,27 +77,12 @@ class ClaudeSession:
         return options
 
     async def _ensure_connected(self, prompt: str):
-        if self._client and self._connected:
-            if not self._got_result:
-                logger.info("Draining previous response...")
-                try:
-                    async for msg in self._client.receive_messages():
-                        logger.debug(f"Drain: {type(msg).__name__}")
-                        if isinstance(msg, ResultMessage):
-                            break
-                except Exception as e:
-                    logger.warning(f"Drain error: {e}, reconnecting...")
-                    self._connected = False
-            if self._connected:
-                self._got_result = False
-                await self._client.query(prompt)
-                return
-
         if self._client:
             try:
                 await self._client.disconnect()
             except Exception:
                 pass
+            self._client = None
 
         options = self._make_options()
         self._client = ClaudeSDKClient(options=options)
@@ -109,6 +94,7 @@ class ClaudeSession:
 
         await self._client.connect(prompt)
         self._connected = True
+        self._got_result = False
 
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
