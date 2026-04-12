@@ -434,6 +434,7 @@ _pending_timers: dict[int, asyncio.Task] = {}
 _processing: set[int] = set()
 _cancel: set[int] = set()
 _queue: dict[int, list[list[dict]]] = {}
+_pending_transcriptions: dict[int, int] = {}  # chat_id -> count of pending transcriptions
 current_batch_message_ids: dict[int, list[int]] = {}
 
 
@@ -441,8 +442,18 @@ def _make_entry(msg: types.Message, prompt: str) -> dict:
     return {"msg": msg, "prompt": prompt}
 
 
+TRANSCRIPTION_WAIT_MAX = 30  # max seconds to wait for pending transcriptions
+
+
 async def _debounce_fire(chat_id: int):
     await asyncio.sleep(DEBOUNCE_SEC)
+    # Wait for pending transcriptions (voice/video_note being transcribed)
+    waited = 0
+    while _pending_transcriptions.get(chat_id, 0) > 0 and waited < TRANSCRIPTION_WAIT_MAX:
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    if waited > 0:
+        logger.info(f"Chat {chat_id}: waited {waited:.1f}s for transcriptions")
     batch = _pending.pop(chat_id, [])
     _pending_timers.pop(chat_id, None)
     if not batch:
@@ -955,12 +966,17 @@ async def h_stop(msg: types.Message):
 async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    chat_id = msg.chat.id
     path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
     if not path:
         await enqueue(msg, "[voice: файл слишком большой]")
         return
-    await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
-    text, err = await transcribe(path, msg.voice.file_unique_id or "")
+    _pending_transcriptions[chat_id] = _pending_transcriptions.get(chat_id, 0) + 1
+    await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    try:
+        text, err = await transcribe(path, msg.voice.file_unique_id or "")
+    finally:
+        _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
     if not text:
         err_msg = t(msg, "voice_fail")
         if err:
@@ -1045,11 +1061,13 @@ async def h_photo(msg: types.Message):
 async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    chat_id = msg.chat.id
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if not path:
         await enqueue(msg, "[video_note: файл слишком большой]")
         return
     if DEEPGRAM:
+        _pending_transcriptions[chat_id] = _pending_transcriptions.get(chat_id, 0) + 1
         audio_path = path.replace(".mp4", ".oga")
         p = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", path, "-vn", "-acodec", "libopus", "-y", audio_path,
@@ -1057,11 +1075,16 @@ async def h_video_note(msg: types.Message):
         )
         await p.communicate()
         if p.returncode == 0:
-            await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
-            text, err = await transcribe(audio_path, msg.video_note.file_unique_id or "")
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            try:
+                text, err = await transcribe(audio_path, msg.video_note.file_unique_id or "")
+            finally:
+                _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
             if text:
                 await enqueue(msg, f"[video_note: {path} | {text}]")
                 return
+        else:
+            _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
     await enqueue(msg, f"[video_note: {path}]")
 
 
