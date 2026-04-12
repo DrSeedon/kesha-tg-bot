@@ -228,7 +228,7 @@ async def send_voice(args):
         return {"content": [{"type": "text", "text": f"Failed to send voice: {e}"}], "is_error": True}
 
 
-@tool("react", "Set emoji reactions on user messages. Two modes: 1) Pass 'emoji' alone to react to ALL messages in current batch with same emoji. 2) Pass 'reactions' array to set DIFFERENT emojis on different messages: [{\"msg_id\": 123, \"emoji\": \"😂\"}, {\"msg_id\": 456, \"emoji\": \"🔥\"}]. msg_id values come from [msg_id=X] tags in batched messages. Standard emojis only (😂🔥👍🤔💀🫡🦧🤡👀💪🏆✅❤️🥞🦜 etc).", {
+@tool("react", "Set emoji reaction on specific messages. REQUIRED: pass 'reactions' array with msg_id and emoji: [{\"msg_id\": 123, \"emoji\": \"😂\"}]. msg_id from [msg_id=X] tags. If reactions is empty or missing msg_id — returns error, does NOT react to all.", {
     "emoji": str,
     "reactions": list,
 })
@@ -241,13 +241,11 @@ async def react(args):
 
         reaction_list = args.get("reactions")
         if reaction_list:
-            pairs = reaction_list
+            pairs = [r for r in reaction_list if r.get("msg_id")]
         else:
-            emoji = args.get("emoji", "👍")
-            batch_ids = list(_bot_ref.current_batch_message_ids.get(chat_id, []))
-            if not batch_ids:
-                return {"content": [{"type": "text", "text": "No messages to react to"}], "is_error": True}
-            pairs = [{"msg_id": mid, "emoji": emoji} for mid in batch_ids]
+            pairs = []
+        if not pairs:
+            return {"content": [{"type": "text", "text": "No reactions: provide reactions array with msg_id. Empty array = no action."}], "is_error": True}
 
         reacted = []
         for p in pairs:
