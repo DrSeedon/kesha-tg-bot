@@ -303,7 +303,32 @@ async def typing_loop(chat_id: int):
             break
 
 
-async def transcribe(path: str) -> tuple[str, str | None]:
+TRANSCRIPTION_CACHE_FILE = MEDIA_DIR / ".transcription_cache.json"
+_transcription_cache: dict[str, str] = {}
+
+
+def _load_transcription_cache() -> dict[str, str]:
+    if TRANSCRIPTION_CACHE_FILE.exists():
+        try:
+            return json.loads(TRANSCRIPTION_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_transcription_cache():
+    TRANSCRIPTION_CACHE_FILE.write_text(json.dumps(_transcription_cache, ensure_ascii=False))
+
+
+_transcription_cache = _load_transcription_cache()
+
+
+async def transcribe(path: str, unique_id: str = "") -> tuple[str, str | None]:
+    if unique_id and unique_id in _transcription_cache:
+        cached = _transcription_cache[unique_id]
+        logger.info(f"Transcription cache hit: {unique_id} ({len(cached)} chars)")
+        return cached, None
+
     p = await asyncio.create_subprocess_exec(
         "curl", "-s", "--request", "POST",
         "--url", "https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true",
@@ -323,6 +348,10 @@ async def transcribe(path: str) -> tuple[str, str | None]:
         duration = data.get("metadata", {}).get("duration", 0)
         cost = duration / 60 * 0.0043
         logger.info(f"Deepgram: {duration:.1f}s, ${cost:.4f}, {len(text)} chars")
+        if unique_id and text:
+            _transcription_cache[unique_id] = text
+            _save_transcription_cache()
+            logger.info(f"Transcription cached: {unique_id}")
         return text, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         raw = out.decode(errors="replace")[:200]
@@ -574,32 +603,23 @@ async def _ask(message: types.Message, prompt: str):
         last_draft_len = len(text)
 
     async def _finalize_current_text():
-        """Send current text parts as real message, freeze it, reset state."""
+        """Delete draft/stream msg and send clean new one with proper formatting."""
         nonlocal current_msg, current_is_tool, parts, has_deltas, draft_id, last_draft_time, last_draft_len
         text = "".join(parts)
         if not text:
             return
-        await _clear_draft(cid, draft_id)
-        if current_msg and current_is_tool:
-            # Reuse tool message — edit it to text with markdown
+        # Delete the old draft/stream message
+        if current_msg:
             try:
-                await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id)
-            except Exception:
-                try:
-                    await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-                except Exception:
-                    pass
-            finalized.append(current_msg.message_id)
+                await bot.delete_message(chat_id=cid, message_id=current_msg.message_id)
+            except Exception as e:
+                logger.debug(f"Could not delete draft msg: {e}")
             current_msg = None
-        else:
-            # No existing msg or current is already text — send new
-            if current_msg:
-                finalized.append(current_msg.message_id)
-                current_msg = None
-            for p in split_msg(text):
-                m = await _send_safe(message, p)
-                if m:
-                    finalized.append(m.message_id)
+        # Send clean new message with proper markdown formatting
+        for p in split_msg(text):
+            m = await _send_safe(message, p)
+            if m:
+                finalized.append(m.message_id)
         parts = []
         has_deltas = False
         current_is_tool = False
@@ -692,7 +712,6 @@ async def _ask(message: types.Message, prompt: str):
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
     if text:
-        await _clear_draft(cid, draft_id)
         if current_msg and current_is_tool:
             # Text after last tool — replace tool msg with final text
             if len(text) <= TG_MSG_LIMIT:
@@ -941,7 +960,7 @@ async def h_voice(msg: types.Message):
         await enqueue(msg, "[voice: файл слишком большой]")
         return
     await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
-    text, err = await transcribe(path)
+    text, err = await transcribe(path, msg.voice.file_unique_id or "")
     if not text:
         err_msg = t(msg, "voice_fail")
         if err:
@@ -1039,7 +1058,7 @@ async def h_video_note(msg: types.Message):
         await p.communicate()
         if p.returncode == 0:
             await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
-            text, err = await transcribe(audio_path)
+            text, err = await transcribe(audio_path, msg.video_note.file_unique_id or "")
             if text:
                 await enqueue(msg, f"[video_note: {path} | {text}]")
                 return
