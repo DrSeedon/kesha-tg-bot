@@ -267,20 +267,28 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
         logger.error(f"Failed to fire reminder #{rid}: {e}", exc_info=True)
 
 
+_urgent_llm_handler = None
+
+
+def set_urgent_llm_handler(handler):
+    """Set callback: async handler(chat_id, prompt) that runs through normal _ask pipeline."""
+    global _urgent_llm_handler
+    _urgent_llm_handler = handler
+
+
 async def _run_urgent_llm(payload: str, chat_id: int, claude, bot):
-    """Trigger Claude with a system reminder when bot is idle. Bypasses normal _ask flow — sends raw to chat."""
-    try:
-        async for chunk in claude.send_message(payload):
-            if chunk.get("type") in ("text", "text_delta"):
-                pass
-        if claude.last_stop_reason:
-            pass
-    except Exception as e:
-        logger.error(f"urgent_llm Claude run failed, falling back to plain: {e}")
+    """Trigger Claude via normal bot pipeline (enqueue-like) so response goes to TG."""
+    if _urgent_llm_handler:
         try:
-            await bot.send_message(chat_id, f"⏰ {payload}")
-        except Exception:
-            pass
+            await _urgent_llm_handler(chat_id, payload)
+            return
+        except Exception as e:
+            logger.error(f"urgent_llm handler failed, falling back to plain: {e}")
+    # Fallback: send raw text
+    try:
+        await bot.send_message(chat_id, f"⏰ {payload}")
+    except Exception:
+        pass
 
 
 def get_lazy_block_for_prompt(chat_id: int) -> str:

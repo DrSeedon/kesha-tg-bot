@@ -1192,6 +1192,38 @@ async def main():
         except Exception:
             pass
 
+    async def _urgent_llm_handler(chat_id: int, prompt: str):
+        """Handle urgent_llm reminders through normal _ask pipeline."""
+        last_msg_id = None
+        try:
+            # Get the latest message in chat to use as reply anchor
+            # We create a minimal fake-like approach: just run _ask with prompt
+            # But _ask needs a Message object. Instead, send prompt through enqueue-like path.
+            from datetime import timezone as tz, timedelta as td
+            krsk = tz(td(hours=7))
+            now_str = datetime.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
+            full_prompt = f"[{now_str}] " + prompt
+
+            _processing.add(chat_id)
+            current_batch_message_ids[chat_id] = []
+            try:
+                # We need a Message to reply to — get chat info and use send_message directly via _ask
+                # Simplest: use bot.send_message to send a typing action, then stream
+                await bot.send_chat_action(chat_id, "typing")
+                # Create a temporary message we can use as anchor
+                tmp = await bot.send_message(chat_id, "💭")
+                await _ask(tmp, full_prompt)
+            finally:
+                _processing.discard(chat_id)
+        except Exception as e:
+            logger.error(f"urgent_llm handler error: {e}", exc_info=True)
+            try:
+                await bot.send_message(chat_id, f"⏰ {prompt}", parse_mode=None)
+            except Exception:
+                pass
+
+    _reminders.set_urgent_llm_handler(_urgent_llm_handler)
+
     try:
         await _reminders.deliver_missed_on_startup(bot, claude, ALLOWED)
     except Exception as e:
