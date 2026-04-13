@@ -1199,9 +1199,9 @@ async def main():
             # Get the latest message in chat to use as reply anchor
             # We create a minimal fake-like approach: just run _ask with prompt
             # But _ask needs a Message object. Instead, send prompt through enqueue-like path.
-            from datetime import timezone as tz, timedelta as td
+            from datetime import datetime as dt, timezone as tz, timedelta as td
             krsk = tz(td(hours=7))
-            now_str = datetime.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
+            now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
             full_prompt = f"[{now_str}] " + prompt
 
             _processing.add(chat_id)
