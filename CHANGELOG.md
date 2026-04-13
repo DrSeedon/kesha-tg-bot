@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.0 — 2026-04-13
+
+### Added
+- **Reminders system** (`reminders.py`) — SQLite-backed persistent reminders with 3 types:
+  - `plain` — bot sends raw text at the time, no LLM
+  - `urgent_llm` — at the time, Claude is triggered (via inject if busy, new turn if idle) to formulate and send the reminder
+  - `lazy_llm` — silent at fire time; injected into the next user prompt as context
+- **Universal repeat**: `repeat_interval` (`30m`/`2h`/`1d`/`1w`/`3mo`) + optional `repeat_at_time` (`HH:MM`) for daily/weekly alignment.
+- **Lazy TTL**: `lazy_llm` reminders not delivered within 24h auto-promote to `urgent_llm`.
+- **Missed delivery on startup**: groups missed reminders by type and dispatches accordingly (plain → digest, urgent_llm → Claude turn, lazy_llm → mark fired for next user message).
+- **MCP tools**: `create_reminder`, `list_reminders`, `cancel_reminder`, `update_reminder`.
+- **Time prefix in prompts**: every prompt now starts with `[YYYY-MM-DD HH:MM +0700]` so Claude has accurate current time in user's timezone (Krsk UTC+7).
+
+### Removed
+- `schedule_message` MCP tool — replaced by `create_reminder` (persistent across restarts, supports repeat/cancel/update).
+
+### Changed
+- `system_prompt.txt` — added TIME & TIMEZONE and REMINDERS sections explaining the 3 types and how to interpret fired reminder blocks.
+- `requirements.txt` — added `python-dateutil` for `relativedelta` (correct month arithmetic).
+
 ## v1.1.0 — 2026-04-09
 
 ### Fixed

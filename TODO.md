@@ -23,6 +23,7 @@
 - [x] Deepgram cost logging
 - [x] Fix stale response buffer — receive_messages() + ResultMessage counting
 - [x] Injection turn separation — каждый turn в отдельном TG бабле
+- [x] Reminders system — SQLite + 3 типа (plain/urgent_llm/lazy_llm), repeat (30m/2h/1d/1w/3mo + HH:MM align), lazy TTL 24h promotion, missed-on-startup delivery
 
 ## Open
 - [ ] Inline кнопки для частых действий

@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 from claude_session import ClaudeSession
 from kesha_tools import kesha_server, set_bot_ref
+import reminders as _reminders
 
 load_dotenv()
 
@@ -477,7 +478,7 @@ async def _process_batch(chat_id: int, batch: list[dict]):
         last_msg = batch[-1]["msg"]
         from datetime import timezone, timedelta
         krsk = timezone(timedelta(hours=7))
-        batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%H:%M")
+        batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%Y-%m-%d %H:%M %z")
         time_prefix = f"[{batch_time}] "
         if len(batch) == 1:
             combined = time_prefix + batch[0]["prompt"]
@@ -487,6 +488,14 @@ async def _process_batch(chat_id: int, batch: list[dict]):
                 for i, e in enumerate(batch)
             )
             combined = time_prefix + combined
+
+        try:
+            lazy_block = _reminders.get_lazy_block_for_prompt(chat_id)
+            if lazy_block:
+                combined = lazy_block + combined
+                logger.info(f"Chat {chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
+        except Exception as e:
+            logger.error(f"Lazy reminder injection failed: {e}")
 
         previews = []
         for e in batch:
@@ -1182,6 +1191,13 @@ async def main():
             await bot.send_message(uid, STRINGS["ru"]["started"])
         except Exception:
             pass
+
+    try:
+        await _reminders.deliver_missed_on_startup(bot, claude, ALLOWED)
+    except Exception as e:
+        logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
+    asyncio.create_task(_reminders.reminder_loop(bot, claude, ALLOWED))
+
     await dp.start_polling(bot)
 
 

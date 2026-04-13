@@ -2,9 +2,12 @@
 
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
+
+import reminders as _rem
 
 logger = logging.getLogger("kesha.tools")
 
@@ -143,30 +146,92 @@ async def send_file(args):
         return {"content": [{"type": "text", "text": f"Failed to send file: {e}"}], "is_error": True}
 
 
-@tool("schedule_message", "Schedule a message to be sent after a delay", {"message": str, "delay_seconds": int})
-async def schedule_message(args):
-    message = args["message"]
-    delay = args["delay_seconds"]
+@tool(
+    "create_reminder",
+    "Create reminder. when_iso: ISO datetime in UTC (e.g. '2026-04-11T09:00:00+00:00'). "
+    "type: 'plain' (raw text at time, no LLM), 'urgent_llm' (Claude formulates and sends at time), "
+    "'lazy_llm' (silent until user writes — then injected into next prompt). "
+    "repeat_interval optional: '30m'/'2h'/'1d'/'1w'/'3mo'. "
+    "repeat_at_time optional: 'HH:MM' (Krsk +07) to align repeats to specific time of day.",
+    {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
+)
+async def create_reminder(args):
     chat_id = next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
-    if delay < 1 or delay > 86400:
-        return {"content": [{"type": "text", "text": "Delay must be 1-86400 seconds (max 24h)"}], "is_error": True}
+    try:
+        text = args["text"]
+        when_iso = args["when_iso"]
+        type_ = args["type"]
+        rep_int = args.get("repeat_interval") or None
+        rep_at = args.get("repeat_at_time") or None
+        due = _rem.parse_iso(when_iso)
+        rid = _rem.get_db().create(chat_id, text, due, type_, rep_int, rep_at)
+        local = due.astimezone(_rem.KRSK_TZ).strftime("%Y-%m-%d %H:%M %z")
+        rep_str = f", repeat={rep_int}" + (f"@{rep_at}" if rep_at else "") if rep_int else ""
+        logger.info(f"Reminder #{rid} created: {type_} at {when_iso}{rep_str}: {text[:60]}")
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} saved: [{type_}] {local}{rep_str} — {text}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Failed to create reminder: {e}"}], "is_error": True}
 
-    async def _send_later():
-        await asyncio.sleep(delay)
-        try:
-            await _bot_ref.bot.send_message(chat_id=chat_id, text=message)
-            logger.info(f"Scheduled message sent to {chat_id} after {delay}s")
-        except Exception as e:
-            logger.error(f"Scheduled message failed: {e}")
 
-    asyncio.create_task(_send_later())
-    mins = delay // 60
-    secs = delay % 60
-    time_str = f"{mins}м {secs}с" if mins else f"{secs}с"
-    logger.info(f"Scheduled message in {delay}s for {chat_id}")
-    return {"content": [{"type": "text", "text": f"Scheduled: отправлю через {time_str}"}]}
+@tool("list_reminders", "List reminders for current chat. include_fired=true to also show delivered/past ones.",
+      {"include_fired": bool})
+async def list_reminders(args):
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    include = bool(args.get("include_fired", False))
+    rows = _rem.get_db().list_for(chat_id, include_fired=include)
+    if not rows:
+        return {"content": [{"type": "text", "text": "No reminders" + (" (incl. fired)" if include else " (pending)")}]}
+    lines = [_rem.format_reminder_line(r) for r in rows]
+    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+@tool("cancel_reminder", "Cancel/delete reminder by id", {"id": int})
+async def cancel_reminder(args):
+    rid = args["id"]
+    ok = _rem.get_db().cancel(rid)
+    if not ok:
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
+    logger.info(f"Reminder #{rid} cancelled")
+    return {"content": [{"type": "text", "text": f"Reminder #{rid} cancelled"}]}
+
+
+@tool(
+    "update_reminder",
+    "Update reminder fields by id. Pass only fields to change. "
+    "when_iso: new ISO UTC datetime. type/text/repeat_interval/repeat_at_time as in create_reminder.",
+    {"id": int, "text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
+)
+async def update_reminder(args):
+    rid = args["id"]
+    db = _rem.get_db()
+    existing = db.get(rid)
+    if not existing:
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
+    fields = {}
+    if "text" in args and args["text"]:
+        fields["text"] = args["text"]
+    if "type" in args and args["type"]:
+        fields["type"] = args["type"]
+    if "when_iso" in args and args["when_iso"]:
+        fields["due_at"] = _rem.parse_iso(args["when_iso"])
+        fields["fired_at"] = None
+        fields["delivered"] = 0
+    if "repeat_interval" in args:
+        fields["repeat_interval"] = args["repeat_interval"] or None
+    if "repeat_at_time" in args:
+        fields["repeat_at_time"] = args["repeat_at_time"] or None
+    if not fields:
+        return {"content": [{"type": "text", "text": "No fields to update"}], "is_error": True}
+    try:
+        db.update(rid, **fields)
+        logger.info(f"Reminder #{rid} updated: {list(fields.keys())}")
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} updated"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Update failed: {e}"}], "is_error": True}
 
 
 @tool("send_video", "Send a video to the user in Telegram (with player/preview)", {"path": str, "caption": str})
@@ -271,5 +336,6 @@ async def react(args):
 kesha_server = create_sdk_mcp_server(
     name="kesha",
     tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot,
-           send_photo, send_file, send_video, send_audio, send_voice, schedule_message, react],
+           send_photo, send_file, send_video, send_audio, send_voice, react,
+           create_reminder, list_reminders, cancel_reminder, update_reminder],
 )
