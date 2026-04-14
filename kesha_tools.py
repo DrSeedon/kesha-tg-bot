@@ -114,7 +114,7 @@ async def _do_restart():
 async def send_photo(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -134,7 +134,7 @@ async def send_photo(args):
 async def send_file(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -160,7 +160,7 @@ async def send_file(args):
     {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
 )
 async def create_reminder(args):
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:
@@ -182,7 +182,7 @@ async def create_reminder(args):
 @tool("list_reminders", "List reminders for current chat. include_fired=true to also show delivered/past ones.",
       {"include_fired": bool})
 async def list_reminders(args):
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     include = bool(args.get("include_fired", False))
@@ -242,7 +242,7 @@ async def update_reminder(args):
 async def send_video(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -262,7 +262,7 @@ async def send_video(args):
 async def send_audio(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -281,7 +281,7 @@ async def send_audio(args):
 @tool("send_voice", "Send a voice message to the user in Telegram", {"path": str})
 async def send_voice(args):
     path = args["path"]
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -302,7 +302,7 @@ async def send_voice(args):
     "reactions": list,
 })
 async def react(args):
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:

@@ -460,6 +460,7 @@ _cancel: set[int] = set()
 _queue: dict[int, list[list[dict]]] = {}
 _pending_transcriptions: dict[int, int] = {}  # chat_id -> count of pending transcriptions
 current_batch_message_ids: dict[int, list[int]] = {}
+active_chat_id: int | None = None
 
 
 def _make_entry(msg: types.Message, prompt: str) -> dict:
@@ -495,7 +496,9 @@ async def _debounce_fire(chat_id: int):
 
 
 async def _process_batch(chat_id: int, batch: list[dict]):
+    global active_chat_id
     _processing.add(chat_id)
+    active_chat_id = chat_id
     current_batch_message_ids[chat_id] = [e["msg"].message_id for e in batch]
     try:
             last_msg = batch[-1]["msg"]
