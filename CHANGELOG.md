@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.4.0 — 2026-04-14
+
+### Added
+- **Multi-user support** — each user gets their own isolated `ClaudeSession` with separate session files (`storage/sessions/<chat_id>`). No more cross-chat message leaking or response mixing. Sessions created lazily on first message.
+- **Unknown user response** — unauthorized users get their Telegram ID on first message (once per session), so the owner can easily add them to `ALLOWED_USERS`.
+- **Supplements dashboard fixes** — blocked "+" button when inventory is zero, low-stock warning (≤2 days), sorted log by date to fix phantom stock calculation.
+
+### Fixed
+- **Cross-chat response mixing** — responses no longer leak between users. Each chat has its own Claude CLI process and streaming pipeline.
+- **Phantom inventory in supplements dashboard** — unsorted log caused `max(0, 0-dose) = 0` to silently eat entries. Now sorted before calculation both in data and server code.
+
+### Changed
+- `claude_session.py` — `session_file` parameter per instance instead of global `SESSION_FILE`. Migration from old `storage/session_id` supported.
+- `reminders.py` — supports callable `get_session(chat_id)` for per-chat inject/processing check.
+- Removed `_global_lock` and `_queued_batches` — no longer needed with per-user sessions.
+
 ## v1.3.0 — 2026-04-14
 
 ### Added
