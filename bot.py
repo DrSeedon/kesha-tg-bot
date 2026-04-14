@@ -59,7 +59,7 @@ logger.addHandler(_fh)
 
 STRINGS = {
     "ru": {
-        "no_access": "Нет доступа.",
+        "no_access": "🔒 Нет доступа.\n\nТвой Telegram ID: `{uid}`\nПопроси владельца добавить тебя.",
         "start": (
             "🦜 *Кеша на связи!*\n"
             "📌 Session: `{session}`\n"
@@ -112,7 +112,7 @@ STRINGS = {
         ),
     },
     "en": {
-        "no_access": "No access.",
+        "no_access": "🔒 No access.\n\nYour Telegram ID: `{uid}`\nAsk the owner to add you.",
         "start": (
             "🦜 *Kesha online!*\n"
             "📌 Session: `{session}`\n"
@@ -245,19 +245,41 @@ def _load_global_mcp() -> dict:
     return servers
 
 
-claude = ClaudeSession(
-    cwd=WORK_DIR,
-    model=MODEL,
-    system_prompt=load_system_prompt(),
-    mcp_servers=_load_global_mcp(),
-)
+_sessions: dict[int, ClaudeSession] = {}
+_mcp_config = _load_global_mcp()
+_system_prompt = load_system_prompt()
+
+def get_session(chat_id: int) -> ClaudeSession:
+    if chat_id not in _sessions:
+        from pathlib import Path as _P
+        session_file = _P(__file__).parent / "storage" / "sessions" / str(chat_id)
+        _sessions[chat_id] = ClaudeSession(
+            cwd=WORK_DIR,
+            model=MODEL,
+            system_prompt=_system_prompt,
+            mcp_servers=_mcp_config,
+            session_file=session_file,
+        )
+        logger.info(f"Created new ClaudeSession for chat {chat_id}")
+    return _sessions[chat_id]
+
+# Backward compat: default session for tools/reminders that use global `claude`
+claude = get_session(list(ALLOWED)[0] if ALLOWED else 0)
 
 import sys
 set_bot_ref(sys.modules[__name__])
 
 
+_denied_notified: set[int] = set()
+
 def allowed(uid: int) -> bool:
     return not ALLOWED or uid in ALLOWED
+
+async def _deny_once(msg: types.Message):
+    uid = msg.from_user.id
+    if uid not in _denied_notified:
+        _denied_notified.add(uid)
+        await _send_safe(msg, t(msg, "no_access", uid=uid))
 
 
 def user_prefix(msg: types.Message) -> str:
@@ -466,7 +488,7 @@ async def _debounce_fire(chat_id: int):
         new_ids = [e["msg"].message_id for e in batch]
         current_batch_message_ids.setdefault(chat_id, []).extend(new_ids)
         logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
-        await claude.inject(combined)
+        await get_session(chat_id).inject(combined)
         return
 
     await _process_batch(chat_id, batch)
@@ -476,53 +498,53 @@ async def _process_batch(chat_id: int, batch: list[dict]):
     _processing.add(chat_id)
     current_batch_message_ids[chat_id] = [e["msg"].message_id for e in batch]
     try:
-        last_msg = batch[-1]["msg"]
-        from datetime import timezone, timedelta
-        krsk = timezone(timedelta(hours=7))
-        batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%Y-%m-%d %H:%M %z")
-        time_prefix = f"[{batch_time}] "
-        if len(batch) == 1:
-            combined = time_prefix + f"[msg_id={batch[0]['msg'].message_id}] " + batch[0]["prompt"]
-        else:
-            combined = "\n\n".join(
-                f"--- message {i+1}/{len(batch)} [msg_id={e['msg'].message_id}] ---\n{e['prompt']}"
-                for i, e in enumerate(batch)
-            )
-            combined = time_prefix + combined
-
-        try:
-            lazy_block = _reminders.get_lazy_block_for_prompt(chat_id)
-            if lazy_block:
-                combined = lazy_block + combined
-                logger.info(f"Chat {chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
-        except Exception as e:
-            logger.error(f"Lazy reminder injection failed: {e}")
-
-        previews = []
-        for e in batch:
-            p = e["prompt"]
-            if "[photo:" in p:
-                previews.append("photo")
-            elif "[voice:" in p:
-                previews.append("voice")
-            elif "[video_note:" in p:
-                previews.append("videonote")
-            elif "[video:" in p:
-                previews.append("video")
-            elif "[document:" in p:
-                previews.append("doc")
-            elif "[audio:" in p:
-                previews.append("audio")
-            elif "[sticker:" in p:
-                previews.append("sticker")
+            last_msg = batch[-1]["msg"]
+            from datetime import timezone, timedelta
+            krsk = timezone(timedelta(hours=7))
+            batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%Y-%m-%d %H:%M %z")
+            time_prefix = f"[{batch_time}] "
+            if len(batch) == 1:
+                combined = time_prefix + f"[msg_id={batch[0]['msg'].message_id}] " + batch[0]["prompt"]
             else:
-                txt = p.split("]: ", 1)[-1][:40].replace("\n", " ")
-                previews.append(f'"{txt}"')
-        logger.info(f"Chat {chat_id}: sending {len(batch)} msgs [{', '.join(previews)}] ({len(combined)} chars)")
-        if DEBUG:
-            logger.debug(f"Chat {chat_id} full prompt:\n{combined}")
+                combined = "\n\n".join(
+                    f"--- message {i+1}/{len(batch)} [msg_id={e['msg'].message_id}] ---\n{e['prompt']}"
+                    for i, e in enumerate(batch)
+                )
+                combined = time_prefix + combined
 
-        await _ask(last_msg, combined)
+            try:
+                lazy_block = _reminders.get_lazy_block_for_prompt(chat_id)
+                if lazy_block:
+                    combined = lazy_block + combined
+                    logger.info(f"Chat {chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
+            except Exception as e:
+                logger.error(f"Lazy reminder injection failed: {e}")
+
+            previews = []
+            for e in batch:
+                p = e["prompt"]
+                if "[photo:" in p:
+                    previews.append("photo")
+                elif "[voice:" in p:
+                    previews.append("voice")
+                elif "[video_note:" in p:
+                    previews.append("videonote")
+                elif "[video:" in p:
+                    previews.append("video")
+                elif "[document:" in p:
+                    previews.append("doc")
+                elif "[audio:" in p:
+                    previews.append("audio")
+                elif "[sticker:" in p:
+                    previews.append("sticker")
+                else:
+                    txt = p.split("]: ", 1)[-1][:40].replace("\n", " ")
+                    previews.append(f'"{txt}"')
+            logger.info(f"Chat {chat_id}: sending {len(batch)} msgs [{', '.join(previews)}] ({len(combined)} chars)")
+            if DEBUG:
+                logger.debug(f"Chat {chat_id} full prompt:\n{combined}")
+
+            await _ask(last_msg, combined)
     except Exception as e:
         logger.error(f"Chat {chat_id} batch error: {e}", exc_info=True)
         try:
@@ -650,7 +672,7 @@ async def _ask(message: types.Message, prompt: str):
 
     while retries <= MAX_RETRIES:
         try:
-            async for chunk in claude.send_message(prompt):
+            async for chunk in get_session(cid).send_message(prompt):
                 if cid in _cancel:
                     _cancel.discard(cid)
                     if parts:
@@ -707,7 +729,7 @@ async def _ask(message: types.Message, prompt: str):
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
                         logger.warning(f"Session error, reconnecting: {err}")
-                        claude.reconnect()
+                        get_session(cid).reconnect()
                         retries += 1
                         if retries <= MAX_RETRIES:
                             await _send_safe(message, t(message, "reconnecting", n=retries))
@@ -718,7 +740,7 @@ async def _ask(message: types.Message, prompt: str):
             logger.error(f"Error: {e}", exc_info=True)
             retries += 1
             if retries <= MAX_RETRIES:
-                claude.reconnect()
+                get_session(cid).reconnect()
                 await _send_safe(message, t(message, "error_retry", n=retries))
             else:
                 parts.append(f"Error: {e}")
@@ -820,11 +842,12 @@ async def set_commands():
 @dp.message(CommandStart())
 async def h_start(msg: types.Message):
     if not allowed(msg.from_user.id):
-        return await _send_safe(msg, t(msg, "no_access"))
-    sid = claude.session_id
+        return await _deny_once(msg)
+    s = get_session(msg.chat.id)
+    sid = s.session_id
     await _send_safe(msg, t(msg, "start",
         session=sid[:8] + "..." if sid else "new",
-        model=claude.model,
+        model=s.model,
         cwd=WORK_DIR,
         debounce=DEBOUNCE_SEC,
         debug="on" if DEBUG else "off",
@@ -842,21 +865,22 @@ async def h_help(msg: types.Message):
 async def h_status(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    sid = claude.session_id
-    rl = claude.rate_limit
+    s = get_session(msg.chat.id)
+    sid = s.session_id
+    rl = s.rate_limit
     if rl:
         util = rl.get('utilization')
         util_str = f" {int(util*100)}%" if util is not None else ""
         rl_str = f"{rl.get('status', '?')} ({rl.get('type', '?')}){util_str}"
     else:
         rl_str = "n/a"
-    ctx = await claude.get_context_usage()
+    ctx = await s.get_context_usage()
     if ctx:
         ctx_str = f"{ctx['percentage']:.0f}% ({ctx['totalTokens']}/{ctx['maxTokens']})"
     else:
         ctx_str = "n/a"
     await _send_safe(msg, t(msg, "status",
-        model=claude.model,
+        model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
         debounce=DEBOUNCE_SEC,
@@ -864,7 +888,7 @@ async def h_status(msg: types.Message):
         uptime=uptime_str(),
         context=ctx_str,
         rate_limit=rl_str,
-        cost=f"{claude.total_cost_usd:.4f}",
+        cost=f"{s.total_cost_usd:.4f}",
         media_count=media_count(),
         log_size=log_size(),
     ))
@@ -874,13 +898,13 @@ async def h_status(msg: types.Message):
 async def h_clear(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    claude.reset()
+    get_session(msg.chat.id).reset()
     await _send_safe(msg, t(msg, "cleared"))
 
 
 @dp.message(Command("ping"))
 async def h_ping(msg: types.Message):
-    await _send_safe(msg, t(msg, "ping", session=claude.session_id or "none"))
+    await _send_safe(msg, t(msg, "ping", session=get_session(msg.chat.id).session_id or "none"))
 
 
 ALLOWED_MODELS = {
@@ -906,12 +930,13 @@ async def h_model(msg: types.Message):
         if not model_id:
             await _send_safe(msg, "Unknown model. Available: opus, sonnet, haiku (+ 200k)")
             return
-        claude.use_1m = not use_200k
-        claude.model = model_id
+        s = get_session(msg.chat.id)
+        s.use_1m = not use_200k
+        s.model = model_id
         ctx = "200K" if use_200k else "1M"
-        await _send_safe(msg, t(msg, "model_set", model=f"{claude.model} ({ctx})"))
+        await _send_safe(msg, t(msg, "model_set", model=f"{s.model} ({ctx})"))
     else:
-        await _send_safe(msg, t(msg, "model_usage", model=claude.model))
+        await _send_safe(msg, t(msg, "model_usage", model=get_session(msg.chat.id).model))
 
 
 @dp.message(Command("debounce"))
@@ -966,7 +991,7 @@ async def h_stop(msg: types.Message):
     cid = msg.chat.id
     if cid in _processing:
         _cancel.add(cid)
-        await claude.interrupt()
+        await get_session(cid).interrupt()
         await _send_safe(msg, "Stopping...")
     else:
         await _send_safe(msg, "Nothing to stop.")
@@ -1142,14 +1167,14 @@ async def h_audio(msg: types.Message):
 @dp.message(F.text)
 async def h_text(msg: types.Message):
     if not allowed(msg.from_user.id):
-        return
+        return await _deny_once(msg)
     await enqueue(msg, msg.text)
 
 
 @dp.message()
 async def h_fallback(msg: types.Message):
     if not allowed(msg.from_user.id):
-        return
+        return await _deny_once(msg)
     text = msg.text or msg.caption or ""
     content_type = msg.content_type or "unknown"
     logger.warning(f"Chat {msg.chat.id}: unhandled message type={content_type}, text={text[:100]}")
@@ -1225,10 +1250,10 @@ async def main():
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 
     try:
-        await _reminders.deliver_missed_on_startup(bot, claude, ALLOWED)
+        await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
     except Exception as e:
         logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
-    asyncio.create_task(_reminders.reminder_loop(bot, claude, ALLOWED))
+    asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
     logger.info(f"Greet flag path: {GREET_FLAG}, exists: {GREET_FLAG.exists()}")
     should_greet_llm = GREET_FLAG.exists()

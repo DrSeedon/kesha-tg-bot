@@ -247,8 +247,9 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
                 f"Text: {text}\n"
                 f"Action: deliver this reminder to the user in your style. Be brief."
             )
-            if claude._is_processing:
-                await claude.inject(payload)
+            session = claude(chat_id) if callable(claude) else claude
+            if session._is_processing:
+                await session.inject(payload)
                 logger.info(f"Reminder #{rid} urgent_llm injected into running session")
             else:
                 asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))

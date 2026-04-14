@@ -21,17 +21,19 @@ from claude_agent_sdk import (
 
 logger = logging.getLogger(__name__)
 
-SESSION_FILE = Path("./storage/session_id")
+SESSION_DIR = Path("./storage/sessions")
 
 
 class ClaudeSession:
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
                  system_prompt: str = "",
-                 mcp_servers: dict[str, McpSdkServerConfig] | None = None):
+                 mcp_servers: dict[str, McpSdkServerConfig] | None = None,
+                 session_file: Optional[Path] = None):
         self.cwd = cwd
         self.model = model
         self.system_prompt = system_prompt
         self.mcp_servers = mcp_servers or {}
+        self._session_file = session_file or SESSION_DIR / "default"
         self.session_id: Optional[str] = self._load_session()
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
@@ -47,16 +49,23 @@ class ClaudeSession:
         self._is_processing = False
 
     def _load_session(self) -> Optional[str]:
-        if SESSION_FILE.exists():
-            sid = SESSION_FILE.read_text().strip()
+        if self._session_file.exists():
+            sid = self._session_file.read_text().strip()
             if sid:
-                logger.info(f"Loaded session from file: {sid[:8]}...")
+                logger.info(f"Loaded session from {self._session_file.name}: {sid[:8]}...")
+                return sid
+        # Migration: check old session_id file
+        old = Path("./storage/session_id")
+        if old.exists():
+            sid = old.read_text().strip()
+            if sid:
+                logger.info(f"Migrated session from old file: {sid[:8]}...")
                 return sid
         return None
 
     def _save_session(self):
-        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SESSION_FILE.write_text(self.session_id or "")
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        self._session_file.write_text(self.session_id or "")
 
     def _make_options(self) -> ClaudeAgentOptions:
         model = self.model
