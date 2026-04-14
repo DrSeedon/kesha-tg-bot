@@ -1193,34 +1193,39 @@ async def main():
             pass
 
     async def _urgent_llm_handler(chat_id: int, prompt: str):
-        """Handle urgent_llm reminders through normal _ask pipeline."""
-        last_msg_id = None
-        try:
-            # Get the latest message in chat to use as reply anchor
-            # We create a minimal fake-like approach: just run _ask with prompt
-            # But _ask needs a Message object. Instead, send prompt through enqueue-like path.
-            from datetime import datetime as dt, timezone as tz, timedelta as td
-            krsk = tz(td(hours=7))
-            now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
-            full_prompt = f"[{now_str}] " + prompt
+        """Handle urgent_llm reminders through normal _ask pipeline with retry."""
+        from datetime import datetime as dt, timezone as tz, timedelta as td
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                krsk = tz(td(hours=7))
+                now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
+                full_prompt = f"[{now_str}] " + prompt
 
-            _processing.add(chat_id)
-            current_batch_message_ids[chat_id] = []
-            try:
-                # We need a Message to reply to — get chat info and use send_message directly via _ask
-                # Simplest: use bot.send_message to send a typing action, then stream
-                await bot.send_chat_action(chat_id, "typing")
-                # Create a temporary message we can use as anchor
-                tmp = await bot.send_message(chat_id, "💭")
-                await _ask(tmp, full_prompt)
-            finally:
-                _processing.discard(chat_id)
-        except Exception as e:
-            logger.error(f"urgent_llm handler error: {e}", exc_info=True)
-            try:
-                await bot.send_message(chat_id, f"⏰ {prompt}", parse_mode=None)
-            except Exception:
-                pass
+                _processing.add(chat_id)
+                current_batch_message_ids[chat_id] = []
+                try:
+                    await bot.send_chat_action(chat_id, "typing")
+                    tmp = await bot.send_message(chat_id, "💭")
+                    await _ask(tmp, full_prompt)
+                finally:
+                    _processing.discard(chat_id)
+                return
+            except Exception as e:
+                logger.error(f"urgent_llm handler error (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    delay = 15 * (attempt + 1)
+                    logger.info(f"urgent_llm retry in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"urgent_llm all {max_retries} attempts failed, sending raw fallback")
+                    for fb_attempt in range(3):
+                        try:
+                            await bot.send_message(chat_id, f"⏰ {prompt}", parse_mode=None)
+                            return
+                        except Exception:
+                            await asyncio.sleep(10)
+                    logger.error(f"urgent_llm fallback also failed for reminder in chat {chat_id}")
 
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 

@@ -4,7 +4,7 @@
 
 # Kesha TG Bot
 
-**v1.2.0** | [Changelog](CHANGELOG.md)
+**v1.3.0** | [Changelog](CHANGELOG.md)
 
 Telegram bot powered by **Claude Agent SDK** (official Anthropic SDK). A full Claude Code CLI experience, but through Telegram.
 
@@ -37,8 +37,10 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 - **Persistent connection** — `ClaudeSDKClient` keeps connection alive between messages
 - **Live model switch** — change model mid-conversation without losing context
 - **Context tracking** — context usage percentage available via `get_bot_status`
-- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, schedule_message, self-config
-- **Auto-retry** — on session error, auto-recreates (2 attempts)
+- **Reminders** — 3 types: `plain` (raw text), `urgent_llm` (Claude formulates), `lazy_llm` (injected on next message). Persistent SQLite, repeat intervals, missed delivery on startup, TTL auto-promotion, retry with backoff on network errors
+- **Reactions** — emoji reactions on messages via MCP tool
+- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, reminders (CRUD), self-config
+- **Auto-retry** — on session error, auto-recreates (2 attempts). Urgent reminders retry 3x with backoff
 - **Debug mode** — toggle with `/debug`, full logging to file
 - **Media storage** — local `./storage/media/` with auto-cleanup (24h)
 
@@ -153,8 +155,10 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 - **Persistent connection** — `ClaudeSDKClient` держит соединение между сообщениями
 - **Live смена модели** — меняй модель без потери контекста
 - **Контекст** — процент использования контекста через `get_bot_status`
-- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, schedule_message, самонастройка
-- **Auto-retry** — при ошибке сессии пересоздаёт (2 попытки)
+- **Напоминания** — 3 типа: `plain` (текст как есть), `urgent_llm` (Claude формулирует сам), `lazy_llm` (вклинивается в следующее сообщение). Persistent SQLite, повторы, доставка пропущенных при старте, автопромоушен по TTL, retry с backoff при ошибках сети
+- **Реакции** — эмодзи-реакции на сообщения через MCP tool
+- **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, напоминания (CRUD), самонастройка
+- **Auto-retry** — при ошибке сессии пересоздаёт (2 попытки). Urgent напоминания — retry 3x с backoff
 - **Debug** — `/debug`, полное логирование в файл
 - **Хранилище медиа** — `./storage/media/` с автоочисткой (24ч)
 
