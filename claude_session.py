@@ -54,13 +54,6 @@ class ClaudeSession:
             if sid:
                 logger.info(f"Loaded session from {self._session_file.name}: {sid[:8]}...")
                 return sid
-        # Migration: check old session_id file
-        old = Path("./storage/session_id")
-        if old.exists():
-            sid = old.read_text().strip()
-            if sid:
-                logger.info(f"Migrated session from old file: {sid[:8]}...")
-                return sid
         return None
 
     def _save_session(self):
