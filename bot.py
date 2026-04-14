@@ -35,6 +35,7 @@ DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
+GREET_FLAG = Path(__file__).parent / "storage" / "greet_on_restart"
 MEDIA_MAX_AGE_H = 24
 
 # --- Logging ---
@@ -481,7 +482,7 @@ async def _process_batch(chat_id: int, batch: list[dict]):
         batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%Y-%m-%d %H:%M %z")
         time_prefix = f"[{batch_time}] "
         if len(batch) == 1:
-            combined = time_prefix + batch[0]["prompt"]
+            combined = time_prefix + f"[msg_id={batch[0]['msg'].message_id}] " + batch[0]["prompt"]
         else:
             combined = "\n\n".join(
                 f"--- message {i+1}/{len(batch)} [msg_id={e['msg'].message_id}] ---\n{e['prompt']}"
@@ -1186,12 +1187,6 @@ async def main():
     await set_commands()
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL} | Debug={DEBUG}")
     logger.info(f"Allowed: {ALLOWED or 'all'} | Media: {MEDIA_DIR} | Logs: {LOG_DIR}")
-    for uid in ALLOWED:
-        try:
-            await bot.send_message(uid, STRINGS["ru"]["started"])
-        except Exception:
-            pass
-
     async def _urgent_llm_handler(chat_id: int, prompt: str):
         """Handle urgent_llm reminders through normal _ask pipeline with retry."""
         from datetime import datetime as dt, timezone as tz, timedelta as td
@@ -1234,6 +1229,20 @@ async def main():
     except Exception as e:
         logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
     asyncio.create_task(_reminders.reminder_loop(bot, claude, ALLOWED))
+
+    logger.info(f"Greet flag path: {GREET_FLAG}, exists: {GREET_FLAG.exists()}")
+    should_greet_llm = GREET_FLAG.exists()
+    if should_greet_llm:
+        GREET_FLAG.unlink(missing_ok=True)
+        logger.info("Greet flag found and deleted — will send LLM greeting")
+    for uid in ALLOWED:
+        try:
+            await bot.send_message(uid, STRINGS["ru"]["started"])
+        except Exception:
+            pass
+        if should_greet_llm:
+            asyncio.create_task(_urgent_llm_handler(uid,
+                "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
 
     await dp.start_polling(bot)
 

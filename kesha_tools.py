@@ -96,14 +96,18 @@ async def get_bot_status(args):
 @tool("restart_bot", "Restart the bot service (applies code changes)", {})
 async def restart_bot(args):
     logger.info("Bot restart requested via tool")
-    p = await asyncio.create_subprocess_exec(
-        "sudo", "systemctl", "restart", "kesha-bot",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, err = await p.communicate()
-    if p.returncode != 0:
-        return {"content": [{"type": "text", "text": f"Restart failed: {err.decode()}"}], "is_error": True}
-    return {"content": [{"type": "text", "text": "Bot restarting..."}]}
+    greet_flag = Path(__file__).parent / "storage" / "greet_on_restart"
+    greet_flag.parent.mkdir(parents=True, exist_ok=True)
+    with open(greet_flag, "w") as f:
+        f.write("1")
+        f.flush()
+        import os as _os
+        _os.fsync(f.fileno())
+    asyncio.get_event_loop().call_later(1.0, lambda: asyncio.ensure_future(_do_restart()))
+    return {"content": [{"type": "text", "text": "Bot restarting in 1s..."}]}
+
+async def _do_restart():
+    await asyncio.create_subprocess_exec("sudo", "systemctl", "restart", "kesha-bot")
 
 
 @tool("send_photo", "Send a photo to the user in Telegram", {"path": str, "caption": str})

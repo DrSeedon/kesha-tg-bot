@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.0 — 2026-04-14
+
+### Added
+- **msg_id on every message** — single messages now include `[msg_id=X]` tag in prompts, enabling accurate emoji reactions on any message (not just batches).
+- **LLM greeting on MCP restart** — when bot is restarted via `restart_bot` MCP tool, Claude writes an in-character greeting instead of static text. Uses file-flag (`storage/greet_on_restart`) with fsync to survive process kill. Normal restarts (systemd/crash) still show plain "Кеша запущен!".
+- **Retry with backoff for urgent_llm** — handler retries 3x (15/30/45s delays) on network errors. Fallback to raw text also retries 3x.
+
+### Fixed
+- **restart_bot MCP tool** — no longer fails with empty error. Tool now returns immediately ("Bot restarting in 1s...") and schedules the actual `systemctl restart` 1s later via `call_later`, avoiding the race condition where the process kills itself before `communicate()` returns.
+- **Emoji reactions on wrong messages** — reactions no longer land on bot's own messages when msg_id is unknown.
+
+### Changed
+- `README.md` — added reminders & reactions features documentation (EN + RU), bumped to v1.3.0.
+
 ## v1.2.0 — 2026-04-13
 
 ### Added
