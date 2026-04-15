@@ -1,6 +1,7 @@
 """Kesha self-configuration tools — injected as SDK MCP server."""
 
 import asyncio
+import contextvars
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -12,11 +13,22 @@ import reminders as _rem
 logger = logging.getLogger("kesha.tools")
 
 _bot_ref = None
+_current_chat_id: contextvars.ContextVar[int | None] = contextvars.ContextVar('_current_chat_id', default=None)
 
 
 def set_bot_ref(bot_module):
     global _bot_ref
     _bot_ref = bot_module
+
+
+def set_current_chat(chat_id: int):
+    """Set the active chat_id for MCP tools routing. Called from bot.py before _ask."""
+    _current_chat_id.set(chat_id)
+
+
+def get_current_chat() -> int | None:
+    """Get the chat_id that triggered the current Claude session."""
+    return _current_chat_id.get(None)
 
 
 ALLOWED_MODELS = {
@@ -114,7 +126,7 @@ async def _do_restart():
 async def send_photo(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -134,7 +146,7 @@ async def send_photo(args):
 async def send_file(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -160,7 +172,7 @@ async def send_file(args):
     {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
 )
 async def create_reminder(args):
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:
@@ -182,7 +194,7 @@ async def create_reminder(args):
 @tool("list_reminders", "List reminders for current chat. include_fired=true to also show delivered/past ones.",
       {"include_fired": bool})
 async def list_reminders(args):
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     include = bool(args.get("include_fired", False))
@@ -242,7 +254,7 @@ async def update_reminder(args):
 async def send_video(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -262,7 +274,7 @@ async def send_video(args):
 async def send_audio(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -281,7 +293,7 @@ async def send_audio(args):
 @tool("send_voice", "Send a voice message to the user in Telegram", {"path": str})
 async def send_voice(args):
     path = args["path"]
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -302,7 +314,7 @@ async def send_voice(args):
     "reactions": list,
 })
 async def react(args):
-    chat_id = getattr(_bot_ref, 'active_chat_id', None) or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:
