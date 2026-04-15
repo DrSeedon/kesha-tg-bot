@@ -37,7 +37,7 @@ One bot = one `claude` process with a persistent session. Like chatting in Claud
 - **Persistent connection** — `ClaudeSDKClient` keeps connection alive between messages
 - **Live model switch** — change model mid-conversation without losing context
 - **Context tracking** — context usage percentage available via `get_bot_status`
-- **Reminders** — 3 types: `plain` (raw text), `urgent_llm` (Claude formulates), `lazy_llm` (injected on next message). Persistent SQLite, repeat intervals, missed delivery on startup, TTL auto-promotion, retry with backoff on network errors
+- **Reminders** — 3 types: `plain` (alarm/buzzer, raw text), `urgent_llm` (task for bot at specific time — check servers, read mail, etc.), `lazy_llm` (silent note injected on next user message). Persistent SQLite, repeat intervals, missed delivery on startup, TTL auto-promotion, retry 3x with backoff
 - **Reactions** — emoji reactions on messages via MCP tool
 - **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, reminders (CRUD), self-config
 - **Multi-user** — each user gets their own isolated Claude session (`storage/sessions/<chat_id>`). Parallel processing, no cross-chat leaking
@@ -111,7 +111,7 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 
 - `bot.py` — handlers, native draft streaming, debounce, media cache, album support, i18n
 - `claude_session.py` — SDK wrapper with resume, streaming, injection, rate limit tracking
-- `kesha_tools.py` — MCP tools (send_photo, send_file, schedule_message, self-config)
+- `kesha_tools.py` — MCP tools (send_photo, send_file, send_video, send_audio, send_voice, react, reminders CRUD, self-config)
 - `system_prompt.txt` — Claude's TG context and formatting rules
 - `setup_wizard.py` — interactive first-run configuration
 
@@ -156,7 +156,7 @@ Telegram → Aiogram 3 → bot.py → claude_session.py → claude-agent-sdk →
 - **Persistent connection** — `ClaudeSDKClient` держит соединение между сообщениями
 - **Live смена модели** — меняй модель без потери контекста
 - **Контекст** — процент использования контекста через `get_bot_status`
-- **Напоминания** — 3 типа: `plain` (текст как есть), `urgent_llm` (Claude формулирует сам), `lazy_llm` (вклинивается в следующее сообщение). Persistent SQLite, повторы, доставка пропущенных при старте, автопромоушен по TTL, retry с backoff при ошибках сети
+- **Напоминания** — 3 типа: `plain` (будильник, чистый текст), `urgent_llm` (задание для бота в конкретное время — проверить сервер, почту и т.д.), `lazy_llm` (тихая заметка, вклеивается при следующем сообщении). Persistent SQLite, повторы, доставка пропущенных при старте, автопромоушен по TTL, retry 3x с backoff
 - **Реакции** — эмодзи-реакции на сообщения через MCP tool
 - **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, напоминания (CRUD), самонастройка
 - **Мультиюзер** — каждый юзер получает изолированную Claude-сессию (`storage/sessions/<chat_id>`). Параллельная обработка, ответы не смешиваются
