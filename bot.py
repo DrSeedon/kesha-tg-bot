@@ -294,6 +294,50 @@ def user_prefix(msg: types.Message) -> str:
     return f"[{name}{handle}]"
 
 
+def extract_text_with_urls(msg: types.Message) -> str:
+    """Extract message text with TEXT_LINK URLs inlined."""
+    text = msg.text or msg.caption or ""
+    if not text or not msg.entities:
+        return text
+    links = []
+    for e in msg.entities:
+        if e.type == "text_link" and e.url:
+            anchor = text[e.offset:e.offset + e.length]
+            links.append((e.offset, e.length, anchor, e.url))
+    if not links:
+        return text
+    result = []
+    prev = 0
+    for offset, length, anchor, url in sorted(links):
+        result.append(text[prev:offset])
+        result.append(f"{anchor} ({url})")
+        prev = offset + length
+    result.append(text[prev:])
+    return "".join(result)
+
+
+def extract_caption_with_urls(msg: types.Message) -> str:
+    """Extract caption text with TEXT_LINK URLs inlined."""
+    text = msg.caption or ""
+    if not text or not msg.caption_entities:
+        return text
+    links = []
+    for e in msg.caption_entities:
+        if e.type == "text_link" and e.url:
+            anchor = text[e.offset:e.offset + e.length]
+            links.append((e.offset, e.length, anchor, e.url))
+    if not links:
+        return text
+    result = []
+    prev = 0
+    for offset, length, anchor, url in sorted(links):
+        result.append(text[prev:offset])
+        result.append(f"{anchor} ({url})")
+        prev = offset + length
+    result.append(text[prev:])
+    return "".join(result)
+
+
 def forward_meta(msg: types.Message) -> str:
     if not msg.forward_date:
         return ""
@@ -1050,7 +1094,7 @@ async def h_media_album(messages: list[types.Message]):
     caption = ""
     for m in messages:
         if m.caption:
-            caption = f"\n{m.caption}"
+            caption = f"\n{extract_caption_with_urls(m)}"
             break
     fwd = forward_meta(messages[0])
     media_block = "\n".join(parts)
@@ -1062,7 +1106,7 @@ async def h_photo(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg), msg.photo[-1].file_unique_id)
-    caption = f"\n{msg.caption}" if msg.caption else ""
+    caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
     await enqueue(msg, f"{tag}{caption}")
 
@@ -1105,7 +1149,7 @@ async def h_document(msg: types.Message):
     doc = msg.document
     ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
     path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg), doc.file_unique_id)
-    caption = f"\n{msg.caption}" if msg.caption else ""
+    caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
     await enqueue(msg, f"{tag}{caption}")
 
@@ -1123,7 +1167,7 @@ async def h_video(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg), msg.video.file_unique_id)
-    caption = f"\n{msg.caption}" if msg.caption else ""
+    caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
     await enqueue(msg, f"{tag}{caption}")
 
@@ -1143,7 +1187,7 @@ async def h_audio(msg: types.Message):
 async def h_text(msg: types.Message):
     if not allowed(msg.from_user.id):
         return await _deny_once(msg)
-    await enqueue(msg, msg.text)
+    await enqueue(msg, extract_text_with_urls(msg))
 
 
 @dp.message()
