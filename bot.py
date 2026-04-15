@@ -1199,7 +1199,9 @@ async def main():
                 now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
                 full_prompt = f"[{now_str}] " + prompt
 
+                global active_chat_id
                 _processing.add(chat_id)
+                active_chat_id = chat_id
                 current_batch_message_ids[chat_id] = []
                 try:
                     await bot.send_chat_action(chat_id, "typing")
