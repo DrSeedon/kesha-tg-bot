@@ -1023,58 +1023,32 @@ async def h_voice(msg: types.Message):
     await enqueue(msg, f"[voice: {path} | {text}]")
 
 
-@dp.message(F.media_group_id, F.photo)
+@dp.message(F.media_group_id)
 @media_group_handler
-async def h_photo_album(messages: list[types.Message]):
+async def h_media_album(messages: list[types.Message]):
     if not allowed(messages[0].from_user.id):
-        return
+        return await _deny_once(messages[0])
     parts = []
     for m in messages:
-        path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
-        tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
-        parts.append(tag)
-    caption = ""
-    for m in messages:
-        if m.caption:
-            caption = f"\n{m.caption}"
-            break
-    fwd = forward_meta(messages[0])
-    media_block = "\n".join(parts)
-    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
-
-
-@dp.message(F.media_group_id, F.video)
-@media_group_handler
-async def h_video_album(messages: list[types.Message]):
-    if not allowed(messages[0].from_user.id):
-        return
-    parts = []
-    for m in messages:
-        path = await download_file(m.video.file_id, _media_name("video", ".mp4", m), m.video.file_unique_id)
-        tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
-        parts.append(tag)
-    caption = ""
-    for m in messages:
-        if m.caption:
-            caption = f"\n{m.caption}"
-            break
-    fwd = forward_meta(messages[0])
-    media_block = "\n".join(parts)
-    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
-
-
-@dp.message(F.media_group_id, F.document)
-@media_group_handler
-async def h_document_album(messages: list[types.Message]):
-    if not allowed(messages[0].from_user.id):
-        return
-    parts = []
-    for m in messages:
-        doc = m.document
-        ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
-        path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m), doc.file_unique_id)
-        tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
-        parts.append(tag)
+        if m.photo:
+            path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
+            tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
+            parts.append(tag)
+        elif m.video:
+            path = await download_file(m.video.file_id, m.video.file_name or _media_name("video", ".mp4", m), m.video.file_unique_id)
+            tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
+            parts.append(tag)
+        elif m.document:
+            doc = m.document
+            ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
+            path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, m), doc.file_unique_id)
+            tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
+            parts.append(tag)
+        elif m.audio:
+            name = m.audio.file_name or _media_name("audio", ".mp3", m)
+            path = await download_file(m.audio.file_id, name, m.audio.file_unique_id)
+            tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
+            parts.append(tag)
     caption = ""
     for m in messages:
         if m.caption:

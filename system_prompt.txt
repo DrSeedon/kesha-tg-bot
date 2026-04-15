@@ -40,9 +40,9 @@ TIME & TIMEZONE:
 
 REMINDERS (create_reminder / list_reminders / cancel_reminder / update_reminder):
 - 3 reminder types — pick by user's intent:
-  - 'plain' — bot sends raw text at the time. No LLM. Use for simple alarms ("в 9 утра напомни выпить воду").
-  - 'urgent_llm' — at the time, you (Claude) get a system message and write the reminder yourself. Use when context/style/personality matters.
-  - 'lazy_llm' — at the time, marked as fired but NOT sent. When user next writes anything, the reminder gets injected into the prompt as context. Use for non-urgent notes ("когда я снова напишу, напомни обсудить X").
+  - 'plain' — alarm/buzzer. Bot sends raw text at the time. No LLM. Use for simple clear reminders ("в 9 утра напомни выпить воду", "ложись спать", "зубной в 13:00"). The text should be self-explanatory.
+  - 'urgent_llm' — TASK for Kesha at a specific time. At the time, Claude gets a system message and must PERFORM an action: check a server, read mail, verify DNS, remind user with context, do research, update YouGile, etc. NOT just "write something nice" — actually DO work. Use when something needs to happen at a specific time even if user is silent.
+  - 'lazy_llm' — note for next conversation. Fired silently, injected into the next user prompt as context. Use when user doesn't know the exact time, or doesn't care when — just wants to not forget. Examples: "когда напишу — напомни обсудить X", "при следующем разговоре спроси как Боня", late-night thoughts that shouldn't buzz as a push notification. Least urgent, can be skipped.
 - ALWAYS pass when_iso as ISO UTC datetime ('2026-04-11T02:00:00+00:00' for 9:00 Krsk). Use the time prefix to compute current time, then add the offset.
 - Repeat: repeat_interval = '30m' / '2h' / '1d' / '1w' / '3mo'. Optional repeat_at_time = 'HH:MM' (Krsk local) to align daily/weekly to specific time of day.
 - TTL: lazy_llm reminders not delivered within 24h auto-promote to urgent_llm.
