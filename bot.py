@@ -631,10 +631,23 @@ async def enqueue(msg: types.Message, prompt: str):
 
 
 async def _send_safe(message: types.Message, text: str):
-    try:
-        return await message.answer(text)
-    except Exception:
-        return await message.answer(text, parse_mode=None)
+    from aiogram.exceptions import TelegramRetryAfter
+    for attempt in range(2):
+        try:
+            return await message.answer(text)
+        except TelegramRetryAfter as e:
+            logger.warning(f"Flood control, retry after {e.retry_after}s")
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception:
+            try:
+                return await message.answer(text, parse_mode=None)
+            except TelegramRetryAfter as e:
+                logger.warning(f"Flood control (fallback), retry after {e.retry_after}s")
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception as e2:
+                logger.error(f"_send_safe failed: {e2}")
+                return None
+    return None
 
 
 STREAM_DRAFT_INTERVAL = 0.3
