@@ -612,8 +612,12 @@ async def _process_batch(chat_id: int, batch: list[dict]):
                 asyncio.create_task(_process_batch(chat_id, merged))
 
 
+last_user_message_id: dict[int, int] = {}
+
+
 async def enqueue(msg: types.Message, prompt: str):
     chat_id = msg.chat.id
+    last_user_message_id[chat_id] = msg.message_id
     prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
 
     mg = msg.media_group_id
@@ -632,21 +636,29 @@ async def enqueue(msg: types.Message, prompt: str):
 
 async def _send_safe(message: types.Message, text: str):
     from aiogram.exceptions import TelegramRetryAfter
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             return await message.answer(text)
         except TelegramRetryAfter as e:
-            logger.warning(f"Flood control, retry after {e.retry_after}s")
+            logger.warning(f"Flood control, retry after {e.retry_after}s (attempt {attempt+1})")
             await asyncio.sleep(e.retry_after + 1)
-        except Exception:
-            try:
-                return await message.answer(text, parse_mode=None)
-            except TelegramRetryAfter as e:
-                logger.warning(f"Flood control (fallback), retry after {e.retry_after}s")
-                await asyncio.sleep(e.retry_after + 1)
-            except Exception as e2:
-                logger.error(f"_send_safe failed: {e2}")
-                return None
+        except Exception as e:
+            err_str = str(e)
+            if "can't parse" in err_str.lower() or "parse entities" in err_str.lower():
+                try:
+                    return await message.answer(text, parse_mode=None)
+                except TelegramRetryAfter as e2:
+                    logger.warning(f"Flood control (plain), retry after {e2.retry_after}s")
+                    await asyncio.sleep(e2.retry_after + 1)
+                except Exception as e3:
+                    logger.error(f"_send_safe plain fallback failed: {e3}")
+                    return None
+            else:
+                logger.error(f"_send_safe unexpected error: {e}")
+                try:
+                    return await message.answer(text, parse_mode=None)
+                except Exception:
+                    return None
     return None
 
 
@@ -662,7 +674,7 @@ def _next_draft_id() -> int:
 
 async def _clear_draft(chat_id: int, did: int):
     try:
-        await bot(SendMessageDraft(chat_id=chat_id, draft_id=did, text=" "))
+        await bot(SendMessageDraft(chat_id=chat_id, draft_id=did, text=""))
     except Exception:
         pass
 
@@ -678,46 +690,96 @@ async def _ask(message: types.Message, prompt: str):
     draft_id = _next_draft_id()
     last_draft_time = 0.0
     last_draft_len = 0
+    last_draft_text = ""
+    flood_cooldown_until = 0.0  # unix ts — skip draft updates until this time
 
     current_msg = None      # real TG message being edited (text or tool)
     current_is_tool = False  # what's in current_msg right now
     finalized = []          # message_ids that are done, don't touch
 
     async def _draft_update():
-        nonlocal last_draft_time, last_draft_len
-        text = "".join(parts)
+        nonlocal last_draft_time, last_draft_len, last_draft_text, flood_cooldown_until
+        text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
             return
         now = time.time()
+        if now < flood_cooldown_until:
+            return
         if (now - last_draft_time) < STREAM_DRAFT_INTERVAL:
             return
-        if len(text) == last_draft_len:
+        if text == last_draft_text:
             return
         try:
             if current_msg and current_is_tool:
-                await bot.edit_message_text(text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
             else:
-                await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text[:TG_MSG_LIMIT]))
+                await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text))
         except Exception as e:
-            logger.debug(f"Draft update error: {e}")
+            err_str = str(e)
+            if "Flood control" in err_str or "retry after" in err_str.lower():
+                import re
+                m = re.search(r'retry after (\d+)', err_str, re.IGNORECASE)
+                wait_sec = int(m.group(1)) if m else 30
+                flood_cooldown_until = now + wait_sec + 1
+                logger.info(f"Draft flood control, pausing updates for {wait_sec}s")
+            elif "message is not modified" in err_str:
+                pass  # ok, already showing same text
+            else:
+                logger.debug(f"Draft update error: {e}")
         last_draft_time = now
         last_draft_len = len(text)
+        last_draft_text = text
 
     async def _finalize_current_text():
-        """Delete draft/stream msg and send clean new one with proper formatting."""
-        nonlocal current_msg, current_is_tool, parts, has_deltas, draft_id, last_draft_time, last_draft_len
+        """Finalize draft: edit in place if user didn't send new messages, else delete+resend."""
+        nonlocal current_msg, current_is_tool, parts, has_deltas, draft_id, last_draft_time, last_draft_len, last_draft_text
         text = "".join(parts)
         if not text:
             return
-        # Delete the old draft/stream message
+        chunks = list(split_msg(text))
+        # Check if user sent new messages after our draft — if not, edit in place
+        user_msg_id = last_user_message_id.get(cid, 0)
+        can_edit_in_place = (
+            current_msg is not None
+            and len(chunks) == 1
+            and current_msg.message_id > user_msg_id
+        )
+        if can_edit_in_place:
+            edited = False
+            try:
+                await bot.edit_message_text(chunks[0], chat_id=cid, message_id=current_msg.message_id, parse_mode="Markdown")
+                edited = True
+            except Exception as e:
+                err_str = str(e)
+                if "message is not modified" in err_str:
+                    edited = True  # treat as success
+                elif "can't parse entities" in err_str or "parse" in err_str.lower():
+                    try:
+                        await bot.edit_message_text(chunks[0], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
+                        edited = True
+                    except Exception as e2:
+                        logger.debug(f"Edit in place (plain fallback) failed: {e2}")
+                else:
+                    logger.debug(f"Edit in place failed, falling back: {e}")
+            if edited:
+                finalized.append(current_msg.message_id)
+                current_msg = None
+                parts = []
+                has_deltas = False
+                current_is_tool = False
+                draft_id = _next_draft_id()
+                last_draft_time = 0.0
+                last_draft_len = 0
+                last_draft_text = ""
+                return
+        # Fallback: delete draft and send new
         if current_msg:
             try:
                 await bot.delete_message(chat_id=cid, message_id=current_msg.message_id)
             except Exception as e:
                 logger.debug(f"Could not delete draft msg: {e}")
             current_msg = None
-        # Send clean new message with proper markdown formatting
-        for p in split_msg(text):
+        for p in chunks:
             m = await _send_safe(message, p)
             if m:
                 finalized.append(m.message_id)
@@ -726,11 +788,25 @@ async def _ask(message: types.Message, prompt: str):
         current_is_tool = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0
+        last_draft_text = ""
         last_draft_len = 0
 
+    CHUNK_STALL_TIMEOUT = 120  # seconds without any chunk → treat as stalled
+    stalled = False
     while retries <= MAX_RETRIES:
         try:
-            async for chunk in get_session(cid).send_message(prompt):
+            stream = get_session(cid).send_message(prompt).__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=CHUNK_STALL_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Chat {cid}: stream stalled after {CHUNK_STALL_TIMEOUT}s, finalizing partial response")
+                    stalled = True
+                    if parts:
+                        parts.append("\n\n_(⚠️ ответ прервался — повтори если нужно)_")
+                    break
                 if cid in _cancel:
                     _cancel.discard(cid)
                     if parts:
@@ -805,10 +881,15 @@ async def _ask(message: types.Message, prompt: str):
                 break
 
     typer.cancel()
+    await _clear_draft(cid, draft_id)
+
+    if stalled:
+        logger.warning(f"Chat {cid}: reconnecting session after stall")
+        get_session(cid).reconnect()
 
     # --- Finalize ---
     text = "".join(parts)
-    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}")
+    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, stalled={stalled}")
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
@@ -856,8 +937,13 @@ async def _ask(message: types.Message, prompt: str):
             await bot.delete_message(cid, current_msg.message_id)
         except Exception:
             pass
+        if stalled and not finalized:
+            await _send_safe(message, "⚠️ Ответ не пришёл (соединение прервалось). Повтори пожалуйста.")
     elif not finalized:
-        await _send_safe(message, t(message, "empty"))
+        if stalled:
+            await _send_safe(message, "⚠️ Ответ не пришёл (соединение прервалось). Повтори пожалуйста.")
+        else:
+            await _send_safe(message, t(message, "empty"))
 
 
 # --- Commands ---

@@ -24,9 +24,9 @@
 - [x] Fix stale response buffer — receive_messages() + ResultMessage counting
 - [x] Injection turn separation — каждый turn в отдельном TG бабле
 - [x] Reminders system — SQLite + 3 типа (plain/urgent_llm/lazy_llm), repeat (30m/2h/1d/1w/3mo + HH:MM align), lazy TTL 24h promotion, missed-on-startup delivery
+- [x] Stream stall detection: `asyncio.wait_for` per-chunk timeout (120s), finalize partial, reconnect session, show "⚠️ ответ прервался" вместо тишины
 
 ## Open
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling (для production)
 - [ ] Rate limiting
-- [ ] Per-user сессии (dict[user_id → ClaudeSession])

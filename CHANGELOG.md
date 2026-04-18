@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.1 — 2026-04-18
+
+### Fixed
+- **Stream stall / silent response loss** — if Claude SDK stopped producing chunks mid-stream (SSL drop on proxy, etc.), `_ask` hung forever and the user got no reply at all (the draft stayed frozen). Now each chunk is awaited with a 120s timeout; on stall:
+  - Partial text is finalized with a `_(⚠️ ответ прервался — повтори если нужно)_` marker
+  - Session is reconnected so the next message starts fresh
+  - If nothing was ever finalized, user sees `⚠️ Ответ не пришёл (соединение прервалось). Повтори пожалуйста.` instead of silence
+  - Triggered case: Катя asked about РКИ on 2026-04-18 23:35, bot streamed into draft, HTTPS proxy dropped, no `ResultMessage` arrived → loop hung, user asked "а где ответ ты че удалил"
+- **Draft update dedup** — `_draft_update` now compares full text (not just length) against last sent, and silently swallows `message is not modified` errors instead of spamming DEBUG logs.
+
 ## v1.4.0 — 2026-04-14
 
 ### Added
