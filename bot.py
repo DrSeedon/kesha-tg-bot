@@ -791,18 +791,23 @@ async def _ask(message: types.Message, prompt: str):
         last_draft_text = ""
         last_draft_len = 0
 
-    CHUNK_STALL_TIMEOUT = 120  # seconds without any chunk → treat as stalled
+    # Two-tier timeout: short while LLM is actively streaming text,
+    # long while a tool (Agent/Bash/websearch) is running — tools produce no chunks until done.
+    TEXT_STALL_TIMEOUT = 90     # seconds — if LLM was streaming text and goes silent
+    TOOL_STALL_TIMEOUT = 600    # seconds — if a tool is running (Agent subtasks can take minutes)
     stalled = False
+    last_chunk_was_tool = False
     while retries <= MAX_RETRIES:
         try:
             stream = get_session(cid).send_message(prompt).__aiter__()
             while True:
+                timeout_s = TOOL_STALL_TIMEOUT if last_chunk_was_tool else TEXT_STALL_TIMEOUT
                 try:
-                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=CHUNK_STALL_TIMEOUT)
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=timeout_s)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    logger.warning(f"Chat {cid}: stream stalled after {CHUNK_STALL_TIMEOUT}s, finalizing partial response")
+                    logger.warning(f"Chat {cid}: stream stalled after {timeout_s}s (tool_mode={last_chunk_was_tool}), finalizing partial")
                     stalled = True
                     if parts:
                         parts.append("\n\n_(⚠️ ответ прервался — повтори если нужно)_")
@@ -813,6 +818,7 @@ async def _ask(message: types.Message, prompt: str):
                         parts.append("\n\n_(stopped)_")
                     break
                 ct = chunk["type"]
+                last_chunk_was_tool = (ct == "tool")
                 if ct == "text_delta":
                     if not has_deltas and current_msg and current_is_tool:
                         # First text after tool — will reuse tool msg via edit

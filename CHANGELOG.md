@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.2 — 2026-04-18
+
+### Fixed
+- **False-positive stall on long tools** — previous `v1.4.1` used a single 120s chunk timeout, which killed legit long-running tool calls (Agent subtasks, deep websearch chains, big Bash operations that take 2–10 min and produce zero chunks from the SDK until they finish). Now two-tier:
+  - `TEXT_STALL_TIMEOUT = 90s` — when the last chunk was `text_delta`/`text` (LLM actively writing, silence = real problem)
+  - `TOOL_STALL_TIMEOUT = 600s` — when the last chunk was `tool` (tool in progress, SDK is silent by design)
+  - Triggered case: Кеша launched an `Agent` subtask at 23:53 to generate FNS XML, subtask took >120s, loop aborted with "⚠️ ответ прервался" even though everything was fine.
+
 ## v1.4.1 — 2026-04-18
 
 ### Fixed
