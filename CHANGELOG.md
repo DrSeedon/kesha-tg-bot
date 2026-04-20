@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.5.0 — 2026-04-20
+
+### Changed
+- **Live tool status bubble** — all tool calls within one turn now live in a single persistent message with timers, instead of getting overwritten/lost. Shows `⏳ 🖥 Bash \`cmd\` · 12s` while running, `✓` when done. Stall marker `⏱` after 60s. Rate-limited edits (min 5s between) to stay under TG flood control.
+- **Removed streaming/tool bubble conflict** — text streaming via `SendMessageDraft` and tool bubbles now live in separate messages. No more `edit_message_text` switching between tool-text and final-text in the same bubble.
+- **Deleted dead code** — `_finalize_current_text` with its three-branch edit-in-place/delete-and-resend logic is gone. Now just: `_finalize_text_block` (send as new message) and `_finalize_status` (close out the live tool bubble). Removed `current_msg`, `current_is_tool`, `has_deltas`, `can_edit_in_place`.
+- **Per-tool icons** — 🖥 Bash, 📖 Read, ✏️ Write/Edit, 🔎 Glob/Grep, 🌐 WebSearch/WebFetch, 🤖 Agent/Task, 📝 TodoWrite. Fallback `🔧` for unknown.
+
+### Added
+- `tool_status.py` with `ToolStatusTracker` — one message, live log of tool calls with running timers, handles rate-limits, flood control, and finalization on turn end.
+
+### Reasoning
+Previous UX: user sends a message → tool runs 2-5 min silently → `🔧 Bash ...` bubble gets overwritten each call → no history, no timer → feels hung. Now: full live log visible throughout, timer shows it's alive, all tools retained for context.
+
 ## v1.4.2 — 2026-04-18
 
 ### Fixed

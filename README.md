@@ -4,7 +4,7 @@
 
 # Kesha TG Bot
 
-**v1.4.2** | [Changelog](CHANGELOG.md)
+**v1.5.0** | [Changelog](CHANGELOG.md)
 
 Telegram bot powered by **Claude Agent SDK** (official Anthropic SDK). A full Claude Code CLI experience, but through Telegram.
 

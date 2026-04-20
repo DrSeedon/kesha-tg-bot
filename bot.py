@@ -18,9 +18,12 @@ from aiogram.methods import SendMessageDraft
 from aiogram.types import BotCommand, BotCommandScopeDefault
 from dotenv import load_dotenv
 
+from typing import Optional
+
 from claude_session import ClaudeSession
 from kesha_tools import kesha_server, set_bot_ref, set_current_chat
 import reminders as _reminders
+from tool_status import ToolStatusTracker
 
 load_dotenv()
 
@@ -685,20 +688,17 @@ async def _ask(message: types.Message, prompt: str):
     retries = 0
 
     # --- Streaming state ---
-    parts = []              # text chunks for current block
-    has_deltas = False
+    parts: list[str] = []          # text chunks for current text block
     draft_id = _next_draft_id()
     last_draft_time = 0.0
-    last_draft_len = 0
     last_draft_text = ""
-    flood_cooldown_until = 0.0  # unix ts — skip draft updates until this time
+    flood_cooldown_until = 0.0
+    finalized: list[int] = []
 
-    current_msg = None      # real TG message being edited (text or tool)
-    current_is_tool = False  # what's in current_msg right now
-    finalized = []          # message_ids that are done, don't touch
+    status: Optional[ToolStatusTracker] = None  # live tool log bubble for current turn
 
     async def _draft_update():
-        nonlocal last_draft_time, last_draft_len, last_draft_text, flood_cooldown_until
+        nonlocal last_draft_time, last_draft_text, flood_cooldown_until
         text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
             return
@@ -710,10 +710,7 @@ async def _ask(message: types.Message, prompt: str):
         if text == last_draft_text:
             return
         try:
-            if current_msg and current_is_tool:
-                await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-            else:
-                await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text))
+            await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text))
         except Exception as e:
             err_str = str(e)
             if "Flood control" in err_str or "retry after" in err_str.lower():
@@ -723,94 +720,43 @@ async def _ask(message: types.Message, prompt: str):
                 flood_cooldown_until = now + wait_sec + 1
                 logger.info(f"Draft flood control, pausing updates for {wait_sec}s")
             elif "message is not modified" in err_str:
-                pass  # ok, already showing same text
+                pass
             else:
                 logger.debug(f"Draft update error: {e}")
         last_draft_time = now
-        last_draft_len = len(text)
         last_draft_text = text
 
-    async def _finalize_current_text():
-        """Finalize draft: edit in place if user didn't send new messages, else delete+resend."""
-        nonlocal current_msg, current_is_tool, parts, has_deltas, draft_id, last_draft_time, last_draft_len, last_draft_text
+    async def _finalize_text_block():
+        """Send accumulated text as a new message (or split). Reset draft."""
+        nonlocal parts, draft_id, last_draft_time, last_draft_text
         text = "".join(parts)
         if not text:
             return
-        chunks = list(split_msg(text))
-        # Check if user sent new messages after our draft — if not, edit in place
-        user_msg_id = last_user_message_id.get(cid, 0)
-        can_edit_in_place = (
-            current_msg is not None
-            and len(chunks) == 1
-            and current_msg.message_id > user_msg_id
-        )
-        if can_edit_in_place:
-            edited = False
-            try:
-                await bot.edit_message_text(chunks[0], chat_id=cid, message_id=current_msg.message_id, parse_mode="Markdown")
-                edited = True
-            except Exception as e:
-                err_str = str(e)
-                if "message is not modified" in err_str:
-                    edited = True  # treat as success
-                elif "can't parse entities" in err_str or "parse" in err_str.lower():
-                    try:
-                        await bot.edit_message_text(chunks[0], chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-                        edited = True
-                    except Exception as e2:
-                        logger.debug(f"Edit in place (plain fallback) failed: {e2}")
-                else:
-                    logger.debug(f"Edit in place failed, falling back: {e}")
-            if edited:
-                finalized.append(current_msg.message_id)
-                current_msg = None
-                parts = []
-                has_deltas = False
-                current_is_tool = False
-                draft_id = _next_draft_id()
-                last_draft_time = 0.0
-                last_draft_len = 0
-                last_draft_text = ""
-                return
-        # Fallback: delete draft and send new
-        if current_msg:
-            try:
-                await bot.delete_message(chat_id=cid, message_id=current_msg.message_id)
-            except Exception as e:
-                logger.debug(f"Could not delete draft msg: {e}")
-            current_msg = None
-        for p in chunks:
+        for p in split_msg(text):
             m = await _send_safe(message, p)
             if m:
                 finalized.append(m.message_id)
         parts = []
-        has_deltas = False
-        current_is_tool = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0
         last_draft_text = ""
-        last_draft_len = 0
 
-    # Two-tier timeout: short while LLM is actively streaming text,
-    # long while a tool (Agent/Bash/websearch) is running — tools produce no chunks until done.
-    TEXT_STALL_TIMEOUT = 90     # seconds — if LLM was streaming text and goes silent
-    TOOL_STALL_TIMEOUT = 600    # seconds — if a tool is running (Agent subtasks can take minutes)
-    stalled = False
-    last_chunk_was_tool = False
+    async def _finalize_status():
+        """Finalize tool status bubble for current turn."""
+        nonlocal status
+        if status:
+            mid = await status.finalize()
+            if mid:
+                finalized.append(mid)
+            status = None
+
     while retries <= MAX_RETRIES:
         try:
             stream = get_session(cid).send_message(prompt).__aiter__()
             while True:
-                timeout_s = TOOL_STALL_TIMEOUT if last_chunk_was_tool else TEXT_STALL_TIMEOUT
                 try:
-                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=timeout_s)
+                    chunk = await stream.__anext__()
                 except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    logger.warning(f"Chat {cid}: stream stalled after {timeout_s}s (tool_mode={last_chunk_was_tool}), finalizing partial")
-                    stalled = True
-                    if parts:
-                        parts.append("\n\n_(⚠️ ответ прервался — повтори если нужно)_")
                     break
                 if cid in _cancel:
                     _cancel.discard(cid)
@@ -818,53 +764,33 @@ async def _ask(message: types.Message, prompt: str):
                         parts.append("\n\n_(stopped)_")
                     break
                 ct = chunk["type"]
-                last_chunk_was_tool = (ct == "tool")
                 if ct == "text_delta":
-                    if not has_deltas and current_msg and current_is_tool:
-                        # First text after tool — will reuse tool msg via edit
-                        pass
-                    has_deltas = True
+                    if status is not None:
+                        # Tool phase ended, text phase starts — finalize status bubble
+                        await _finalize_status()
                     parts.append(chunk["content"])
                     await _draft_update()
-                elif ct == "text" and not has_deltas:
+                elif ct == "text":
+                    # Non-streaming text block (fallback if no deltas)
+                    if status is not None:
+                        await _finalize_status()
                     parts.append(chunk["content"])
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
-                    tool_hint = ""
-                    if isinstance(tool_input, dict):
-                        if "command" in tool_input:
-                            tool_hint = f" `{str(tool_input['command'])[:60]}`"
-                        elif "file_path" in tool_input:
-                            tool_hint = f" `{tool_input['file_path']}`"
-                        elif "pattern" in tool_input:
-                            tool_hint = f" `{tool_input['pattern']}`"
-                        elif "prompt" in tool_input:
-                            tool_hint = f" `{str(tool_input['prompt'])[:40]}`"
-                    logger.info(f"Chat {cid} tool: {tool_name}{tool_hint}")
-                    tool_text = f"🔧 {tool_name}{tool_hint}"
-
-                    if has_deltas and parts:
-                        # Had text streaming — finalize it first
-                        await _finalize_current_text()
-                        # New message for tool
-                        current_msg = await message.answer(tool_text, parse_mode=None)
-                        current_is_tool = True
-                    elif current_msg and current_is_tool:
-                        # Already showing a tool — just edit it
-                        try:
-                            await bot.edit_message_text(tool_text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-                        except Exception:
-                            pass
-                    else:
-                        # First thing or after nothing — new message
-                        if current_msg:
-                            finalized.append(current_msg.message_id)
-                        current_msg = await message.answer(tool_text, parse_mode=None)
-                        current_is_tool = True
+                    # If text was streaming, finalize it before the next tool
+                    if parts:
+                        await _clear_draft(cid, draft_id)
+                        await _finalize_text_block()
+                    if status is None:
+                        status = ToolStatusTracker(bot, message, cid)
+                    logger.info(f"Chat {cid} tool: {tool_name}")
+                    await status.add_tool(tool_name, tool_input)
                 elif ct == "turn_done":
                     if parts:
-                        await _finalize_current_text()
+                        await _clear_draft(cid, draft_id)
+                        await _finalize_text_block()
+                    await _finalize_status()
                 elif ct == "error":
                     err = chunk["content"]
                     if "session" in err.lower() or "process" in err.lower():
@@ -889,67 +815,30 @@ async def _ask(message: types.Message, prompt: str):
     typer.cancel()
     await _clear_draft(cid, draft_id)
 
-    if stalled:
-        logger.warning(f"Chat {cid}: reconnecting session after stall")
-        get_session(cid).reconnect()
-
     # --- Finalize ---
     text = "".join(parts)
-    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, stalled={stalled}")
+    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}")
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
     if text:
-        if current_msg and current_is_tool:
-            # Text after last tool — replace tool msg with final text
-            if len(text) <= TG_MSG_LIMIT:
-                try:
-                    await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id)
-                except Exception:
-                    try:
-                        await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await bot.delete_message(cid, current_msg.message_id)
-                except Exception:
-                    pass
-                for p in split_msg(text):
-                    await _send_safe(message, p)
-        elif current_msg:
-            # Was streaming text into draft — send as final msg
-            if len(text) <= TG_MSG_LIMIT:
-                try:
-                    await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id)
-                except Exception:
-                    try:
-                        await bot.edit_message_text(text, chat_id=cid, message_id=current_msg.message_id, parse_mode=None)
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await bot.delete_message(cid, current_msg.message_id)
-                except Exception:
-                    pass
-                for p in split_msg(text):
-                    await _send_safe(message, p)
+        for p in split_msg(text):
+            m = await _send_safe(message, p)
+            if m:
+                finalized.append(m.message_id)
+
+    # Close out the status bubble if still open (edge case: stream ended without turn_done)
+    if status is not None:
+        if status.tools:
+            mid = await status.finalize()
+            if mid:
+                finalized.append(mid)
         else:
-            for p in split_msg(text):
-                await _send_safe(message, p)
-    elif current_msg and current_is_tool:
-        # Ended on a tool with no text after — delete tool indicator
-        try:
-            await bot.delete_message(cid, current_msg.message_id)
-        except Exception:
-            pass
-        if stalled and not finalized:
-            await _send_safe(message, "⚠️ Ответ не пришёл (соединение прервалось). Повтори пожалуйста.")
-    elif not finalized:
-        if stalled:
-            await _send_safe(message, "⚠️ Ответ не пришёл (соединение прервалось). Повтори пожалуйста.")
-        else:
-            await _send_safe(message, t(message, "empty"))
+            await status.cancel_empty()
+        status = None
+
+    if not text and not finalized:
+        await _send_safe(message, t(message, "empty"))
 
 
 # --- Commands ---
