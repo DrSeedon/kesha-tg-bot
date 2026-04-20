@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 import time
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types, F
@@ -48,15 +48,33 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("kesha")
 logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
+import time as _time_mod
+_time_mod.tzset() if hasattr(_time_mod, 'tzset') else None  # ensure TZ is loaded
 _fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
+# Pin log timestamps to Krsk local time (UTC+7) regardless of service env
+from datetime import datetime, timezone, timedelta
+_KRSK = timezone(timedelta(hours=7))
+def _krsk_time(record, datefmt=None):
+    dt = datetime.fromtimestamp(record.created, tz=_KRSK)
+    if datefmt:
+        return dt.strftime(datefmt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + f",{int(record.msecs):03d}"
+_fmt.formatTime = _krsk_time  # type: ignore[assignment]
 
-_sh = logging.StreamHandler()
-_sh.setFormatter(_fmt)
-logger.addHandler(_sh)
+# Only attach file handler when running as main (not during `python -c "import bot"` smoke tests)
+if not logger.handlers:
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(_fmt)
+    logger.addHandler(_sh)
 
-_fh = RotatingFileHandler(LOG_DIR / "kesha.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
-_fh.setFormatter(_fmt)
-logger.addHandler(_fh)
+    if __name__ == "__main__" or os.environ.get("KESHA_MAIN") == "1":
+        # Daily rotation, keep 7 days (like media cleanup)
+        _fh = TimedRotatingFileHandler(
+            LOG_DIR / "kesha.log", when="midnight", interval=1,
+            backupCount=7, encoding="utf-8", utc=False,
+        )
+        _fh.setFormatter(_fmt)
+        logger.addHandler(_fh)
 
 # --- i18n ---
 
@@ -206,6 +224,33 @@ def cleanup_media():
         logger.info(f"Cleaned up {count} old media files")
         _file_cache = {k: v for k, v in _file_cache.items() if Path(v).exists()}
         _save_cache(_file_cache)
+
+
+LOG_MAX_AGE_DAYS = 7
+
+
+def cleanup_logs():
+    """Delete log backup files older than LOG_MAX_AGE_DAYS. Active kesha.log is managed by TimedRotatingFileHandler."""
+    cutoff = time.time() - LOG_MAX_AGE_DAYS * 86400
+    count = 0
+    for f in LOG_DIR.iterdir():
+        # TimedRotatingFileHandler names backups like kesha.log.2026-04-13
+        if f.is_file() and f.name.startswith("kesha.log.") and f.stat().st_mtime < cutoff:
+            f.unlink()
+            count += 1
+    if count:
+        logger.info(f"Cleaned up {count} old log files (>{LOG_MAX_AGE_DAYS}d)")
+
+
+async def daily_cleanup_loop():
+    """Run media + log cleanup every 24h while bot is alive."""
+    while True:
+        await asyncio.sleep(86400)  # 24h
+        try:
+            cleanup_media()
+            cleanup_logs()
+        except Exception as e:
+            logger.error(f"Daily cleanup error: {e}")
 
 
 def media_count() -> int:
@@ -1243,6 +1288,8 @@ async def main():
     global BOT_START_TIME
     BOT_START_TIME = time.time()
     cleanup_media()
+    cleanup_logs()
+    asyncio.create_task(daily_cleanup_loop())
     await set_commands()
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL} | Debug={DEBUG}")
     logger.info(f"Allowed: {ALLOWED or 'all'} | Media: {MEDIA_DIR} | Logs: {LOG_DIR}")

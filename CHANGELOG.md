@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.5 — 2026-04-20
+
+### Fixed
+- **Log timestamps in mixed timezones** — file had some lines in UTC (from systemd service, default TZ) and some in CEST/Europe/Paris (from shell smoke tests when imported with `python -c "import bot"`). Pinned all log timestamps to Krasnoyarsk (UTC+7) via custom `formatTime` regardless of process env.
+- **Smoke tests were appending to prod log** — `import bot` from ad-hoc shells attached a FileHandler to the live `logs/kesha.log`. Moved FileHandler attachment behind `__name__ == "__main__" or KESHA_MAIN=1` guard. Smoke tests now only get StreamHandler.
+
+### Changed
+- **Daily log rotation** — replaced `RotatingFileHandler(maxBytes=10MB, backupCount=5)` with `TimedRotatingFileHandler(when="midnight", backupCount=7)`. Keeps 7 days of history, matches media cleanup cadence.
+- **Auto-cleanup of old log files** — new `cleanup_logs()` removes `kesha.log.YYYY-MM-DD` backups older than 7 days; runs on startup and on a 24h interval alongside `cleanup_media()` via `daily_cleanup_loop`.
+
 ## v1.5.4 — 2026-04-20
 
 ### Fixed
