@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.3 — 2026-04-20
+
+### Changed
+- **SendMessageDraft is back** — native Telegram streaming animation restored after the real dup root cause (v1.5.2) was fixed. With `has_deltas` guard in place, the draft → auto-promote pattern no longer double-delivers.
+- Flow: `SendMessageDraft(draft_id, text, parse_mode=None)` during streaming → when text block ends, final `SendMessageDraft(..., parse_mode="Markdown")` with last full text → next `sendMessage` in chat (status bubble / next turn's draft / trailing trigger) auto-promotes the draft into a real permanent message.
+- **End-of-response trigger**: if a turn ends and no subsequent sendMessage would naturally promote the draft (e.g. stream ended on text with no tool-status bubble after), a zero-width invisible message (`⠀` Braille blank) is sent and immediately deleted to force TG to finalize the hanging draft into a real message.
+
+### Reasoning
+editMessageText on a real message (v1.5.1/v1.5.2) worked but flickered. `SendMessageDraft` gives native, smooth character-by-character animation on the Telegram client — same UX as ChatGPT/Claude.ai streaming. With the dup bug fixed at the source (SDK `text` chunks vs `text_delta` chunks), draft's auto-promote behavior is now safe to rely on.
+
 ## v1.5.2 — 2026-04-20
 
 ### Fixed

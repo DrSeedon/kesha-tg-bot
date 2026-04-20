@@ -688,90 +688,98 @@ async def _ask(message: types.Message, prompt: str):
     retries = 0
 
     # --- Streaming state ---
-    # Using edit_message_text on a real message (not SendMessageDraft), because draft's
-    # auto-finalize on next sendMessage causes double-delivery when a status bubble arrives
-    # mid-stream. editMessageText is explicit and conflict-free.
+    # Native streaming via SendMessageDraft (Bot API 9.5):
+    # - Client animates text as it grows with the same draft_id
+    # - When any NEXT sendMessage arrives in the chat, TG auto-promotes the draft
+    #   into a real message with the last text seen — no flicker, no extra API calls
+    # - To finalize: send one last SendMessageDraft with parse_mode="Markdown" so the
+    #   auto-promoted real message has proper formatting
     parts: list[str] = []
-    has_deltas = False         # true once text_delta chunks seen — suppress later text chunks (dupes)
-    stream_msg = None          # real TG message holding currently-streaming text
-    last_edit_time = 0.0
-    last_edit_text = ""
+    has_deltas = False
+    draft_id = _next_draft_id()
+    last_draft_time = 0.0
+    last_draft_text = ""
+    draft_has_text = False   # True if we ever sent a non-empty draft (i.e. text streaming happened)
     flood_cooldown_until = 0.0
     finalized: list[int] = []
 
     status: Optional[ToolStatusTracker] = None
 
-    async def _stream_update():
-        nonlocal stream_msg, last_edit_time, last_edit_text, flood_cooldown_until
+    async def _draft_update(final: bool = False):
+        """Push current `parts` text as a draft. final=True uses Markdown parse_mode for final edit."""
+        nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text
         text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
             return
         now = time.time()
-        if now < flood_cooldown_until:
-            return
-        if (now - last_edit_time) < STREAM_DRAFT_INTERVAL:
-            return
-        if text == last_edit_text:
-            return
+        if not final:
+            if now < flood_cooldown_until:
+                return
+            if (now - last_draft_time) < STREAM_DRAFT_INTERVAL:
+                return
+            if text == last_draft_text:
+                return
+        parse_mode = "Markdown" if final else None
         try:
-            if stream_msg is None:
-                stream_msg = await message.answer(text, parse_mode=None)
-            else:
-                await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
-            last_edit_text = text
+            await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text, parse_mode=parse_mode))
+            draft_has_text = True
+            last_draft_text = text
         except Exception as e:
             err_str = str(e)
-            if "Flood control" in err_str or "retry after" in err_str.lower():
+            if final and ("can't parse entities" in err_str or "parse" in err_str.lower()):
+                try:
+                    await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text, parse_mode=None))
+                    draft_has_text = True
+                    last_draft_text = text
+                except Exception as e2:
+                    logger.debug(f"Draft final plain fallback failed: {e2}")
+            elif "Flood control" in err_str or "retry after" in err_str.lower():
                 import re
                 m = re.search(r'retry after (\d+)', err_str, re.IGNORECASE)
                 wait_sec = int(m.group(1)) if m else 30
                 flood_cooldown_until = now + wait_sec + 1
-                logger.info(f"Stream flood control, pausing updates for {wait_sec}s")
+                logger.info(f"Draft flood control, pausing updates for {wait_sec}s")
             elif "message is not modified" in err_str:
-                last_edit_text = text
+                last_draft_text = text
             else:
-                logger.debug(f"Stream edit error: {e}")
-        last_edit_time = now
+                logger.debug(f"Draft update error: {e}")
+        last_draft_time = now
+
+    async def _promote_draft():
+        """Turn a hanging draft into a real message by sending any sendMessage.
+        TG client auto-replaces the draft with the last-seen text. No extra dup."""
+        nonlocal draft_has_text, draft_id, last_draft_time, last_draft_text
+        if not draft_has_text:
+            return
+        # Empty sendMessageDraft with a single space "cancels" the hanging draft
+        # (TG requires text 1-4096 chars so we can't send empty).
+        # Actually the cleanest: just let the next real sendMessage (status/next draft/etc.)
+        # auto-promote it. So here we just reset our local state for the NEXT block.
+        draft_has_text = False
+        draft_id = _next_draft_id()
+        last_draft_time = 0.0
+        last_draft_text = ""
 
     async def _finalize_text_block():
-        """Seal current streaming message with final Markdown text. Reset state for next block."""
-        nonlocal parts, has_deltas, stream_msg, last_edit_time, last_edit_text
+        """Finalize current text: last draft update with Markdown, then mark promoted.
+        The draft auto-becomes a real message when the NEXT sendMessage fires."""
+        nonlocal parts, has_deltas
         text = "".join(parts)
         if not text:
             return
         chunks = list(split_msg(text))
-        # First chunk: finalize the in-place stream_msg (if any) with Markdown
-        if stream_msg is not None:
-            try:
-                await bot.edit_message_text(chunks[0], chat_id=cid, message_id=stream_msg.message_id, parse_mode="Markdown")
-            except Exception as e:
-                err = str(e)
-                if "message is not modified" in err:
-                    pass
-                elif "can't parse entities" in err or "parse" in err.lower():
-                    try:
-                        await bot.edit_message_text(chunks[0], chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
-                    except Exception as e2:
-                        logger.debug(f"Final edit plain fallback failed: {e2}")
-                else:
-                    logger.debug(f"Final edit failed: {e}")
-            finalized.append(stream_msg.message_id)
-            stream_msg = None
-            # Send remaining chunks as new messages
-            for p in chunks[1:]:
-                m = await _send_safe(message, p)
-                if m:
-                    finalized.append(m.message_id)
-        else:
-            # No streaming happened (shouldn't normally hit this path, but handle it)
-            for p in chunks:
-                m = await _send_safe(message, p)
-                if m:
-                    finalized.append(m.message_id)
+        # First chunk: goes into the draft as final Markdown-parsed version
+        parts[:] = [chunks[0]]
+        await _draft_update(final=True)
+        # Remaining chunks (if any) as separate real messages — these also promote the draft
+        for p in chunks[1:]:
+            m = await _send_safe(message, p)
+            if m:
+                finalized.append(m.message_id)
+        # Reset state so the NEXT text block starts a fresh draft
+        await _promote_draft()
         parts = []
         has_deltas = False
-        last_edit_time = 0.0
-        last_edit_text = ""
 
     async def _finalize_status():
         nonlocal status
@@ -801,13 +809,13 @@ async def _ask(message: types.Message, prompt: str):
                         await _finalize_status()
                     has_deltas = True
                     parts.append(chunk["content"])
-                    await _stream_update()
+                    await _draft_update()
                 elif ct == "text" and not has_deltas:
                     # Non-streaming text block — only use if we didn't get deltas (else it's a dupe)
                     if status is not None:
                         await _finalize_status()
                     parts.append(chunk["content"])
-                    await _stream_update()
+                    await _draft_update()
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
@@ -847,7 +855,7 @@ async def _ask(message: types.Message, prompt: str):
 
     # --- Finalize ---
     text = "".join(parts)
-    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}")
+    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}, draft_hanging={draft_has_text}")
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
@@ -855,7 +863,7 @@ async def _ask(message: types.Message, prompt: str):
     if parts:
         await _finalize_text_block()
 
-    # Close out the status bubble if still open (edge case: stream ended without turn_done)
+    # Close out the status bubble if still open (also auto-promotes any hanging draft)
     if status is not None:
         if status.tools:
             mid = await status.finalize()
@@ -864,6 +872,23 @@ async def _ask(message: types.Message, prompt: str):
         else:
             await status.cancel_empty()
         status = None
+
+    # If a draft is still hanging (no status bubble or trailing message came after it),
+    # send a silent trigger to auto-promote it. We use a zero-width space which TG accepts
+    # but renders as invisible — but actually a simpler trick: send a minimal real message
+    # that we then delete. Cleanest: the final draft update WITH Markdown is already the
+    # "last state"; we just need ANY next sendMessage. So send a trigger and delete it.
+    if draft_has_text:
+        try:
+            trigger = await message.answer("⠀", parse_mode=None)  # Braille blank — invisible
+            if trigger:
+                try:
+                    await bot.delete_message(cid, trigger.message_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Draft promote trigger failed: {e}")
+        draft_has_text = False
 
     if not text and not finalized:
         await _send_safe(message, t(message, "empty"))
