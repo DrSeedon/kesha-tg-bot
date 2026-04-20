@@ -688,25 +688,25 @@ async def _ask(message: types.Message, prompt: str):
     retries = 0
 
     # --- Streaming state ---
-    # Native streaming via SendMessageDraft (Bot API 9.5):
-    # - Client animates text as it grows with the same draft_id
-    # - When any NEXT sendMessage arrives in the chat, TG auto-promotes the draft
-    #   into a real message with the last text seen — no flicker, no extra API calls
-    # - To finalize: send one last SendMessageDraft with parse_mode="Markdown" so the
-    #   auto-promoted real message has proper formatting
+    # Hybrid approach: SendMessageDraft for live animation DURING streaming,
+    # then send a real sendMessage at finalization so the draft auto-promotes into
+    # a permanent message. To avoid the dup (draft → message + our finalize → message),
+    # we DON'T send a separate finalize sendMessage — the NEXT action (status bubble,
+    # next turn, or an explicit trigger) auto-promotes the last draft state.
+    # We also ensure the final draft update carries parse_mode="Markdown" so the promoted
+    # message has proper formatting.
     parts: list[str] = []
     has_deltas = False
     draft_id = _next_draft_id()
     last_draft_time = 0.0
     last_draft_text = ""
-    draft_has_text = False   # True if we ever sent a non-empty draft (i.e. text streaming happened)
+    draft_has_text = False
     flood_cooldown_until = 0.0
     finalized: list[int] = []
 
     status: Optional[ToolStatusTracker] = None
 
     async def _draft_update(final: bool = False):
-        """Push current `parts` text as a draft. final=True uses Markdown parse_mode for final edit."""
         nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text
         text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
@@ -745,39 +745,24 @@ async def _ask(message: types.Message, prompt: str):
                 logger.debug(f"Draft update error: {e}")
         last_draft_time = now
 
-    async def _promote_draft():
-        """Turn a hanging draft into a real message by sending any sendMessage.
-        TG client auto-replaces the draft with the last-seen text. No extra dup."""
-        nonlocal draft_has_text, draft_id, last_draft_time, last_draft_text
-        if not draft_has_text:
+    async def _finalize_text_block():
+        """Finalize text block by sending the accumulated text as a REAL message.
+        The hanging draft gets naturally replaced/hidden by this real message."""
+        nonlocal parts, has_deltas, draft_has_text, draft_id, last_draft_time, last_draft_text
+        text = "".join(parts)
+        if not text:
             return
-        # Empty sendMessageDraft with a single space "cancels" the hanging draft
-        # (TG requires text 1-4096 chars so we can't send empty).
-        # Actually the cleanest: just let the next real sendMessage (status/next draft/etc.)
-        # auto-promote it. So here we just reset our local state for the NEXT block.
+        # Send as real message with Markdown. This promotes the draft out of limbo
+        # and we get a proper message_id to track.
+        for p in split_msg(text):
+            m = await _send_safe(message, p)
+            if m:
+                finalized.append(m.message_id)
+        # Draft is now superseded by the real message; reset draft state
         draft_has_text = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0
         last_draft_text = ""
-
-    async def _finalize_text_block():
-        """Finalize current text: last draft update with Markdown, then mark promoted.
-        The draft auto-becomes a real message when the NEXT sendMessage fires."""
-        nonlocal parts, has_deltas
-        text = "".join(parts)
-        if not text:
-            return
-        chunks = list(split_msg(text))
-        # First chunk: goes into the draft as final Markdown-parsed version
-        parts[:] = [chunks[0]]
-        await _draft_update(final=True)
-        # Remaining chunks (if any) as separate real messages — these also promote the draft
-        for p in chunks[1:]:
-            m = await _send_safe(message, p)
-            if m:
-                finalized.append(m.message_id)
-        # Reset state so the NEXT text block starts a fresh draft
-        await _promote_draft()
         parts = []
         has_deltas = False
 
@@ -872,23 +857,6 @@ async def _ask(message: types.Message, prompt: str):
         else:
             await status.cancel_empty()
         status = None
-
-    # If a draft is still hanging (no status bubble or trailing message came after it),
-    # send a silent trigger to auto-promote it. We use a zero-width space which TG accepts
-    # but renders as invisible — but actually a simpler trick: send a minimal real message
-    # that we then delete. Cleanest: the final draft update WITH Markdown is already the
-    # "last state"; we just need ANY next sendMessage. So send a trigger and delete it.
-    if draft_has_text:
-        try:
-            trigger = await message.answer("⠀", parse_mode=None)  # Braille blank — invisible
-            if trigger:
-                try:
-                    await bot.delete_message(cid, trigger.message_id)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug(f"Draft promote trigger failed: {e}")
-        draft_has_text = False
 
     if not text and not finalized:
         await _send_safe(message, t(message, "empty"))

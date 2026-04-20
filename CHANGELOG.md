@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.4 — 2026-04-20
+
+### Fixed
+- **Hanging draft at end of response** — in v1.5.3 `_finalize_text_block` only updated the draft with final Markdown text and relied on a subsequent sendMessage to auto-promote it. When the response ended on pure text (no tool status bubble to follow) the draft trigger `⠀` was sent+deleted too fast for TG to promote → user saw NO text at all, only the "🤖 Сделано" status bubble.
+- Changed: keep SendMessageDraft for live streaming animation, but finalize by sending a **real `sendMessage`** with the full final text. This gives us a proper `message_id` to track, and the hanging draft is superseded by the real message on the client.
+
+### Known tradeoff
+A visible bubble may briefly flash during the transition as the draft is replaced by the real message. If TG client auto-promotes the draft rather than replacing it, we may see a brief dup — will monitor and iterate.
+
 ## v1.5.3 — 2026-04-20
 
 ### Changed
