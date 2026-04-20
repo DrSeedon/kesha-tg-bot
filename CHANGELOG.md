@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.1 — 2026-04-20
+
+### Fixed
+- **Duplicate text bubbles** — after v1.5.0 if Claude streamed text and then called a tool, the user saw the same text TWICE: once as the auto-finalized draft (TG clients auto-promote a hanging `SendMessageDraft` into a real message when any other `sendMessage` arrives in the chat — including our status bubble), then again via our explicit `_send_safe`. Swapped `SendMessageDraft` + `_send_safe` for straightforward `message.answer` + `edit_message_text` on a real message. No more draft-finalize race, no dup.
+- **Final stream bubble keeps its message_id** — when text block finalizes (tool/turn_done/end-of-stream), we now edit the existing streaming message with final Markdown-parsed text instead of sending a brand new message + leaving the streaming one as plain-text orphan.
+
 ## v1.5.0 — 2026-04-20
 
 ### Changed

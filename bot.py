@@ -688,29 +688,36 @@ async def _ask(message: types.Message, prompt: str):
     retries = 0
 
     # --- Streaming state ---
-    parts: list[str] = []          # text chunks for current text block
-    draft_id = _next_draft_id()
-    last_draft_time = 0.0
-    last_draft_text = ""
+    # Using edit_message_text on a real message (not SendMessageDraft), because draft's
+    # auto-finalize on next sendMessage causes double-delivery when a status bubble arrives
+    # mid-stream. editMessageText is explicit and conflict-free.
+    parts: list[str] = []
+    stream_msg = None          # real TG message holding currently-streaming text
+    last_edit_time = 0.0
+    last_edit_text = ""
     flood_cooldown_until = 0.0
     finalized: list[int] = []
 
-    status: Optional[ToolStatusTracker] = None  # live tool log bubble for current turn
+    status: Optional[ToolStatusTracker] = None
 
-    async def _draft_update():
-        nonlocal last_draft_time, last_draft_text, flood_cooldown_until
+    async def _stream_update():
+        nonlocal stream_msg, last_edit_time, last_edit_text, flood_cooldown_until
         text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
             return
         now = time.time()
         if now < flood_cooldown_until:
             return
-        if (now - last_draft_time) < STREAM_DRAFT_INTERVAL:
+        if (now - last_edit_time) < STREAM_DRAFT_INTERVAL:
             return
-        if text == last_draft_text:
+        if text == last_edit_text:
             return
         try:
-            await bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text))
+            if stream_msg is None:
+                stream_msg = await message.answer(text, parse_mode=None)
+            else:
+                await bot.edit_message_text(text, chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+            last_edit_text = text
         except Exception as e:
             err_str = str(e)
             if "Flood control" in err_str or "retry after" in err_str.lower():
@@ -718,31 +725,53 @@ async def _ask(message: types.Message, prompt: str):
                 m = re.search(r'retry after (\d+)', err_str, re.IGNORECASE)
                 wait_sec = int(m.group(1)) if m else 30
                 flood_cooldown_until = now + wait_sec + 1
-                logger.info(f"Draft flood control, pausing updates for {wait_sec}s")
+                logger.info(f"Stream flood control, pausing updates for {wait_sec}s")
             elif "message is not modified" in err_str:
-                pass
+                last_edit_text = text
             else:
-                logger.debug(f"Draft update error: {e}")
-        last_draft_time = now
-        last_draft_text = text
+                logger.debug(f"Stream edit error: {e}")
+        last_edit_time = now
 
     async def _finalize_text_block():
-        """Send accumulated text as a new message (or split). Reset draft."""
-        nonlocal parts, draft_id, last_draft_time, last_draft_text
+        """Seal current streaming message with final Markdown text. Reset state for next block."""
+        nonlocal parts, stream_msg, last_edit_time, last_edit_text
         text = "".join(parts)
         if not text:
             return
-        for p in split_msg(text):
-            m = await _send_safe(message, p)
-            if m:
-                finalized.append(m.message_id)
+        chunks = list(split_msg(text))
+        # First chunk: finalize the in-place stream_msg (if any) with Markdown
+        if stream_msg is not None:
+            try:
+                await bot.edit_message_text(chunks[0], chat_id=cid, message_id=stream_msg.message_id, parse_mode="Markdown")
+            except Exception as e:
+                err = str(e)
+                if "message is not modified" in err:
+                    pass
+                elif "can't parse entities" in err or "parse" in err.lower():
+                    try:
+                        await bot.edit_message_text(chunks[0], chat_id=cid, message_id=stream_msg.message_id, parse_mode=None)
+                    except Exception as e2:
+                        logger.debug(f"Final edit plain fallback failed: {e2}")
+                else:
+                    logger.debug(f"Final edit failed: {e}")
+            finalized.append(stream_msg.message_id)
+            stream_msg = None
+            # Send remaining chunks as new messages
+            for p in chunks[1:]:
+                m = await _send_safe(message, p)
+                if m:
+                    finalized.append(m.message_id)
+        else:
+            # No streaming happened (shouldn't normally hit this path, but handle it)
+            for p in chunks:
+                m = await _send_safe(message, p)
+                if m:
+                    finalized.append(m.message_id)
         parts = []
-        draft_id = _next_draft_id()
-        last_draft_time = 0.0
-        last_draft_text = ""
+        last_edit_time = 0.0
+        last_edit_text = ""
 
     async def _finalize_status():
-        """Finalize tool status bubble for current turn."""
         nonlocal status
         if status:
             mid = await status.finalize()
@@ -769,18 +798,18 @@ async def _ask(message: types.Message, prompt: str):
                         # Tool phase ended, text phase starts — finalize status bubble
                         await _finalize_status()
                     parts.append(chunk["content"])
-                    await _draft_update()
+                    await _stream_update()
                 elif ct == "text":
                     # Non-streaming text block (fallback if no deltas)
                     if status is not None:
                         await _finalize_status()
                     parts.append(chunk["content"])
+                    await _stream_update()
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
                     # If text was streaming, finalize it before the next tool
                     if parts:
-                        await _clear_draft(cid, draft_id)
                         await _finalize_text_block()
                     if status is None:
                         status = ToolStatusTracker(bot, message, cid)
@@ -788,7 +817,6 @@ async def _ask(message: types.Message, prompt: str):
                     await status.add_tool(tool_name, tool_input)
                 elif ct == "turn_done":
                     if parts:
-                        await _clear_draft(cid, draft_id)
                         await _finalize_text_block()
                     await _finalize_status()
                 elif ct == "error":
@@ -813,7 +841,6 @@ async def _ask(message: types.Message, prompt: str):
                 break
 
     typer.cancel()
-    await _clear_draft(cid, draft_id)
 
     # --- Finalize ---
     text = "".join(parts)
@@ -821,11 +848,9 @@ async def _ask(message: types.Message, prompt: str):
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
-    if text:
-        for p in split_msg(text):
-            m = await _send_safe(message, p)
-            if m:
-                finalized.append(m.message_id)
+    # If there's still pending text (stream ended without explicit turn_done), finalize it now
+    if parts:
+        await _finalize_text_block()
 
     # Close out the status bubble if still open (edge case: stream ended without turn_done)
     if status is not None:
