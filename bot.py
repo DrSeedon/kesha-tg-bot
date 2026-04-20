@@ -692,6 +692,7 @@ async def _ask(message: types.Message, prompt: str):
     # auto-finalize on next sendMessage causes double-delivery when a status bubble arrives
     # mid-stream. editMessageText is explicit and conflict-free.
     parts: list[str] = []
+    has_deltas = False         # true once text_delta chunks seen — suppress later text chunks (dupes)
     stream_msg = None          # real TG message holding currently-streaming text
     last_edit_time = 0.0
     last_edit_text = ""
@@ -734,7 +735,7 @@ async def _ask(message: types.Message, prompt: str):
 
     async def _finalize_text_block():
         """Seal current streaming message with final Markdown text. Reset state for next block."""
-        nonlocal parts, stream_msg, last_edit_time, last_edit_text
+        nonlocal parts, has_deltas, stream_msg, last_edit_time, last_edit_text
         text = "".join(parts)
         if not text:
             return
@@ -768,6 +769,7 @@ async def _ask(message: types.Message, prompt: str):
                 if m:
                     finalized.append(m.message_id)
         parts = []
+        has_deltas = False
         last_edit_time = 0.0
         last_edit_text = ""
 
@@ -797,10 +799,11 @@ async def _ask(message: types.Message, prompt: str):
                     if status is not None:
                         # Tool phase ended, text phase starts — finalize status bubble
                         await _finalize_status()
+                    has_deltas = True
                     parts.append(chunk["content"])
                     await _stream_update()
-                elif ct == "text":
-                    # Non-streaming text block (fallback if no deltas)
+                elif ct == "text" and not has_deltas:
+                    # Non-streaming text block — only use if we didn't get deltas (else it's a dupe)
                     if status is not None:
                         await _finalize_status()
                     parts.append(chunk["content"])

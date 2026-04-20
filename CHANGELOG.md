@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.2 — 2026-04-20
+
+### Fixed
+- **Real root-cause of duplicate text** — SDK sends BOTH `text_delta` chunks (streaming) AND a final `text` chunk in `AssistantMessage` with the complete text. In v1.5.0 rewrite I dropped the `and not has_deltas` guard on the `text` branch, so both streams appended into `parts` → user saw the same text twice in one bubble. Restored `has_deltas` flag: `text_delta` sets it, `text` is only appended when flag is false. Reset flag on every `_finalize_text_block` for multi-turn responses.
+- The previous v1.5.1 draft-removal was a red herring — dup was inside `parts` itself, not in TG delivery.
+
+### Changed
+- Tool checkmark is now green emoji `✅` instead of plain `✓`.
+
 ## v1.5.1 — 2026-04-20
 
 ### Fixed

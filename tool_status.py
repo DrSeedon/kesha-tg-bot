@@ -102,7 +102,7 @@ class ToolStatusTracker:
                     marker = "⏱"
                 lines.append(f"{marker} {t['icon']} {t['name']}{t['hint']} · {dur}s")
             else:
-                lines.append(f"✓ {t['icon']} {t['name']}{t['hint']} · {dur}s")
+                lines.append(f"✅ {t['icon']} {t['name']}{t['hint']} · {dur}s")
         return "\n".join(lines)
 
     async def _render(self, force: bool = False):
