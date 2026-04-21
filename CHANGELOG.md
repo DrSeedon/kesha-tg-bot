@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.6.0 — 2026-04-21
+
+### Added
+- **Context auto-compaction** — new `compact.py` module that summarizes the current conversation, resets the session, and restarts it with the summary as foundation. Mirrors Claude Code CLI `/compact` but implemented via ClaudeSDKClient (structured summary prompt → `reset()` → new `connect()` with summary preamble).
+- Summary structure: INTENT · DECISIONS · FILES · PENDING · RECENT (last 3-5 messages verbatim). ~800 tokens max, plain text.
+- **Auto-trigger** at `AUTO_COMPACT_PCT` (default 95%). Env-configurable, `0` disables.
+- **User command `/compact`** — force compaction now. Blocked if processing or compaction already running.
+- **MCP tool `compact_context`** — Kesha can trigger it herself when she notices the context is getting heavy (new system_prompt section explains when).
+- **User notifications** always show: `🗜 Сжимаю контекст... (было 76%)` → `✅ Контекст сжат: 76% → 12%`.
+- **New state `_compacting: set[int]`** — while a chat is compacting, incoming messages go to `_queue` (NOT injected into the in-flight summary request). Drained back into a new batch once compaction finishes.
+
 ## v1.5.6 — 2026-04-21
 
 ### Fixed

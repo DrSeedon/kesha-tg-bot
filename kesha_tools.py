@@ -349,9 +349,35 @@ async def react(args):
         return {"content": [{"type": "text", "text": f"React failed: {e}"}], "is_error": True}
 
 
+@tool(
+    "compact_context",
+    "Compact/summarize the current conversation to free up context window. Use this when you notice context usage is getting high (>80%). You'll summarize the conversation yourself, then the session resets and continues with the summary as foundation. User sees a notification with before→after percentages.",
+    {},
+)
+async def compact_context(args):
+    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    if not chat_id:
+        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    import compact as _compact
+    try:
+        async def _notify(text):
+            await _bot_ref.bot.send_message(chat_id, text)
+        claude = _bot_ref.get_session(chat_id)
+        result = await _compact.compact_session(claude, notify=_notify)
+        if result.get("ok"):
+            msg = f"Compacted {result['before_pct']:.0f}% → {result['after_pct']:.0f}%, summary={result['summary_chars']} chars"
+            logger.info(msg)
+            return {"content": [{"type": "text", "text": msg}]}
+        else:
+            return {"content": [{"type": "text", "text": f"Compact failed: {result.get('error')}"}], "is_error": True}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Compact error: {e}"}], "is_error": True}
+
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
     tools=[set_model, set_debounce, toggle_debug, get_bot_status, restart_bot,
            send_photo, send_file, send_video, send_audio, send_voice, react,
-           create_reminder, list_reminders, cancel_reminder, update_reminder],
+           create_reminder, list_reminders, cancel_reminder, update_reminder,
+           compact_context],
 )

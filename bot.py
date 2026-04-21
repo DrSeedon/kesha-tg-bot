@@ -24,6 +24,7 @@ from claude_session import ClaudeSession
 from kesha_tools import kesha_server, set_bot_ref, set_current_chat
 import reminders as _reminders
 from tool_status import ToolStatusTracker
+import compact as _compact
 
 load_dotenv()
 
@@ -35,6 +36,7 @@ DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
 DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
+AUTO_COMPACT_PCT = float(os.getenv("AUTO_COMPACT_PCT", "95"))
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
@@ -550,6 +552,7 @@ _pending_timers: dict[int, asyncio.Task] = {}
 _processing: set[int] = set()
 _cancel: set[int] = set()
 _queue: dict[int, list[list[dict]]] = {}
+_compacting: set[int] = set()  # chat_ids where compaction is in progress — incoming messages wait
 _pending_transcriptions: dict[int, int] = {}  # chat_id -> count of pending transcriptions
 current_batch_message_ids: dict[int, list[int]] = {}
 
@@ -573,6 +576,12 @@ async def _debounce_fire(chat_id: int):
     batch = _pending.pop(chat_id, [])
     _pending_timers.pop(chat_id, None)
     if not batch:
+        return
+
+    if chat_id in _compacting:
+        # Don't inject during compaction — queue messages to process after
+        _queue.setdefault(chat_id, []).append(batch)
+        logger.info(f"Chat {chat_id}: queued {len(batch)} msgs during compaction")
         return
 
     if chat_id in _processing:
@@ -638,6 +647,22 @@ async def _process_batch(chat_id: int, batch: list[dict]):
                 logger.debug(f"Chat {chat_id} full prompt:\n{combined}")
 
             await _ask(last_msg, combined)
+
+            # Auto-compact check after response completes
+            if AUTO_COMPACT_PCT > 0:
+                _compacting.add(chat_id)
+                try:
+                    async def _notify(text):
+                        await bot.send_message(chat_id, text)
+                    result = await _compact.maybe_auto_compact(
+                        get_session(chat_id), AUTO_COMPACT_PCT, notify=_notify
+                    )
+                    if result and result.get("ok"):
+                        logger.info(f"Chat {chat_id}: auto-compact ok, {result['before_pct']:.1f}% → {result['after_pct']:.1f}%")
+                except Exception as e:
+                    logger.error(f"Chat {chat_id}: auto-compact failed: {e}", exc_info=True)
+                finally:
+                    _compacting.discard(chat_id)
     except Exception as e:
         logger.error(f"Chat {chat_id} batch error: {e}", exc_info=True)
         try:
@@ -914,6 +939,7 @@ COMMANDS_RU = [
     BotCommand(command="help", description="Справка по командам"),
     BotCommand(command="status", description="Подробный статус"),
     BotCommand(command="clear", description="Сбросить сессию"),
+    BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
     BotCommand(command="ping", description="Проверить сессию"),
     BotCommand(command="model", description="Сменить модель"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
@@ -926,6 +952,7 @@ COMMANDS_EN = [
     BotCommand(command="help", description="Command reference"),
     BotCommand(command="status", description="Detailed status"),
     BotCommand(command="clear", description="Clear session"),
+    BotCommand(command="compact", description="Compact context (keep a summary)"),
     BotCommand(command="ping", description="Check session"),
     BotCommand(command="model", description="Change model"),
     BotCommand(command="debounce", description="Message batching delay"),
@@ -1005,6 +1032,33 @@ async def h_clear(msg: types.Message):
         return
     get_session(msg.chat.id).reset()
     await _send_safe(msg, t(msg, "cleared"))
+
+
+@dp.message(Command("compact"))
+async def h_compact(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    chat_id = msg.chat.id
+    if chat_id in _processing or chat_id in _compacting:
+        await _send_safe(msg, "⏳ Сейчас идёт обработка, попробуй через секунду.")
+        return
+    _compacting.add(chat_id)
+    try:
+        async def _notify(text):
+            await bot.send_message(chat_id, text)
+        result = await _compact.compact_session(get_session(chat_id), notify=_notify)
+        if not result.get("ok"):
+            await _send_safe(msg, f"⚠️ Не удалось: {result.get('error', 'unknown')}")
+    finally:
+        _compacting.discard(chat_id)
+        # drain any messages that piled up during compaction
+        queued = _queue.pop(chat_id, None)
+        if queued:
+            merged = []
+            for b in queued:
+                merged.extend(b)
+            if merged:
+                asyncio.create_task(_process_batch(chat_id, merged))
 
 
 @dp.message(Command("ping"))
