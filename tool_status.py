@@ -22,17 +22,48 @@ TOOL_ICONS = {
     "NotebookEdit": "📓",
 }
 
-EDIT_INTERVAL = 5.0         # min seconds between message edits (TG rate limit protection)
-TICK_INTERVAL = 5.0         # how often the timer refreshes the display
+# Icons per MCP server name (extracted from mcp__<server>__<tool>)
+MCP_SERVER_ICONS = {
+    "mailru": "📧",
+    "websearch": "🌐",
+    "kesha": "🦜",
+    "yougile": "📋",
+    "pandoc": "📄",
+    "mcp-pandoc": "📄",
+    "aperant": "🏠",
+    "github": "🐙",
+    "github-actions": "⚙️",
+}
+
+EDIT_INTERVAL = 1.0         # min seconds between message edits (TG limit ~1 edit/s per message)
+TICK_INTERVAL = 1.0         # how often the timer refreshes the display
 STALL_HINT_AFTER = 60       # seconds — show "⏱ still working" hint when current tool runs longer
 MAX_HINT_LEN = 60
 
 
 def _tool_icon(name: str) -> str:
+    # MCP tool format: mcp__<server>__<action> — pick icon by server name,
+    # not by substring match on the action (avoids mail_read → 📖 Read false positive)
+    if name.startswith("mcp__"):
+        parts = name.split("__")
+        if len(parts) >= 2:
+            server = parts[1]
+            return MCP_SERVER_ICONS.get(server, "🔌")
+        return "🔌"
+    # Built-in tool: exact startswith match only
     for key, icon in TOOL_ICONS.items():
-        if name.startswith(key) or key.lower() in name.lower():
+        if name == key or name.startswith(key):
             return icon
     return "🔧"
+
+
+def _tool_short_name(name: str) -> str:
+    """For MCP tools, strip the mcp__ prefix for readability: mcp__mailru__mail_read → mail_read"""
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) >= 3:
+            return parts[2]
+    return name
 
 
 def _format_hint(tool_input: Any) -> str:
@@ -69,8 +100,9 @@ class ToolStatusTracker:
         if self._current_idx is not None:
             self.tools[self._current_idx]["end"] = now
         icon = _tool_icon(name)
+        display_name = _tool_short_name(name)
         hint = _format_hint(tool_input)
-        self.tools.append({"name": name, "icon": icon, "hint": hint, "start": now, "end": None})
+        self.tools.append({"name": display_name, "icon": icon, "hint": hint, "start": now, "end": None})
         self._current_idx = len(self.tools) - 1
         await self._render(force=True)
         if self._tick_task is None:

@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.5.6 — 2026-04-21
+
+### Fixed
+- **Wrong icon for MCP tools** — `mcp__mailru__mail_read` matched the generic `Read` icon (📖) because the matcher used substring containment. Switched to exact `startswith` for built-in tools, and per-server icon lookup for MCP tools (`mcp__<server>__<action>` → icon by server name).
+- **Ugly tool names in status bubble** — `mcp__mailru__mail_read` now displays as `mail_read` (shortened). Built-in tool names (`Bash`, `Read`, `Agent`) unchanged.
+
+### Added
+- Per-MCP-server icons: 📧 mailru · 🌐 websearch · 🦜 kesha · 📋 yougile · 📄 pandoc · 🏠 aperant · 🐙 github · ⚙️ github-actions. Fallback `🔌` for unknown MCP servers.
+
+### Changed
+- **Tool status refresh cadence** 5s → 1s. Users see live timer counting up in real time. TG rate limit is ~1 edit/sec per message, and we already have flood-control handling, so 1s is safe.
+
 ## v1.5.5 — 2026-04-20
 
 ### Fixed
