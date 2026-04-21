@@ -962,11 +962,39 @@ COMMANDS_EN = [
 
 
 async def set_commands():
-    await bot.delete_my_commands(scope=BotCommandScopeDefault())
-    await bot.delete_my_commands(scope=BotCommandScopeDefault(), language_code="ru")
+    from aiogram.types import (
+        BotCommandScopeAllPrivateChats,
+        BotCommandScopeAllGroupChats,
+        BotCommandScopeAllChatAdministrators,
+        BotCommandScopeChat,
+    )
+    # Purge commands from every possible scope so stale lists don't show up
+    for scope in (
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+    ):
+        for lang in (None, "ru", "en"):
+            try:
+                if lang:
+                    await bot.delete_my_commands(scope=scope, language_code=lang)
+                else:
+                    await bot.delete_my_commands(scope=scope)
+            except Exception as e:
+                logger.debug(f"delete_my_commands({type(scope).__name__}, {lang}) failed: {e}")
+
+    # Also clear per-chat scopes for allowed users (chat-scoped commands override defaults)
+    for uid in ALLOWED:
+        try:
+            await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=uid))
+            await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=uid), language_code="ru")
+        except Exception as e:
+            logger.debug(f"delete_my_commands chat={uid} failed: {e}")
+
     await bot.set_my_commands(COMMANDS_EN, scope=BotCommandScopeDefault())
     await bot.set_my_commands(COMMANDS_RU, scope=BotCommandScopeDefault(), language_code="ru")
-    logger.info("Bot commands set (RU + EN)")
+    logger.info("Bot commands set (RU + EN), purged other scopes")
 
 
 # --- Handlers ---
