@@ -197,10 +197,26 @@ class ClaudeSession:
 
     def reconnect(self):
         self._connected = False
-        if self._client:
-            asyncio.create_task(self._safe_disconnect())
-            self._client = None
+        old_client = self._client
+        self._client = None
+        if old_client:
+            asyncio.create_task(self._safe_disconnect(old_client))
         logger.info("Session reconnecting (keeping session_id)")
+
+    async def reset_async(self):
+        """Reset session and WAIT for disconnect to complete before returning.
+        Use this when immediately calling send_message() on a new session."""
+        self.session_id = None
+        self._save_session()
+        self._connected = False
+        old_client = self._client
+        self._client = None
+        if old_client:
+            try:
+                await old_client.disconnect()
+            except Exception as e:
+                logger.debug(f"reset_async disconnect error: {e}")
+        logger.info("Session reset (cleared session_id, disconnect awaited)")
 
     def reset(self):
         self.session_id = None
@@ -208,8 +224,11 @@ class ClaudeSession:
         self.reconnect()
         logger.info("Session reset (cleared session_id)")
 
-    async def _safe_disconnect(self):
+    async def _safe_disconnect(self, client=None):
+        client = client or self._client
+        if client is None:
+            return
         try:
-            await self._client.disconnect()
+            await client.disconnect()
         except Exception:
             pass

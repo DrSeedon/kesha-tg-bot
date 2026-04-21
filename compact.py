@@ -83,8 +83,9 @@ async def compact_session(claude, notify=None) -> dict:
 
     logger.info(f"Compact: got summary {len(summary)} chars, resetting session")
 
-    # 2. Reset session → new session_id
-    claude.reset()
+    # 2. Reset session → new session_id. Await disconnect so the next send_message
+    #    doesn't race the old client's shutdown (causes 'NoneType has no write' errors).
+    await claude.reset_async()
 
     # 3. Start fresh with summary as opening message. We use send_message so SDK
     #    connects with new session_id and summary becomes the conversation foundation.

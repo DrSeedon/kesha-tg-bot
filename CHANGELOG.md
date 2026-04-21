@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.6.2 — 2026-04-21
+
+### Fixed
+- **Compact primer crashed with `'NoneType' object has no attribute 'write'`** — right after `reset()`, the compact flow called `send_message()` to install the summary into the fresh session, but `reset()` triggers `reconnect()` which kicks off `_safe_disconnect` as a fire-and-forget `asyncio.create_task(...)`. The old client's shutdown raced the new `connect()` → transport was half-dead → primer write failed → summary never actually entered the new session → user saw "Сессия: none" in `/status` right after compact.
+- Fix has two parts:
+  1. `_safe_disconnect` now takes the client as an explicit argument (old bug: it captured `self._client` which was `None`'d out immediately, so the task always saw `None`).
+  2. New `async def reset_async()` that `await`s the disconnect inline. Compact uses it instead of sync `reset()` so the new `send_message()` runs on a fully torn-down old session.
+
+### Triggered case
+- `/compact` at 13:19 → "Контекст сжат: 80% → 0%" → `/status` showed `Сессия: none` → user asked "че бля"
+- Logs: `Compact primer chunk error: 'NoneType' object has no attribute 'write'`
+
+## v1.6.1 — 2026-04-21
+
+### Fixed
+- **Stale bot commands in TG menu** — user saw phantom commands like "Welcome and setup guide", "Check your pairing status", "Restart Claude Code + TG" that don't exist in code. `/compact` was missing from the menu even though registered. `set_commands()` now explicitly deletes from every API-addressable scope (`Default`, `AllPrivateChats`, `AllGroupChats`, `AllChatAdministrators`, and per-user `Chat(uid)`) before re-registering. Legacy `@BotFather /setcommands` is stored separately on TG servers and must be cleared manually there if it persists.
+
 ## v1.6.0 — 2026-04-21
 
 ### Added
