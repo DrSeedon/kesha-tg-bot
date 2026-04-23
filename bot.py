@@ -694,7 +694,21 @@ async def enqueue(msg: types.Message, prompt: str):
     prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
 
     mg = msg.media_group_id
-    logger.info(f"Chat {chat_id}: received from {msg.from_user.id} (media_group={mg})")
+    _kind = (
+        "voice" if msg.voice else
+        "video_note" if msg.video_note else
+        "photo" if msg.photo else
+        "video" if msg.video else
+        "audio" if msg.audio else
+        "document" if msg.document else
+        "sticker" if msg.sticker else
+        "text"
+    )
+    _preview = (msg.text or msg.caption or "")[:80].replace("\n", " ")
+    logger.info(
+        f"Chat {chat_id}: received msg_id={msg.message_id} from={msg.from_user.id} "
+        f"kind={_kind} len={len(prompt)} mg={mg} preview={_preview!r}"
+    )
     if DEBUG:
         logger.debug(f"Chat {chat_id} raw prompt: {prompt}")
 
@@ -879,7 +893,11 @@ async def _ask(message: types.Message, prompt: str):
                         await _finalize_text_block()
                     if status is None:
                         status = ToolStatusTracker(bot, message, cid)
-                    logger.info(f"Chat {cid} tool: {tool_name}")
+                    try:
+                        _ti_short = json.dumps(tool_input, ensure_ascii=False)[:400]
+                    except Exception:
+                        _ti_short = str(tool_input)[:400]
+                    logger.info(f"Chat {cid} tool: {tool_name} input={_ti_short}")
                     await status.add_tool(tool_name, tool_input)
                 elif ct == "turn_done":
                     if parts:
@@ -1366,8 +1384,24 @@ def uptime_str() -> str:
     return " ".join(parts)
 
 
+def _acquire_singleton_lock():
+    import fcntl
+    lock_path = Path(__file__).parent / "storage" / "bot.pid.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fp = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.error(f"Another kesha-bot instance is already running (lock: {lock_path}). Exiting.")
+        sys.exit(1)
+    lock_fp.write(str(os.getpid()))
+    lock_fp.flush()
+    return lock_fp
+
+
 async def main():
     global BOT_START_TIME
+    _lock_fp = _acquire_singleton_lock()
     BOT_START_TIME = time.time()
     cleanup_media()
     cleanup_logs()
