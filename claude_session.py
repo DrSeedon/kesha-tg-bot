@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     ToolResultBlock,
     McpSdkServerConfig,
+    PermissionResultAllow,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,16 @@ class ClaudeSession:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_file.write_text(self.session_id or "")
 
+    @staticmethod
+    async def _auto_approve_tool(tool_name, tool_input, _context=None):
+        try:
+            import json as _json
+            _preview = _json.dumps(tool_input, ensure_ascii=False)[:200]
+        except Exception:
+            _preview = str(tool_input)[:200]
+        logger.info(f"can_use_tool auto-allow: {tool_name} input={_preview}")
+        return PermissionResultAllow(updated_input=tool_input)
+
     def _make_options(self) -> ClaudeAgentOptions:
         model = self.model
         if self.use_1m and "[1m]" not in model:
@@ -68,7 +79,8 @@ class ClaudeSession:
             model=model,
             cwd=self.cwd,
             max_turns=25,
-            permission_mode="bypassPermissions",
+            permission_mode="default",
+            can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
         )
         if self.system_prompt:

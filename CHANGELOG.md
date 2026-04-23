@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.6.4 — 2026-04-23
+
+### Changed
+- **Permission mode `bypassPermissions` → `default` + `can_use_tool` auto-allow callback.** `bypassPermissions` had a known regression (Claude Code issues #36497, #37157, #36923) where writes to `.claude/skills/**` still triggered a permission prompt that the bot had nobody to answer — every tool call there silently failed. The bot then narrated fake "done" messages to the user because the tool error wasn't shown on screen. Switched to explicit permission handling:
+  - Static method `ClaudeSession._auto_approve_tool` returns `PermissionResultAllow(updated_input=...)` for every tool call.
+  - Each invocation logged as `can_use_tool auto-allow: <tool_name> input=<json:200>` — gives one more layer of visibility on top of the existing `tool:` log line.
+  - Net effect identical to `bypassPermissions` for allowed tools (everything still goes through), but the `.claude/skills/` protected-dir gate now accepts our callback as a valid approver instead of blocking.
+- Requires streaming mode (AsyncIterable prompt) — already the case since `ClaudeSDKClient.connect()` is called without a prompt, which gives us the empty-stream path.
+
+### Triggered case
+- Kesha told user "✅ Создал `ACCOUNTING-GUIDE.md` и скилл в `.claude/skills/accounting/`". Guide was written fine, skill dir didn't exist. User asked "как ему доступ давать то". Logs showed two `Write` attempts at 14:31 and 14:32 for `/mnt/data/.../COG-second-brain/.claude/skills/accounting/SKILL.md` — both swallowed by the protected-dir prompt (no retry, no error to the user). Root cause is a Claude Code CLI bug (`.claude/skills` missing from the exempt-list), confirmed in upstream issues. Workaround: explicit `can_use_tool` callback that auto-approves.
+
 ## v1.6.3 — 2026-04-23
 
 ### Fixed
