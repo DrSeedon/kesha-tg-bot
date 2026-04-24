@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.7.2 — 2026-04-24
+
+### Fixed
+- **[blocker] urgent_llm TOCTOU race** — `_fire_reminder` checked `session._is_processing` then scheduled `_run_urgent_llm` as task. Between check and run, a user message could start `_ask()` on the same chat. Two concurrent `query()` on one `ClaudeSDKClient` = undefined. Now `_urgent_llm_handler` waits up to 60s for `_processing` to clear before starting. Found by Codex.
+- **[blocker] inject() silently dropped messages** — `inject()` returned `None`, callers assumed success. If `_is_processing` was false by the time inject ran (race window in async), batch was popped from `_pending` and lost forever. Now `inject()` returns `bool`; `_debounce_fire` requeues on failure. Found by Codex.
+- **[major] Deepgram API key visible in `ps`** — `transcribe()` launched `curl` with `--header "Authorization: Token ..."` as argv. Any local user could read it from `/proc/*/cmdline`. Replaced with `aiohttp` in-process HTTP call — key never leaves the process. Found by Codex.
+- **[major] inject() swallowed errors → reminder lost** — `_fire_reminder` called `inject()` and immediately `mark_fired(delivered=True)` regardless of result. If inject failed, reminder was gone. Now marks delivered only after confirmed injection; failed inject → retry next tick. Found by Codex.
+- **[minor] stale tool bubble on retry** — retry after session error called `status.cancel_empty()` which only deletes message if no tools ran. If tools ran, the "⏳ working" bubble was left frozen. Now `finalize()` is called instead when tools exist. Found by Codex.
+
+## v1.7.1 — 2026-04-24
+
+### Fixed
+- **[P0] `while True/else:break` infinite re-query** — v1.7.0 retry restructure introduced `while True` inner loop with `else: break`. `while True` never terminates by condition, so `else` never fires. After every normal response, `continue` resent the same prompt to Claude. Replaced with explicit `need_retry` flag. Found by Claude agent review.
+- **[P1] `h_voice` missing DEEPGRAM guard** — voice messages silently lost when Deepgram key not set. `h_video_note` had the check, `h_voice` didn't. Added early return with `[voice: path]` tag. Found by Claude agent.
+- **[P1] `/clear` race** — no `_processing` guard. Could reset session mid-stream. Added check. Found by Codex.
+- **[P1] Reminder ownership not enforced** — `cancel_reminder`/`update_reminder` operated by global id without checking `chat_id`. Multi-user: Katya could cancel Maxim's reminders. Added ownership verification. Found by Codex.
+- **[P1] `reminder_loop` fired for removed users** — `allowed_chat_ids` parameter was accepted but never used. Reminders for removed users kept firing. Added filter. Found by Codex.
+- **[P2] `cleanup_media` deleted `.transcription_cache.json`** — not in exclusion list alongside `.cache.json`. Deepgram re-transcribed all cached voice messages after 24h. Found by Claude agent.
+
+### Reasoning
+Dual review: Claude agent (Opus up:reviewer) found 3 bugs, Codex (GPT-5.4 via `codex exec`) found 8 bugs. Zero overlap — each caught the other's blind spots. Claude found the P0 infinite loop (most dangerous), Codex found more security/race issues by count.
+
 ## v1.7.0 — 2026-04-24
 
 ### Fixed
