@@ -85,7 +85,7 @@ class ChatState:
     # NEVER hold _lock across _run_batch/_ask or long I/O.
     async def accept_entry(self, entry: PendingEntry) -> None: ...
     async def transcription_started(self) -> None: ...
-    async def transcription_finished(self, entry: PendingEntry | None, generation: int) -> None: ...
+    async def transcription_finished(self, entry: PendingEntry | None, generation: int, media_generation: int) -> None: ...
     async def request_stop(self) -> bool: ...
     async def request_clear(self) -> bool: ...
     async def request_compact(self) -> bool: ...
@@ -199,20 +199,20 @@ Highest value. All race conditions die here. No files move.
 3. Delete 8 global dicts/sets
 4. Replace ~50 access points using **ChatState public API only** (no direct field mutation from outside):
    - `_pending[cid].append(entry); _debounce_fire(cid)` → `await registry.get(cid).accept_entry(entry)`
-   - `cid in _processing` → `registry.get(cid).get_snapshot().phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING)` or add `@property is_busy -> bool` on ChatState
+   - `cid in _processing` → `(await registry.get(cid).get_snapshot()).phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING)` or add `@property is_busy -> bool` on ChatState (sync, no lock needed — reads single field)
    - `_cancel.add(cid); session.interrupt()` → `await registry.get(cid).request_stop()`
    - `_compacting.add(cid)` → `await registry.get(cid).request_compact()`
    - `/clear` handler → `await registry.get(cid).request_clear()`
    - `set_model(...)` → `await registry.get(cid).set_model(model, use_1m)`
    - `DEBOUNCE_SEC = val` → `await registry.get(cid).set_debounce(val)`
-   - Status display → `registry.get(cid).get_snapshot()`
+   - Status display → `await registry.get(cid).get_snapshot()`
    - No code outside `ChatState` touches `.phase`, `.pending`, `.deferred`, `.cancel_requested` directly.
 5. Update kesha_tools.py: use `registry.get(chat_id)` API methods, not field access
 6. Update reminders.py: `await registry.get(chat_id).run_urgent_prompt(payload)` — no `_is_processing` probing
 
 **Verification:**
 - `python -c "import bot"` passes
-- `grep -rE '_processing|_compacting|_pending\b|_queue\b|_cancel\b|current_batch_message_ids' *.py --exclude=chat_state.py` = 0 hits (repo-wide, not just bot.py)
+- `grep -rE --include='*.py' --exclude='chat_state.py' '_processing|_compacting|_pending\b|_queue\b|_cancel\b|current_batch_message_ids' .` = 0 hits (truly repo-wide)
 - Manual test: text, voice, photo, album, /clear, /stop, /compact, /status, tool calls
 
 ### Phase 2: Extract utility modules (1.5 hours)
