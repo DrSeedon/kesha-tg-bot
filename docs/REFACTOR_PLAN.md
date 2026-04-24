@@ -73,6 +73,7 @@ class ChatState:
         self.batch_message_ids: list[int] = []
         self.last_user_message_id: int | None = None
         self.generation: int = 0  # incremented on /clear — stale callbacks check this
+        self.media_generation: int = 0  # incremented on /clear AND WAITING_MEDIA timeout — stale transcription callbacks check this
         self.pending_model: tuple[str, bool] | None = None  # (model_id, use_1m) deferred during PROCESSING
 
         self._debounce_task: asyncio.Task | None = None
@@ -91,7 +92,7 @@ class ChatState:
     async def run_urgent_prompt(self, prompt: str) -> None: ...
     async def set_model(self, model: str, use_1m: bool) -> None: ...
     async def set_debounce(self, seconds: int) -> None: ...
-    def get_snapshot(self) -> "ChatSnapshot": ...
+    async def get_snapshot(self) -> "ChatSnapshot": ...  # acquires _lock briefly
 
     # --- Internal (state machine) ---
     # Lock protocol: acquire lock → read/mutate phase + fields → release lock → do I/O.
@@ -176,7 +177,7 @@ Source: current bot.py line numbers (v1.7.2)
 | media.py | 214-260, 231-272, 247-256, 424-503, 534-537 | download_file, transcribe (now aiohttp), caches, cleanup, media_count, log_size |
 | chat_state.py | New file (replaces lines 557-564, 698) | ChatPhase, PendingEntry, ChatState, ChatRegistry |
 | pipeline.py | 567-568, 574-605, 608-696, 701-731 | enqueue, _debounce_fire, _process_batch — adapted to ChatState |
-| response_stream.py | 779-968 | _ask() — streaming, drafts, tool status, retries |
+| response_stream.py | 779-968 | _ask(chat_id, prompt, reply_message: Message \| None) — streaming, drafts, tool status, retries. When reply_message=None (reminders), uses bot.send_message(chat_id, ...) instead of message.answer() |
 | handlers.py | 971-1387 | All @dp.message handlers, command lists, set_commands() |
 | bot.py | 276-296, 298-314, 1389-1509 | Bootstrap: bot/dp creation, _load_global_mcp, main(), singleton lock |
 
@@ -198,7 +199,7 @@ Highest value. All race conditions die here. No files move.
 3. Delete 8 global dicts/sets
 4. Replace ~50 access points using **ChatState public API only** (no direct field mutation from outside):
    - `_pending[cid].append(entry); _debounce_fire(cid)` → `await registry.get(cid).accept_entry(entry)`
-   - `cid in _processing` → `registry.get(cid).phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING)`
+   - `cid in _processing` → `registry.get(cid).get_snapshot().phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING)` or add `@property is_busy -> bool` on ChatState
    - `_cancel.add(cid); session.interrupt()` → `await registry.get(cid).request_stop()`
    - `_compacting.add(cid)` → `await registry.get(cid).request_compact()`
    - `/clear` handler → `await registry.get(cid).request_clear()`
@@ -211,7 +212,7 @@ Highest value. All race conditions die here. No files move.
 
 **Verification:**
 - `python -c "import bot"` passes
-- `grep -rE '_processing|_compacting|_pending\b|_queue\b|_cancel\b|current_batch_message_ids' bot.py` = 0 hits
+- `grep -rE '_processing|_compacting|_pending\b|_queue\b|_cancel\b|current_batch_message_ids' *.py --exclude=chat_state.py` = 0 hits (repo-wide, not just bot.py)
 - Manual test: text, voice, photo, album, /clear, /stop, /compact, /status, tool calls
 
 ### Phase 2: Extract utility modules (1.5 hours)
@@ -309,7 +310,11 @@ Future (optional): pytest + fake ClaudeSession for CI, but not blocking the refa
 ## Appendix A: Edge Case Semantics (from Codex review)
 
 ### /clear exact scope
-Under lock: cancel `_debounce_task`, clear `pending`, clear `deferred`, reset `cancel_requested=False`, `compact_requested=False`, clear `batch_message_ids`, reset `pending_transcriptions=0`, increment `generation`, call `session.reset()`. Rejected during PROCESSING/COMPACTING/STOPPING.
+Rejected during PROCESSING/COMPACTING/STOPPING. When allowed (IDLE/COLLECTING/WAITING_MEDIA):
+1. Under lock: cancel `_debounce_task`, clear `pending`, clear `deferred`, reset `cancel_requested=False`, `compact_requested=False`, `pending_model=None`, clear `batch_message_ids`, reset `pending_transcriptions=0`, increment `generation`, increment `media_generation`, set `phase=ChatPhase.IDLE`.
+2. Release lock.
+3. `await session.reset_async()` — I/O happens outside lock.
+4. No need for CLEARING phase since /clear is rejected during active phases.
 
 ### Stale transcription after /clear
 `transcription_finished(entry, generation)` checks `generation == self.generation`. If mismatch — log and discard the entry. Prevents re-enqueueing work from a cleared session.
@@ -330,7 +335,7 @@ Sets `compact_requested=True`. Compaction runs after response completes (in `_ma
 `run_urgent_prompt(prompt)` creates `PendingEntry(prompt=prompt, message_id=0, message=None, source="reminder", reply_target=chat_id)`. If PROCESSING → try inject. If inject fails → queue to deferred. If IDLE → start new turn via `_start_processing`. `_run_batch` handles `entry.message is None` by using `bot.send_message(chat_id, ...)` directly instead of `message.answer(...)`.
 
 ### WAITING_MEDIA timeout
-`TRANSCRIPTION_WAIT_MAX = 30` seconds. If `_on_debounce_elapsed` enters WAITING_MEDIA, it arms a 30s deadline. If deadline fires and `pending_transcriptions > 0`: log warning, process available entries anyway, set `pending_transcriptions = 0`. Late `transcription_finished` callbacks are discarded by generation check or enqueued as new entry if still same generation.
+`TRANSCRIPTION_WAIT_MAX = 30` seconds. If `_on_debounce_elapsed` enters WAITING_MEDIA, it arms a 30s deadline. If deadline fires and `pending_transcriptions > 0`: log warning, increment `media_generation` (separate from `generation`), set `pending_transcriptions = 0`, process available entries. Late `transcription_finished` callbacks compare `media_generation` — mismatch = discard always. `media_generation` is a ChatState field (int, starts 0), incremented on timeout AND on `/clear`.
 
 ### Lock boundary specification
 The `_lock` is held **only for state transitions** — reading/mutating `phase`, `pending`, `deferred`, `cancel_requested`, `compact_requested`, `generation`, `pending_model`. Lock is **never held** across:
