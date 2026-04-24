@@ -91,7 +91,8 @@ async def toggle_debug(args):
 async def get_bot_status(args):
     import config as _cfg
     import media as _media
-    c = _bot_ref.get_session(_resolve_chat())
+    chat_id = _resolve_chat()
+    c = _bot_ref.get_session(chat_id)
     rl = c.rate_limit
     if rl:
         util = rl.get('utilization')
