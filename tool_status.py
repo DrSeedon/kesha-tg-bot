@@ -156,7 +156,10 @@ class ToolStatusTracker:
             return
         if self.status_msg is None:
             try:
-                self.status_msg = await self.message.answer(text, parse_mode="Markdown")
+                if self.message is not None:
+                    self.status_msg = await self.message.answer(text, parse_mode="Markdown")
+                else:
+                    self.status_msg = await self.bot.send_message(self.chat_id, text, parse_mode="Markdown")
                 self._last_text = text
                 self._last_edit_ts = now
             except Exception as e:
