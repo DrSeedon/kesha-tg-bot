@@ -213,9 +213,14 @@ async def list_reminders(args):
 @tool("cancel_reminder", "Cancel/delete reminder by id", {"id": int})
 async def cancel_reminder(args):
     rid = args["id"]
-    ok = _rem.get_db().cancel(rid)
-    if not ok:
+    db = _rem.get_db()
+    row = db.get(rid)
+    if not row:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
+    chat_id = _resolve_chat()
+    if chat_id and row["chat_id"] != chat_id:
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} belongs to another chat"}], "is_error": True}
+    db.cancel(rid)
     logger.info(f"Reminder #{rid} cancelled")
     return {"content": [{"type": "text", "text": f"Reminder #{rid} cancelled"}]}
 
@@ -232,6 +237,9 @@ async def update_reminder(args):
     existing = db.get(rid)
     if not existing:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
+    chat_id = _resolve_chat()
+    if chat_id and existing["chat_id"] != chat_id:
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} belongs to another chat"}], "is_error": True}
     fields = {}
     if "text" in args and args["text"]:
         fields["text"] = args["text"]

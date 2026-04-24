@@ -219,7 +219,7 @@ def cleanup_media():
     cutoff = time.time() - MEDIA_MAX_AGE_H * 3600
     count = 0
     for f in MEDIA_DIR.iterdir():
-        if f.is_file() and f.name != ".cache.json" and f.stat().st_mtime < cutoff:
+        if f.is_file() and f.name not in (".cache.json", ".transcription_cache.json") and f.stat().st_mtime < cutoff:
             f.unlink()
             count += 1
     if count:
@@ -860,6 +860,7 @@ async def _ask(message: types.Message, prompt: str):
             status = None
 
     while retries <= MAX_RETRIES:
+        need_retry = False
         try:
             stream = get_session(cid).send_message(prompt).__aiter__()
             while True:
@@ -875,13 +876,11 @@ async def _ask(message: types.Message, prompt: str):
                 ct = chunk["type"]
                 if ct == "text_delta":
                     if status is not None:
-                        # Tool phase ended, text phase starts — finalize status bubble
                         await _finalize_status()
                     has_deltas = True
                     parts.append(chunk["content"])
                     await _draft_update()
                 elif ct == "text" and not has_deltas:
-                    # Non-streaming text block — only use if we didn't get deltas (else it's a dupe)
                     if status is not None:
                         await _finalize_status()
                     parts.append(chunk["content"])
@@ -889,7 +888,6 @@ async def _ask(message: types.Message, prompt: str):
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
-                    # If text was streaming, finalize it before the next tool
                     if parts:
                         await _finalize_text_block()
                     if status is None:
@@ -917,11 +915,11 @@ async def _ask(message: types.Message, prompt: str):
                             if status:
                                 await status.cancel_empty()
                                 status = None
-                            break  # break inner → outer while retries fresh stream
+                            need_retry = True
+                            break
                     parts.append(f"Error: {err}")
-            else:
-                break  # inner loop ended normally (StopAsyncIteration/cancel) → exit outer
-            continue  # inner loop was broken by retry → continue outer to create fresh stream
+            if not need_retry:
+                break
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
             retries += 1
@@ -1084,7 +1082,11 @@ async def h_status(msg: types.Message):
 async def h_clear(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    get_session(msg.chat.id).reset()
+    cid = msg.chat.id
+    if cid in _processing:
+        await _send_safe(msg, "⏳ Подожди, сейчас идёт обработка. Попробуй через секунду.")
+        return
+    get_session(cid).reset()
     await _send_safe(msg, t(msg, "cleared"))
 
 
@@ -1218,6 +1220,9 @@ async def h_voice(msg: types.Message):
     path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
     if not path:
         await enqueue(msg, "[voice: файл слишком большой]")
+        return
+    if not DEEPGRAM:
+        await enqueue(msg, f"[voice: {path}]")
         return
     _pending_transcriptions[chat_id] = _pending_transcriptions.get(chat_id, 0) + 1
     await bot.send_chat_action(chat_id, ChatAction.TYPING)

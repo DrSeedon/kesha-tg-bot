@@ -222,6 +222,8 @@ async def reminder_loop(bot, claude, allowed_chat_ids: set):
             now = utc_now()
             due = db.fetch_pending_due(now)
             for r in due:
+                if allowed_chat_ids and r["chat_id"] not in allowed_chat_ids:
+                    continue
                 await _fire_reminder(r, bot, claude, db)
 
         except Exception as e:
