@@ -69,8 +69,8 @@ async def set_debounce(args):
         return {"content": [{"type": "text", "text": "Debounce must be 0-30 seconds"}], "is_error": True}
     chat_id = _resolve_chat()
     if chat_id and _bot_ref and hasattr(_bot_ref, 'registry') and _bot_ref.registry:
-        import asyncio
         await _bot_ref.registry.get(chat_id).set_debounce(sec)
+        _bot_ref.registry._debounce_sec = sec
     import config as _cfg
     _cfg.DEBOUNCE_SEC = sec
     logger.info(f"Debounce changed to {sec}s")
@@ -105,7 +105,7 @@ async def get_bot_status(args):
     status = (
         f"Model: {c.model}\n"
         f"Session: {c.session_id or 'none'}\n"
-        f"Debounce: {_cfg.DEBOUNCE_SEC}s\n"
+        f"Debounce: {_bot_ref.registry.get(chat_id).debounce_sec if _bot_ref and hasattr(_bot_ref, 'registry') and _bot_ref.registry and chat_id else _cfg.DEBOUNCE_SEC}s\n"
         f"Debug: {'on' if _cfg.DEBUG else 'off'}\n"
         f"CWD: {_cfg.WORK_DIR}\n"
         f"Rate limit: {rl_str}\n"
