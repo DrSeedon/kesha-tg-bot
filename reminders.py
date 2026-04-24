@@ -249,18 +249,9 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
                 f"Text: {text}\n"
                 f"Action: deliver this reminder to the user in your style. Be brief."
             )
-            session = claude(chat_id) if callable(claude) else claude
-            if session._is_processing:
-                ok = await session.inject(payload)
-                if ok:
-                    db.mark_fired(rid, delivered=True)
-                    logger.info(f"Reminder #{rid} urgent_llm injected into running session")
-                else:
-                    logger.warning(f"Reminder #{rid} inject failed, will retry next tick")
-            else:
-                db.mark_fired(rid, delivered=True)
-                asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))
-                logger.info(f"Reminder #{rid} urgent_llm started new turn")
+            db.mark_fired(rid, delivered=True)
+            asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))
+            logger.info(f"Reminder #{rid} urgent_llm dispatched via run_urgent_prompt")
         elif rtype == "lazy_llm":
             db.mark_fired(rid, delivered=False)
             logger.info(f"Reminder #{rid} lazy_llm fired (waiting for user activity)")

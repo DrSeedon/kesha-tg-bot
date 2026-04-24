@@ -25,6 +25,7 @@ from kesha_tools import kesha_server, set_bot_ref, set_current_chat
 import reminders as _reminders
 from tool_status import ToolStatusTracker
 import compact as _compact
+from chat_state import ChatRegistry, ChatPhase, PendingEntry
 
 load_dotenv()
 
@@ -92,6 +93,7 @@ STRINGS = {
             "🐛 Debug: `{debug}`"
         ),
         "cleared": "🧹 Сессия сброшена. Новая начнётся с следующего сообщения.",
+        "clear_busy": "⏳ Подожди, сейчас идёт обработка. Попробуй через секунду.",
         "ping": "🏓 Session: `{session}`",
         "model_set": "✅ Модель: `{model}`",
         "model_usage": "Текущая: `{model}`\nИспользование: `/model claude-sonnet-4-6`",
@@ -145,6 +147,7 @@ STRINGS = {
             "🐛 Debug: `{debug}`"
         ),
         "cleared": "🧹 Session cleared. New one starts with next message.",
+        "clear_busy": "⏳ Processing in progress. Try again in a moment.",
         "ping": "🏓 Session: `{session}`",
         "model_set": "✅ Model: `{model}`",
         "model_usage": "Current: `{model}`\nUsage: `/model claude-sonnet-4-6`",
@@ -295,26 +298,19 @@ def _load_global_mcp() -> dict:
     return servers
 
 
-_sessions: dict[int, ClaudeSession] = {}
 _mcp_config = _load_global_mcp()
 _system_prompt = load_system_prompt()
 
-def get_session(chat_id: int) -> ClaudeSession:
-    if chat_id not in _sessions:
-        from pathlib import Path as _P
-        session_file = _P(__file__).parent / "storage" / "sessions" / str(chat_id)
-        _sessions[chat_id] = ClaudeSession(
-            cwd=WORK_DIR,
-            model=MODEL,
-            system_prompt=_system_prompt,
-            mcp_servers=_mcp_config,
-            session_file=session_file,
-        )
-        logger.info(f"Created new ClaudeSession for chat {chat_id}")
-    return _sessions[chat_id]
+# ChatRegistry — initialized in main(), used by all handlers
+registry: Optional[ChatRegistry] = None
 
-# Backward compat: default session for tools/reminders that use global `claude`
-claude = get_session(list(ALLOWED)[0] if ALLOWED else 0)
+
+def get_session(chat_id: int) -> ClaudeSession:
+    """Convenience accessor for tools/reminders that need the raw ClaudeSession."""
+    if registry is None:
+        raise RuntimeError("ChatRegistry not initialized — call main() first")
+    return registry.get(chat_id).session
+
 
 import sys
 set_bot_ref(sys.modules[__name__])
@@ -552,156 +548,10 @@ def split_msg(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
     return parts
 
 
-# --- Debounce + Queue ---
-
-_pending: dict[int, list[dict]] = {}
-_pending_timers: dict[int, asyncio.Task] = {}
-_processing: set[int] = set()
-_cancel: set[int] = set()
-_queue: dict[int, list[list[dict]]] = {}
-_compacting: set[int] = set()  # chat_ids where compaction is in progress — incoming messages wait
-_pending_transcriptions: dict[int, int] = {}  # chat_id -> count of pending transcriptions
-current_batch_message_ids: dict[int, list[int]] = {}
-
-
-def _make_entry(msg: types.Message, prompt: str) -> dict:
-    return {"msg": msg, "prompt": prompt}
-
-
-TRANSCRIPTION_WAIT_MAX = 30  # max seconds to wait for pending transcriptions
-
-
-async def _debounce_fire(chat_id: int):
-    await asyncio.sleep(DEBOUNCE_SEC)
-    # Wait for pending transcriptions (voice/video_note being transcribed)
-    waited = 0
-    while _pending_transcriptions.get(chat_id, 0) > 0 and waited < TRANSCRIPTION_WAIT_MAX:
-        await asyncio.sleep(0.5)
-        waited += 0.5
-    if waited > 0:
-        logger.info(f"Chat {chat_id}: waited {waited:.1f}s for transcriptions")
-    batch = _pending.pop(chat_id, [])
-    _pending_timers.pop(chat_id, None)
-    if not batch:
-        return
-
-    if chat_id in _compacting:
-        # Don't inject during compaction — queue messages to process after
-        _queue.setdefault(chat_id, []).append(batch)
-        logger.info(f"Chat {chat_id}: queued {len(batch)} msgs during compaction")
-        return
-
-    if chat_id in _processing:
-        combined = "\n\n".join(e["prompt"] for e in batch)
-        new_ids = [e["msg"].message_id for e in batch]
-        current_batch_message_ids.setdefault(chat_id, []).extend(new_ids)
-        logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
-        ok = await get_session(chat_id).inject(combined)
-        if not ok:
-            logger.warning(f"Chat {chat_id}: inject failed, requeuing {len(batch)} msgs")
-            _queue.setdefault(chat_id, []).append(batch)
-        return
-
-    await _process_batch(chat_id, batch)
-
-
-async def _process_batch(chat_id: int, batch: list[dict]):
-    _processing.add(chat_id)
-    set_current_chat(chat_id)
-    current_batch_message_ids[chat_id] = [e["msg"].message_id for e in batch]
-    try:
-            last_msg = batch[-1]["msg"]
-            from datetime import timezone, timedelta
-            krsk = timezone(timedelta(hours=7))
-            batch_time = batch[0]["msg"].date.astimezone(krsk).strftime("%Y-%m-%d %H:%M %z")
-            time_prefix = f"[{batch_time}] "
-            if len(batch) == 1:
-                combined = time_prefix + f"[msg_id={batch[0]['msg'].message_id}] " + batch[0]["prompt"]
-            else:
-                combined = "\n\n".join(
-                    f"--- message {i+1}/{len(batch)} [msg_id={e['msg'].message_id}] ---\n{e['prompt']}"
-                    for i, e in enumerate(batch)
-                )
-                combined = time_prefix + combined
-
-            try:
-                lazy_block = _reminders.get_lazy_block_for_prompt(chat_id)
-                if lazy_block:
-                    combined = lazy_block + combined
-                    logger.info(f"Chat {chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
-            except Exception as e:
-                logger.error(f"Lazy reminder injection failed: {e}")
-
-            previews = []
-            for e in batch:
-                p = e["prompt"]
-                if "[photo:" in p:
-                    previews.append("photo")
-                elif "[voice:" in p:
-                    previews.append("voice")
-                elif "[video_note:" in p:
-                    previews.append("videonote")
-                elif "[video:" in p:
-                    previews.append("video")
-                elif "[document:" in p:
-                    previews.append("doc")
-                elif "[audio:" in p:
-                    previews.append("audio")
-                elif "[sticker:" in p:
-                    previews.append("sticker")
-                else:
-                    txt = p.split("]: ", 1)[-1][:40].replace("\n", " ")
-                    previews.append(f'"{txt}"')
-            logger.info(f"Chat {chat_id}: sending {len(batch)} msgs [{', '.join(previews)}] ({len(combined)} chars)")
-            if DEBUG:
-                logger.debug(f"Chat {chat_id} full prompt:\n{combined}")
-
-            await _ask(last_msg, combined)
-
-            # Auto-compact check after response completes
-            if AUTO_COMPACT_PCT > 0:
-                _compacting.add(chat_id)
-                try:
-                    async def _notify(text):
-                        await bot.send_message(chat_id, text)
-                    result = await _compact.maybe_auto_compact(
-                        get_session(chat_id), AUTO_COMPACT_PCT, notify=_notify
-                    )
-                    if result and result.get("ok"):
-                        logger.info(f"Chat {chat_id}: auto-compact ok, {result['before_pct']:.1f}% → {result['after_pct']:.1f}%")
-                except Exception as e:
-                    logger.error(f"Chat {chat_id}: auto-compact failed: {e}", exc_info=True)
-                finally:
-                    _compacting.discard(chat_id)
-    except Exception as e:
-        logger.error(f"Chat {chat_id} batch error: {e}", exc_info=True)
-        try:
-            await bot.send_message(chat_id, f"Bot error: {e}", parse_mode=None)
-        except Exception:
-            pass
-    finally:
-        _processing.discard(chat_id)
-        queued = _queue.pop(chat_id, None)
-        pending = _pending.pop(chat_id, [])
-        timer = _pending_timers.pop(chat_id, None)
-        if timer and not timer.done():
-            timer.cancel()
-        if queued or pending:
-            merged = []
-            for b in (queued or []):
-                merged.extend(b)
-            merged.extend(pending)
-            if merged:
-                asyncio.create_task(_process_batch(chat_id, merged))
-
-
-last_user_message_id: dict[int, int] = {}
-
-
 async def enqueue(msg: types.Message, prompt: str):
+    """Enqueue a user message into the ChatState pipeline."""
     chat_id = msg.chat.id
-    last_user_message_id[chat_id] = msg.message_id
-    prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
+    full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
 
     mg = msg.media_group_id
     _kind = (
@@ -717,18 +567,19 @@ async def enqueue(msg: types.Message, prompt: str):
     _preview = (msg.text or msg.caption or "")[:80].replace("\n", " ")
     logger.info(
         f"Chat {chat_id}: received msg_id={msg.message_id} from={msg.from_user.id} "
-        f"kind={_kind} len={len(prompt)} mg={mg} preview={_preview!r}"
+        f"kind={_kind} len={len(full_prompt)} mg={mg} preview={_preview!r}"
     )
     if DEBUG:
-        logger.debug(f"Chat {chat_id} raw prompt: {prompt}")
+        logger.debug(f"Chat {chat_id} raw prompt: {full_prompt}")
 
-    _pending.setdefault(chat_id, []).append(_make_entry(msg, prompt))
-
-    old_timer = _pending_timers.get(chat_id)
-    if old_timer and not old_timer.done():
-        old_timer.cancel()
-
-    _pending_timers[chat_id] = asyncio.create_task(_debounce_fire(chat_id))
+    entry = PendingEntry(
+        prompt=full_prompt,
+        message_id=msg.message_id,
+        message=msg,
+        source="user",
+        reply_target=chat_id,
+    )
+    await registry.get(chat_id).accept_entry(entry)
 
 
 async def _send_safe(message: types.Message, text: str):
@@ -776,19 +627,13 @@ async def _clear_draft(chat_id: int, did: int):
         pass
 
 
-async def _ask(message: types.Message, prompt: str):
-    cid = message.chat.id
+async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
+    """Stream a Claude response. message may be None for reminder turns (uses bot.send_message)."""
+    cid = chat_id
     typer = asyncio.create_task(typing_loop(cid))
     retries = 0
 
     # --- Streaming state ---
-    # Hybrid approach: SendMessageDraft for live animation DURING streaming,
-    # then send a real sendMessage at finalization so the draft auto-promotes into
-    # a permanent message. To avoid the dup (draft → message + our finalize → message),
-    # we DON'T send a separate finalize sendMessage — the NEXT action (status bubble,
-    # next turn, or an explicit trigger) auto-promotes the last draft state.
-    # We also ensure the final draft update carries parse_mode="Markdown" so the promoted
-    # message has proper formatting.
     parts: list[str] = []
     has_deltas = False
     draft_id = _next_draft_id()
@@ -799,6 +644,12 @@ async def _ask(message: types.Message, prompt: str):
     finalized: list[int] = []
 
     status: Optional[ToolStatusTracker] = None
+
+    # For reminder turns (no message object), we send via bot.send_message
+    async def _answer(text: str, **kwargs):
+        if message is not None:
+            return await message.answer(text, **kwargs)
+        return await bot.send_message(cid, text, **kwargs)
 
     async def _draft_update(final: bool = False):
         nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text
@@ -840,19 +691,33 @@ async def _ask(message: types.Message, prompt: str):
         last_draft_time = now
 
     async def _finalize_text_block():
-        """Finalize text block by sending the accumulated text as a REAL message.
-        The hanging draft gets naturally replaced/hidden by this real message."""
         nonlocal parts, has_deltas, draft_has_text, draft_id, last_draft_time, last_draft_text
         text = "".join(parts)
         if not text:
             return
-        # Send as real message with Markdown. This promotes the draft out of limbo
-        # and we get a proper message_id to track.
         for p in split_msg(text):
-            m = await _send_safe(message, p)
-            if m:
-                finalized.append(m.message_id)
-        # Draft is now superseded by the real message; reset draft state
+            from aiogram.exceptions import TelegramRetryAfter
+            for attempt in range(3):
+                try:
+                    m = await _answer(p)
+                    if m:
+                        finalized.append(m.message_id)
+                    break
+                except TelegramRetryAfter as e:
+                    logger.warning(f"Flood control, retry after {e.retry_after}s (attempt {attempt+1})")
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception as e:
+                    err_str = str(e)
+                    if "can't parse" in err_str.lower() or "parse entities" in err_str.lower():
+                        try:
+                            m = await _answer(p, parse_mode=None)
+                            if m:
+                                finalized.append(m.message_id)
+                        except Exception:
+                            pass
+                    else:
+                        logger.error(f"_finalize_text_block error: {e}")
+                    break
         draft_has_text = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0
@@ -877,8 +742,10 @@ async def _ask(message: types.Message, prompt: str):
                     chunk = await stream.__anext__()
                 except StopAsyncIteration:
                     break
-                if cid in _cancel:
-                    _cancel.discard(cid)
+                # Check cancel via ChatState
+                cs = registry.get(cid)
+                if cs.cancel_requested:
+                    cs.cancel_requested = False
                     if parts:
                         parts.append("\n\n_(stopped)_")
                     break
@@ -900,6 +767,8 @@ async def _ask(message: types.Message, prompt: str):
                     if parts:
                         await _finalize_text_block()
                     if status is None:
+                        # For reminder turns, message may be None — ToolStatusTracker needs a message
+                        # Use a sentinel: pass message if available, else None (tracker handles None)
                         status = ToolStatusTracker(bot, message, cid)
                     try:
                         _ti_short = json.dumps(tool_input, ensure_ascii=False)[:400]
@@ -918,7 +787,8 @@ async def _ask(message: types.Message, prompt: str):
                         get_session(cid).reconnect()
                         retries += 1
                         if retries <= MAX_RETRIES and not finalized:
-                            await _send_safe(message, t(message, "reconnecting", n=retries))
+                            if message is not None:
+                                await _send_safe(message, t(message, "reconnecting", n=retries))
                             parts.clear()
                             has_deltas = False
                             if status:
@@ -937,7 +807,8 @@ async def _ask(message: types.Message, prompt: str):
             retries += 1
             if retries <= MAX_RETRIES:
                 get_session(cid).reconnect()
-                await _send_safe(message, t(message, "error_retry", n=retries))
+                if message is not None:
+                    await _send_safe(message, t(message, "error_retry", n=retries))
             else:
                 parts.append(f"Error: {e}")
                 break
@@ -950,11 +821,9 @@ async def _ask(message: types.Message, prompt: str):
     if DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
-    # If there's still pending text (stream ended without explicit turn_done), finalize it now
     if parts:
         await _finalize_text_block()
 
-    # Close out the status bubble if still open (also auto-promotes any hanging draft)
     if status is not None:
         if status.tools:
             mid = await status.finalize()
@@ -965,7 +834,7 @@ async def _ask(message: types.Message, prompt: str):
         status = None
 
     if not text and not finalized:
-        await _send_safe(message, t(message, "empty"))
+        await _answer(STRINGS["ru"]["empty"] if message is None else t(message, "empty"))
 
 
 # --- Commands ---
@@ -1039,13 +908,13 @@ async def set_commands():
 async def h_start(msg: types.Message):
     if not allowed(msg.from_user.id):
         return await _deny_once(msg)
-    s = get_session(msg.chat.id)
+    s = registry.get(msg.chat.id).session
     sid = s.session_id
     await _send_safe(msg, t(msg, "start",
         session=sid[:8] + "..." if sid else "new",
         model=s.model,
         cwd=WORK_DIR,
-        debounce=DEBOUNCE_SEC,
+        debounce=registry.get(msg.chat.id).debounce_sec,
         debug="on" if DEBUG else "off",
     ))
 
@@ -1061,7 +930,8 @@ async def h_help(msg: types.Message):
 async def h_status(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    s = get_session(msg.chat.id)
+    cs = registry.get(msg.chat.id)
+    s = cs.session
     sid = s.session_id
     rl = s.rate_limit
     if rl:
@@ -1079,7 +949,7 @@ async def h_status(msg: types.Message):
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
-        debounce=DEBOUNCE_SEC,
+        debounce=cs.debounce_sec,
         debug="on" if DEBUG else "off",
         uptime=uptime_str(),
         context=ctx_str,
@@ -1095,10 +965,10 @@ async def h_clear(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     cid = msg.chat.id
-    if cid in _processing:
-        await _send_safe(msg, "⏳ Подожди, сейчас идёт обработка. Попробуй через секунду.")
+    cleared = await registry.get(cid).request_clear()
+    if not cleared:
+        await _send_safe(msg, t(msg, "clear_busy"))
         return
-    get_session(cid).reset()
     await _send_safe(msg, t(msg, "cleared"))
 
 
@@ -1106,32 +976,22 @@ async def h_clear(msg: types.Message):
 async def h_compact(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
-    chat_id = msg.chat.id
-    if chat_id in _processing or chat_id in _compacting:
-        await _send_safe(msg, "⏳ Сейчас идёт обработка, попробуй через секунду.")
+    cid = msg.chat.id
+    cs = registry.get(cid)
+    if cs.is_busy:
+        # Set flag — compaction will run after current processing ends
+        await cs.request_compact()
+        await _send_safe(msg, "⏳ Сейчас идёт обработка, сжатие запланировано после.")
         return
-    _compacting.add(chat_id)
-    try:
-        async def _notify(text):
-            await bot.send_message(chat_id, text)
-        result = await _compact.compact_session(get_session(chat_id), notify=_notify)
-        if not result.get("ok"):
-            await _send_safe(msg, f"⚠️ Не удалось: {result.get('error', 'unknown')}")
-    finally:
-        _compacting.discard(chat_id)
-        # drain any messages that piled up during compaction
-        queued = _queue.pop(chat_id, None)
-        if queued:
-            merged = []
-            for b in queued:
-                merged.extend(b)
-            if merged:
-                asyncio.create_task(_process_batch(chat_id, merged))
+    await cs.request_compact()
 
 
 @dp.message(Command("ping"))
 async def h_ping(msg: types.Message):
-    await _send_safe(msg, t(msg, "ping", session=get_session(msg.chat.id).session_id or "none"))
+    if not allowed(msg.from_user.id):
+        return
+    sid = registry.get(msg.chat.id).session.session_id
+    await _send_safe(msg, t(msg, "ping", session=sid or "none"))
 
 
 ALLOWED_MODELS = {
@@ -1157,13 +1017,12 @@ async def h_model(msg: types.Message):
         if not model_id:
             await _send_safe(msg, "Unknown model. Available: opus, sonnet, haiku (+ 200k)")
             return
-        s = get_session(msg.chat.id)
-        s.use_1m = not use_200k
-        s.model = model_id
+        use_1m = not use_200k
+        await registry.get(msg.chat.id).set_model(model_id, use_1m)
         ctx = "200K" if use_200k else "1M"
-        await _send_safe(msg, t(msg, "model_set", model=f"{s.model} ({ctx})"))
+        await _send_safe(msg, t(msg, "model_set", model=f"{model_id} ({ctx})"))
     else:
-        await _send_safe(msg, t(msg, "model_usage", model=get_session(msg.chat.id).model))
+        await _send_safe(msg, t(msg, "model_usage", model=registry.get(msg.chat.id).session.model))
 
 
 @dp.message(Command("debounce"))
@@ -1177,13 +1036,14 @@ async def h_debounce(msg: types.Message):
             val = int(args[1].strip())
             if 0 <= val <= 30:
                 DEBOUNCE_SEC = val
-                await _send_safe(msg, t(msg, "debounce_set", sec=DEBOUNCE_SEC))
+                await registry.get(msg.chat.id).set_debounce(val)
+                await _send_safe(msg, t(msg, "debounce_set", sec=val))
             else:
                 await _send_safe(msg, "0-30 sec")
         except ValueError:
-            await _send_safe(msg, t(msg, "debounce_usage", sec=DEBOUNCE_SEC))
+            await _send_safe(msg, t(msg, "debounce_usage", sec=registry.get(msg.chat.id).debounce_sec))
     else:
-        await _send_safe(msg, t(msg, "debounce_usage", sec=DEBOUNCE_SEC))
+        await _send_safe(msg, t(msg, "debounce_usage", sec=registry.get(msg.chat.id).debounce_sec))
 
 
 @dp.message(Command("debug"))
@@ -1216,9 +1076,8 @@ async def h_stop(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     cid = msg.chat.id
-    if cid in _processing:
-        _cancel.add(cid)
-        await get_session(cid).interrupt()
+    stopped = await registry.get(cid).request_stop()
+    if stopped:
         await _send_safe(msg, "Stopping...")
     else:
         await _send_safe(msg, "Nothing to stop.")
@@ -1229,6 +1088,7 @@ async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     chat_id = msg.chat.id
+    cs = registry.get(chat_id)
     path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
     if not path:
         await enqueue(msg, "[voice: файл слишком большой]")
@@ -1236,18 +1096,31 @@ async def h_voice(msg: types.Message):
     if not DEEPGRAM:
         await enqueue(msg, f"[voice: {path}]")
         return
-    _pending_transcriptions[chat_id] = _pending_transcriptions.get(chat_id, 0) + 1
+
+    gen, media_gen = await cs.transcription_started()
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
     try:
         text, err = await transcribe(path, msg.voice.file_unique_id or "")
-    finally:
-        _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
+    except Exception as e:
+        text, err = "", str(e)
+
     if not text:
+        await cs.transcription_finished(None, gen, media_gen)
         err_msg = t(msg, "voice_fail")
         if err:
             err_msg += f" ({err})"
-        return await _send_safe(msg, err_msg)
-    await enqueue(msg, f"[voice: {path} | {text}]")
+        await _send_safe(msg, err_msg)
+        return
+
+    full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[voice: {path} | {text}]"
+    entry = PendingEntry(
+        prompt=full_prompt,
+        message_id=msg.message_id,
+        message=msg,
+        source="user",
+        reply_target=chat_id,
+    )
+    await cs.transcription_finished(entry, gen, media_gen)
 
 
 @dp.message(F.media_group_id)
@@ -1301,30 +1174,49 @@ async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     chat_id = msg.chat.id
+    cs = registry.get(chat_id)
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if not path:
         await enqueue(msg, "[video_note: файл слишком большой]")
         return
-    if DEEPGRAM:
-        _pending_transcriptions[chat_id] = _pending_transcriptions.get(chat_id, 0) + 1
-        audio_path = path.replace(".mp4", ".oga")
-        p = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-i", path, "-vn", "-acodec", "libopus", "-y", audio_path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await p.communicate()
-        if p.returncode == 0:
-            await bot.send_chat_action(chat_id, ChatAction.TYPING)
-            try:
-                text, err = await transcribe(audio_path, msg.video_note.file_unique_id or "")
-            finally:
-                _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
-            if text:
-                await enqueue(msg, f"[video_note: {path} | {text}]")
-                return
-        else:
-            _pending_transcriptions[chat_id] = max(0, _pending_transcriptions.get(chat_id, 1) - 1)
-    await enqueue(msg, f"[video_note: {path}]")
+    if not DEEPGRAM:
+        await enqueue(msg, f"[video_note: {path}]")
+        return
+
+    gen, media_gen = await cs.transcription_started()
+    audio_path = path.replace(".mp4", ".oga")
+    p = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", path, "-vn", "-acodec", "libopus", "-y", audio_path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await p.communicate()
+    if p.returncode == 0:
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        try:
+            text, err = await transcribe(audio_path, msg.video_note.file_unique_id or "")
+        except Exception as e:
+            text, err = "", str(e)
+        if text:
+            full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[video_note: {path} | {text}]"
+            entry = PendingEntry(
+                prompt=full_prompt,
+                message_id=msg.message_id,
+                message=msg,
+                source="user",
+                reply_target=chat_id,
+            )
+            await cs.transcription_finished(entry, gen, media_gen)
+            return
+    # ffmpeg failed or transcription empty — enqueue without transcript
+    full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[video_note: {path}]"
+    fallback_entry = PendingEntry(
+        prompt=full_prompt,
+        message_id=msg.message_id,
+        message=msg,
+        source="user",
+        reply_target=chat_id,
+    )
+    await cs.transcription_finished(fallback_entry, gen, media_gen)
 
 
 @dp.message(F.document)
@@ -1427,58 +1319,40 @@ def _acquire_singleton_lock():
 _singleton_lock_fp = None
 
 async def main():
-    global BOT_START_TIME, _singleton_lock_fp
+    global BOT_START_TIME, _singleton_lock_fp, registry
     _singleton_lock_fp = _acquire_singleton_lock()
     BOT_START_TIME = time.time()
+
+    # Initialize ChatRegistry
+    registry = ChatRegistry(
+        bot=bot,
+        mcp_config=_mcp_config,
+        system_prompt=_system_prompt,
+        model=MODEL,
+        debounce_sec=DEBOUNCE_SEC,
+        auto_compact_pct=AUTO_COMPACT_PCT,
+        ask_fn=_ask,
+        set_current_chat_fn=set_current_chat,
+        get_lazy_block_fn=_reminders.get_lazy_block_for_prompt,
+        compact_session_fn=_compact.compact_session,
+        maybe_auto_compact_fn=_compact.maybe_auto_compact,
+        work_dir=WORK_DIR,
+    )
+
     cleanup_media()
     cleanup_logs()
     asyncio.create_task(daily_cleanup_loop())
     await set_commands()
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL} | Debug={DEBUG}")
     logger.info(f"Allowed: {ALLOWED or 'all'} | Media: {MEDIA_DIR} | Logs: {LOG_DIR}")
-    async def _urgent_llm_handler(chat_id: int, prompt: str):
-        """Handle urgent_llm reminders through normal _ask pipeline with retry."""
-        from datetime import datetime as dt, timezone as tz, timedelta as td
-        max_retries = 3
-        for attempt in range(max_retries):
-            if chat_id in _processing:
-                logger.info(f"urgent_llm waiting for chat {chat_id} to finish processing...")
-                for _ in range(30):
-                    await asyncio.sleep(2)
-                    if chat_id not in _processing:
-                        break
-                if chat_id in _processing:
-                    logger.warning(f"urgent_llm timeout waiting for chat {chat_id}, forcing anyway")
-            try:
-                krsk = tz(td(hours=7))
-                now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
-                full_prompt = f"[{now_str}] " + prompt
 
-                _processing.add(chat_id)
-                set_current_chat(chat_id)
-                current_batch_message_ids[chat_id] = []
-                try:
-                    await bot.send_chat_action(chat_id, "typing")
-                    tmp = await bot.send_message(chat_id, "💭")
-                    await _ask(tmp, full_prompt)
-                finally:
-                    _processing.discard(chat_id)
-                return
-            except Exception as e:
-                logger.error(f"urgent_llm handler error (attempt {attempt+1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    delay = 15 * (attempt + 1)
-                    logger.info(f"urgent_llm retry in {delay}s...")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(f"urgent_llm all {max_retries} attempts failed, sending raw fallback")
-                    for fb_attempt in range(3):
-                        try:
-                            await bot.send_message(chat_id, f"⏰ {prompt}", parse_mode=None)
-                            return
-                        except Exception:
-                            await asyncio.sleep(10)
-                    logger.error(f"urgent_llm fallback also failed for reminder in chat {chat_id}")
+    async def _urgent_llm_handler(chat_id: int, prompt: str):
+        """Handle urgent_llm reminders through ChatState pipeline."""
+        from datetime import datetime as dt, timezone as tz, timedelta as td
+        krsk = tz(td(hours=7))
+        now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
+        full_prompt = f"[{now_str}] " + prompt
+        await registry.get(chat_id).run_urgent_prompt(full_prompt)
 
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 
@@ -1502,7 +1376,10 @@ async def main():
             asyncio.create_task(_urgent_llm_handler(uid,
                 "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
 
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await registry.shutdown()
 
 
 if __name__ == "__main__":
