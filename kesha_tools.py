@@ -67,6 +67,10 @@ async def set_debounce(args):
     sec = args["seconds"]
     if not 0 <= sec <= 30:
         return {"content": [{"type": "text", "text": "Debounce must be 0-30 seconds"}], "is_error": True}
+    chat_id = _resolve_chat()
+    if chat_id and _bot_ref and hasattr(_bot_ref, 'registry') and _bot_ref.registry:
+        import asyncio
+        await _bot_ref.registry.get(chat_id).set_debounce(sec)
     import config as _cfg
     _cfg.DEBOUNCE_SEC = sec
     logger.info(f"Debounce changed to {sec}s")
