@@ -222,9 +222,10 @@ class ChatState:
                 self.deferred.append(list(self.pending))
                 self.pending.clear()
             if self.pending_transcriptions > 0:
+                cancelled_count = self.pending_transcriptions
                 self.media_generation += 1
                 self.pending_transcriptions = 0
-                logger.info(f"Chat {self.chat_id}: compact cancelled {self.pending_transcriptions} pending transcriptions")
+                logger.info(f"Chat {self.chat_id}: compact cancelled {cancelled_count} pending transcriptions")
             self.phase = ChatPhase.COMPACTING
         await self._do_compact()
         return True
