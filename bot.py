@@ -447,15 +447,21 @@ async def transcribe(path: str, unique_id: str = "") -> tuple[str, str | None]:
         logger.info(f"Transcription cache hit: {unique_id} ({len(cached)} chars)")
         return cached, None
 
-    p = await asyncio.create_subprocess_exec(
-        "curl", "-s", "--request", "POST",
-        "--url", "https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true",
-        "--header", f"Authorization: Token {DEEPGRAM}",
-        "--header", "Content-Type: audio/ogg",
-        "--data-binary", f"@{path}",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    out, _ = await p.communicate()
+    import aiohttp as _aiohttp
+    try:
+        async with _aiohttp.ClientSession() as _http:
+            with open(path, "rb") as _af:
+                audio_data = _af.read()
+            async with _http.post(
+                "https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true",
+                headers={"Authorization": f"Token {DEEPGRAM}", "Content-Type": "audio/ogg"},
+                data=audio_data,
+                timeout=_aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                out = await resp.read()
+    except Exception as e:
+        logger.error(f"Deepgram request error: {e}")
+        return "", str(e)
     try:
         data = json.loads(out)
         if "error" in data:
@@ -590,7 +596,10 @@ async def _debounce_fire(chat_id: int):
         new_ids = [e["msg"].message_id for e in batch]
         current_batch_message_ids.setdefault(chat_id, []).extend(new_ids)
         logger.info(f"Chat {chat_id}: injecting {len(batch)} msgs while processing ({len(combined)} chars)")
-        await get_session(chat_id).inject(combined)
+        ok = await get_session(chat_id).inject(combined)
+        if not ok:
+            logger.warning(f"Chat {chat_id}: inject failed, requeuing {len(batch)} msgs")
+            _queue.setdefault(chat_id, []).append(batch)
         return
 
     await _process_batch(chat_id, batch)
@@ -913,7 +922,10 @@ async def _ask(message: types.Message, prompt: str):
                             parts.clear()
                             has_deltas = False
                             if status:
-                                await status.cancel_empty()
+                                if status.tools:
+                                    await status.finalize()
+                                else:
+                                    await status.cancel_empty()
                                 status = None
                             need_retry = True
                             break
@@ -1429,6 +1441,14 @@ async def main():
         from datetime import datetime as dt, timezone as tz, timedelta as td
         max_retries = 3
         for attempt in range(max_retries):
+            if chat_id in _processing:
+                logger.info(f"urgent_llm waiting for chat {chat_id} to finish processing...")
+                for _ in range(30):
+                    await asyncio.sleep(2)
+                    if chat_id not in _processing:
+                        break
+                if chat_id in _processing:
+                    logger.warning(f"urgent_llm timeout waiting for chat {chat_id}, forcing anyway")
             try:
                 krsk = tz(td(hours=7))
                 now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")

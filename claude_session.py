@@ -173,14 +173,17 @@ class ClaudeSession:
         finally:
             self._is_processing = False
 
-    async def inject(self, text: str):
-        if self._client and self._connected and self._is_processing:
-            try:
-                await self._client.query(text)
-                self._expected_results += 1
-                logger.info(f"Injected (expect {self._expected_results} results): {text[:80]}...")
-            except Exception as e:
-                logger.error(f"Inject error: {e}")
+    async def inject(self, text: str) -> bool:
+        if not (self._client and self._connected and self._is_processing):
+            return False
+        try:
+            await self._client.query(text)
+            self._expected_results += 1
+            logger.info(f"Injected (expect {self._expected_results} results): {text[:80]}...")
+            return True
+        except Exception as e:
+            logger.error(f"Inject error: {e}")
+            return False
 
     async def interrupt(self):
         if self._client and self._connected:
