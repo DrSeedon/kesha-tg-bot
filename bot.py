@@ -744,8 +744,7 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
                     break
                 # Check cancel via ChatState
                 cs = registry.get(cid)
-                if cs.cancel_requested:
-                    cs.cancel_requested = False
+                if cs.should_stop():
                     if parts:
                         parts.append("\n\n_(stopped)_")
                     break

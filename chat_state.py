@@ -105,11 +105,13 @@ class ChatState:
             if entry.source == "user" and entry.message_id:
                 self.last_user_message_id = entry.message_id
 
-            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
-                # Try to inject into running Claude turn
+            if self.phase == ChatPhase.STOPPING:
+                self.deferred.append([entry])
+                logger.info(f"Chat {self.chat_id}: queued 1 msg during STOPPING")
+                return
+            if self.phase == ChatPhase.PROCESSING:
                 combined = entry.prompt
                 logger.info(f"Chat {self.chat_id}: injecting 1 msg while processing ({len(combined)} chars)")
-                # Release lock before I/O
                 inject_prompt = combined
                 inject_id = entry.message_id
             elif self.phase == ChatPhase.COMPACTING:
@@ -156,11 +158,17 @@ class ChatState:
             self.pending_transcriptions = max(0, self.pending_transcriptions - 1)
             if entry is not None:
                 self.pending.append(entry)
-            # If we're in WAITING_MEDIA and all transcriptions done → proceed
-            if self.phase == ChatPhase.WAITING_MEDIA and self.pending_transcriptions == 0:
-                ready_batch = list(self.pending)
-                self.pending.clear()
-                self.phase = ChatPhase.PROCESSING
+            if self.pending_transcriptions == 0:
+                if self.phase == ChatPhase.WAITING_MEDIA:
+                    ready_batch = list(self.pending)
+                    self.pending.clear()
+                    if self._debounce_task and not self._debounce_task.done():
+                        self._debounce_task.cancel()
+                        self._debounce_task = None
+                    self.phase = ChatPhase.PROCESSING
+                elif self.phase == ChatPhase.IDLE and self.pending:
+                    await self._arm_debounce()
+                    return
 
         if ready_batch:
             await self._start_processing(ready_batch)
@@ -200,18 +208,22 @@ class ChatState:
         return True
 
     async def request_compact(self) -> bool:
-        """Set compact_requested flag. Returns False if already compacting/processing."""
+        """Request compaction. Deferred during PROCESSING/STOPPING, runs now from IDLE/COLLECTING/WAITING_MEDIA."""
         async with self._lock:
-            if self.phase in (ChatPhase.COMPACTING, ChatPhase.PROCESSING, ChatPhase.STOPPING):
+            if self.phase == ChatPhase.COMPACTING:
+                return True
+            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
                 self.compact_requested = True
-                return True  # deferred
-            # Do it now
+                return True
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+                self._debounce_task = None
             self.phase = ChatPhase.COMPACTING
         await self._do_compact()
         return True
 
     async def run_urgent_prompt(self, prompt: str) -> None:
-        """Run a reminder/urgent prompt. Injects if processing, starts new turn if idle."""
+        """Run a reminder/urgent prompt. Injects if processing, starts new turn immediately if idle."""
         entry = PendingEntry(
             prompt=prompt,
             message_id=0,
@@ -219,12 +231,33 @@ class ChatState:
             source="reminder",
             reply_target=self.chat_id,
         )
-        await self.accept_entry(entry)
+        start_now = False
+        inject_prompt = entry.prompt
+        async with self._lock:
+            if self.phase == ChatPhase.PROCESSING:
+                pass  # will inject below
+            elif self.phase in (ChatPhase.STOPPING, ChatPhase.COMPACTING):
+                self.deferred.append([entry])
+                return
+            elif self.phase == ChatPhase.IDLE:
+                self.phase = ChatPhase.PROCESSING
+                start_now = True
+            else:
+                self.pending.append(entry)
+                return
+
+        if start_now:
+            await self._start_processing([entry])
+            return
+        ok = await self.session.inject(inject_prompt)
+        if not ok:
+            async with self._lock:
+                self.deferred.append([entry])
 
     async def set_model(self, model_id: str, use_1m: bool) -> None:
         """Set model immediately or defer if processing."""
         async with self._lock:
-            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
+            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING, ChatPhase.COMPACTING):
                 self.pending_model = (model_id, use_1m)
                 return
         self.session.model = model_id
@@ -235,6 +268,9 @@ class ChatState:
         """Update debounce value. Already-armed timer runs with old value."""
         async with self._lock:
             self.debounce_sec = seconds
+
+    def should_stop(self) -> bool:
+        return self.cancel_requested
 
     async def get_snapshot(self) -> ChatSnapshot:
         async with self._lock:
@@ -287,9 +323,11 @@ class ChatState:
             waited += 0.5
 
         async with self._lock:
+            self._debounce_task = None
+            if self.phase not in (ChatPhase.COLLECTING, ChatPhase.WAITING_MEDIA):
+                return
             batch = list(self.pending)
             self.pending.clear()
-            self._debounce_task = None
             if not batch:
                 self.phase = ChatPhase.IDLE
                 return
@@ -383,14 +421,17 @@ class ChatState:
             await self._finish_processing()
 
     async def _finish_processing(self) -> None:
-        """Finalize: apply pending_model, transition to IDLE, drain deferred."""
+        """Finalize: apply pending_model, run deferred compact, transition to IDLE, drain deferred."""
+        needs_compact = False
+        model_id = None
+        use_1m = False
         async with self._lock:
-            # Apply deferred model change
             if self.pending_model is not None:
                 model_id, use_1m = self.pending_model
                 self.pending_model = None
-            else:
-                model_id = None
+            if self.compact_requested:
+                needs_compact = True
+                self.compact_requested = False
 
             self.cancel_requested = False
             self.phase = ChatPhase.IDLE
@@ -399,13 +440,18 @@ class ChatState:
         if model_id is not None:
             try:
                 self.session.model = model_id
-                self.session.use_1m = use_1m  # noqa: F821 — assigned conditionally above
+                self.session.use_1m = use_1m
                 await self.session.set_model_live(model_id)
                 logger.info(f"Chat {self.chat_id}: deferred model change applied: {model_id}")
             except Exception as e:
                 logger.error(f"Chat {self.chat_id}: deferred model change failed: {e}")
 
-        await self._drain_deferred()
+        if needs_compact:
+            async with self._lock:
+                self.phase = ChatPhase.COMPACTING
+            await self._do_compact()
+        else:
+            await self._drain_deferred()
 
     async def _maybe_auto_compact(self) -> None:
         """Run auto-compact if threshold exceeded. Sets COMPACTING phase during compact."""
