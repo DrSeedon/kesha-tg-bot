@@ -63,7 +63,7 @@ if not logger.handlers:
     _sh.setFormatter(_fmt)
     logger.addHandler(_sh)
 
-    if __name__ == "__main__" or os.environ.get("KESHA_MAIN") == "1":
+    if not os.environ.get("KESHA_NO_FILE_LOG"):
         _fh = TimedRotatingFileHandler(
             LOG_DIR / "kesha.log", when="midnight", interval=1,
             backupCount=7, encoding="utf-8", utc=False,
