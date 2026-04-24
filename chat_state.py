@@ -178,8 +178,10 @@ class ChatState:
         async with self._lock:
             if self.phase not in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
                 return False
+            prev = self.phase
             self.cancel_requested = True
             self.phase = ChatPhase.STOPPING
+            logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_stop]")
         await self.session.interrupt()
         return True
 
@@ -201,7 +203,9 @@ class ChatState:
             self.pending_transcriptions = 0
             self.generation += 1
             self.media_generation += 1
+            prev = self.phase
             self.phase = ChatPhase.IDLE
+            logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_clear gen={self.generation}]")
 
         # I/O outside lock
         await self.session.reset_async()
@@ -226,7 +230,9 @@ class ChatState:
                 self.media_generation += 1
                 self.pending_transcriptions = 0
                 logger.info(f"Chat {self.chat_id}: compact cancelled {cancelled_count} pending transcriptions")
+            prev = self.phase
             self.phase = ChatPhase.COMPACTING
+            logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_compact]")
         await self._do_compact()
         return True
 
@@ -302,7 +308,9 @@ class ChatState:
         """(Re)arm debounce timer. MUST be called under lock."""
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
+        prev = self.phase
         self.phase = ChatPhase.COLLECTING
+        logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [arm_debounce]")
         self._debounce_task = asyncio.create_task(self._on_debounce_elapsed())
 
     async def _on_debounce_elapsed(self) -> None:
@@ -337,9 +345,13 @@ class ChatState:
             batch = list(self.pending)
             self.pending.clear()
             if not batch:
+                prev = self.phase
                 self.phase = ChatPhase.IDLE
+                logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [debounce_empty]")
                 return
+            prev = self.phase
             self.phase = ChatPhase.PROCESSING
+            logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [debounce_fire batch={len(batch)}]")
 
         await self._start_processing(batch)
 
@@ -509,16 +521,22 @@ class ChatState:
                     merged.extend(b)
                 self.deferred.clear()
                 if merged:
+                    prev = self.phase
                     self.phase = ChatPhase.PROCESSING
+                    logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [drain_deferred n={len(merged)}]")
                 else:
+                    prev = self.phase
                     self.phase = ChatPhase.IDLE
+                    logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [drain_empty]")
                     return
             elif self.pending:
                 self.phase = ChatPhase.IDLE
                 await self._arm_debounce()
                 return
             else:
+                prev = self.phase
                 self.phase = ChatPhase.IDLE
+                logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [idle]")
                 return
         await self._start_processing(merged)
 
