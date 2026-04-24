@@ -45,9 +45,11 @@ class ChatPhase(StrEnum):
 
 @dataclass(slots=True)
 class PendingEntry:
-    message: "types.Message"
     prompt: str
     message_id: int
+    message: "types.Message | None" = None  # None for reminder/system entries
+    source: Literal["user", "reminder"] = "user"
+    reply_target: int | None = None  # chat_id to send response to (always set)
 ```
 
 ### ChatState class
@@ -71,11 +73,15 @@ class ChatState:
         self.batch_message_ids: list[int] = []
         self.last_user_message_id: int | None = None
         self.generation: int = 0  # incremented on /clear — stale callbacks check this
+        self.pending_model: tuple[str, bool] | None = None  # (model_id, use_1m) deferred during PROCESSING
 
         self._debounce_task: asyncio.Task | None = None
+        self._processing_task: asyncio.Task | None = None  # owned task for shutdown cleanup
         self._lock = asyncio.Lock()
 
     # --- Public API (called by handlers, reminders, tools) ---
+    # All public methods acquire _lock internally for state transitions.
+    # NEVER hold _lock across _run_batch/_ask or long I/O.
     async def accept_entry(self, entry: PendingEntry) -> None: ...
     async def transcription_started(self) -> None: ...
     async def transcription_finished(self, entry: PendingEntry | None, generation: int) -> None: ...
@@ -85,13 +91,20 @@ class ChatState:
     async def run_urgent_prompt(self, prompt: str) -> None: ...
     async def set_model(self, model: str, use_1m: bool) -> None: ...
     async def set_debounce(self, seconds: int) -> None: ...
-    def get_snapshot(self) -> dict: ...
+    def get_snapshot(self) -> "ChatSnapshot": ...
 
     # --- Internal (state machine) ---
+    # Lock protocol: acquire lock → read/mutate phase + fields → release lock → do I/O.
+    # Pattern: snapshot state under lock, release, do work, reacquire to finalize.
     async def _arm_debounce(self) -> None: ...
     async def _on_debounce_elapsed(self) -> None: ...
     async def _start_processing(self, batch: list[PendingEntry]) -> None: ...
-    async def _run_batch(self, batch: list[PendingEntry]) -> None: ...
+    async def _run_batch(self, batch: list[PendingEntry]) -> None:
+        # Runs OUTSIDE lock. Lock acquired only for phase transitions at start/end.
+        ...
+    async def _finish_processing(self) -> None:
+        # Under lock: apply pending_model if set, transition to IDLE, drain deferred.
+        ...
     async def _maybe_auto_compact(self) -> None: ...
     async def _drain_deferred(self) -> None: ...
     async def _try_inject(self, batch: list[PendingEntry]) -> bool: ...
@@ -130,6 +143,24 @@ class ChatRegistry:
         return self._chats[chat_id]
 ```
 
+### ChatSnapshot (for /status and diagnostics)
+
+```python
+@dataclass(slots=True)
+class ChatSnapshot:
+    chat_id: int
+    phase: ChatPhase
+    pending_count: int
+    deferred_batches: int
+    pending_transcriptions: int
+    cancel_requested: bool
+    compact_requested: bool
+    generation: int
+    session_id: str | None
+    model: str
+    pending_model: str | None
+```
+
 ### Why asyncio.Lock
 
 Single-threaded asyncio means most operations don't race. But `await` points inside state transitions (e.g. `session.inject()`, `session.interrupt()`) create yield points where another coroutine could mutate state. The lock serializes transitions — not for thread safety, but for coroutine safety at yield points. Lightweight, zero overhead when uncontested.
@@ -165,14 +196,18 @@ Highest value. All race conditions die here. No files move.
 1. Create `chat_state.py` with ChatPhase, PendingEntry, ChatState, ChatRegistry
 2. In `bot.py`: `from chat_state import ChatRegistry`; create registry in `main()`
 3. Delete 8 global dicts/sets
-4. Replace ~50 access points:
-   - `_processing.add(cid)` → `registry.get(cid).phase = ChatPhase.PROCESSING`
-   - `cid in _processing` → `registry.get(cid).phase == ChatPhase.PROCESSING`
-   - `_pending[cid].append(...)` → `registry.get(cid).pending.append(...)`
-   - `_cancel.add(cid)` → `registry.get(cid).cancel_requested = True`
-   - etc.
-5. Update kesha_tools.py: `registry.get(chat_id).phase` instead of `_bot_ref._processing`
-6. Update reminders.py: `registry.get(chat_id).run_urgent_prompt()` instead of probing `_is_processing`
+4. Replace ~50 access points using **ChatState public API only** (no direct field mutation from outside):
+   - `_pending[cid].append(entry); _debounce_fire(cid)` → `await registry.get(cid).accept_entry(entry)`
+   - `cid in _processing` → `registry.get(cid).phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING)`
+   - `_cancel.add(cid); session.interrupt()` → `await registry.get(cid).request_stop()`
+   - `_compacting.add(cid)` → `await registry.get(cid).request_compact()`
+   - `/clear` handler → `await registry.get(cid).request_clear()`
+   - `set_model(...)` → `await registry.get(cid).set_model(model, use_1m)`
+   - `DEBOUNCE_SEC = val` → `await registry.get(cid).set_debounce(val)`
+   - Status display → `registry.get(cid).get_snapshot()`
+   - No code outside `ChatState` touches `.phase`, `.pending`, `.deferred`, `.cancel_requested` directly.
+5. Update kesha_tools.py: use `registry.get(chat_id)` API methods, not field access
+6. Update reminders.py: `await registry.get(chat_id).run_urgent_prompt(payload)` — no `_is_processing` probing
 
 **Verification:**
 - `python -c "import bot"` passes
@@ -280,7 +315,7 @@ Under lock: cancel `_debounce_task`, clear `pending`, clear `deferred`, reset `c
 `transcription_finished(entry, generation)` checks `generation == self.generation`. If mismatch — log and discard the entry. Prevents re-enqueueing work from a cleared session.
 
 ### /model during PROCESSING
-Rejected with "model change applies after current response". Store as `pending_model` on ChatState. Apply in `finish_processing()` before draining deferred.
+Deferred acceptance: acknowledge "model change applies after current response", store as `pending_model = (model_id, use_1m)` on ChatState. Applied in `_finish_processing()` before draining deferred. User sees confirmation, not rejection.
 
 ### /debounce semantics
 Per-chat `self.debounce_sec`. `set_debounce(n)` updates immediately. Already-armed timer runs with old value (not restarted). Next `accept_entry` uses new value.
@@ -292,4 +327,29 @@ Sets `compact_requested=True`. Compaction runs after response completes (in `_ma
 `ChatRegistry.shutdown()`: for each ChatState — cancel debounce_task, cancel any processing_task if applicable, log. Called in `main()` finally block or `dp.shutdown` callback.
 
 ### Urgent reminders during PROCESSING
-`run_urgent_prompt(prompt)` wraps as `PendingEntry(source="reminder")`. If PROCESSING → try inject. If inject fails → queue to deferred. If IDLE → start new turn. Reminders are first-class entries, not side-channel.
+`run_urgent_prompt(prompt)` creates `PendingEntry(prompt=prompt, message_id=0, message=None, source="reminder", reply_target=chat_id)`. If PROCESSING → try inject. If inject fails → queue to deferred. If IDLE → start new turn via `_start_processing`. `_run_batch` handles `entry.message is None` by using `bot.send_message(chat_id, ...)` directly instead of `message.answer(...)`.
+
+### WAITING_MEDIA timeout
+`TRANSCRIPTION_WAIT_MAX = 30` seconds. If `_on_debounce_elapsed` enters WAITING_MEDIA, it arms a 30s deadline. If deadline fires and `pending_transcriptions > 0`: log warning, process available entries anyway, set `pending_transcriptions = 0`. Late `transcription_finished` callbacks are discarded by generation check or enqueued as new entry if still same generation.
+
+### Lock boundary specification
+The `_lock` is held **only for state transitions** — reading/mutating `phase`, `pending`, `deferred`, `cancel_requested`, `compact_requested`, `generation`, `pending_model`. Lock is **never held** across:
+- `_run_batch()` / `_ask()` (long I/O, streaming)
+- `session.inject()` / `session.interrupt()` (SDK calls)
+- `compact_session()` (network I/O)
+- `bot.send_message()` / `bot.edit_message_text()` (Telegram API)
+
+Pattern: acquire lock → snapshot batch + update phase → release lock → do I/O → acquire lock → finalize phase + drain deferred → release lock.
+
+### Shutdown cleanup
+`ChatRegistry.shutdown()`:
+```python
+async def shutdown(self):
+    for chat in self._chats.values():
+        if chat._debounce_task and not chat._debounce_task.done():
+            chat._debounce_task.cancel()
+        if chat._processing_task and not chat._processing_task.done():
+            chat._processing_task.cancel()
+    self._chats.clear()
+```
+Called from `main()` finally block or `dp.shutdown` callback. Prevents orphaned tasks on restart.
