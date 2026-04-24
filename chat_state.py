@@ -218,6 +218,9 @@ class ChatState:
             if self._debounce_task and not self._debounce_task.done():
                 self._debounce_task.cancel()
                 self._debounce_task = None
+            if self.pending:
+                self.deferred.append(list(self.pending))
+                self.pending.clear()
             self.phase = ChatPhase.COMPACTING
         await self._do_compact()
         return True
@@ -434,7 +437,6 @@ class ChatState:
                 self.compact_requested = False
 
             self.cancel_requested = False
-            self.phase = ChatPhase.IDLE
             self.batch_message_ids.clear()
 
         if model_id is not None:
@@ -451,6 +453,8 @@ class ChatState:
                 self.phase = ChatPhase.COMPACTING
             await self._do_compact()
         else:
+            async with self._lock:
+                self.phase = ChatPhase.IDLE
             await self._drain_deferred()
 
     async def _maybe_auto_compact(self) -> None:
