@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.0.0 — 2026-04-24
+
+### Changed
+- **Full architectural refactor** — `bot.py` split from 1385 lines into 7 modules: `config.py`, `telegram_io.py`, `media.py`, `chat_state.py`, `response_stream.py`, `handlers.py`, slim `bot.py` (196 lines). No behavior changes — pure structural improvement.
+- **ChatState state machine** (Phase 1) — replaced 8 global mutable dicts/sets (`_processing`, `_compacting`, `_pending`, `_queue`, `_cancel`, etc.) with per-chat `ChatState` object. Explicit phases: IDLE → COLLECTING → WAITING_MEDIA → PROCESSING → STOPPING → COMPACTING. asyncio.Lock for coroutine safety at yield points.
+- **ChatRegistry** — lazy factory for ChatState per chat_id. Replaces manual session dict management.
+- **Structured transition logging** — all phase changes logged as `phase A → B [event]` for debugging.
+- **set_bot() late binding** — modules receive bot object at runtime, no circular imports.
+
+### Fixed (during cross-review)
+- 14 bugs found in Phase 1 through 7 rounds of Claude×Codex cross-review
+- DEBUG/DEBOUNCE imported by value → now read from config module at runtime
+- MCP `set_debounce` now updates ChatState + ChatRegistry for new chats
+- `get_bot_status` reads actual per-chat debounce from ChatState
+
+### Reasoning
+Dual review process: Claude Opus wrote plan → Codex GPT-5.5 reviewed (4 rounds debate) → both implemented independently → cross-reviewed each other's code (7+4 rounds) → merged best of both. Total: 25+ review rounds across plan + implementation.
+
 ## v1.7.2 — 2026-04-24
 
 ### Fixed

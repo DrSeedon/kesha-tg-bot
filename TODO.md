@@ -1,32 +1,32 @@
 # TODO
 
 ## Done
-- [x] Persistent session_id через файл `./storage/session_id`
+- [x] Persistent session_id через файл `./storage/sessions/<chat_id>`
 - [x] Video note транскрипция (ffmpeg → Deepgram)
-- [x] Стриминг ответов — нативный SendMessageDraft (Bot API 9.5), без мерцания
-- [x] Очередь сообщений (дебаунс + merge при занятом Claude)
+- [x] Стриминг — нативный SendMessageDraft (Bot API 9.5)
+- [x] Дебаунс + merge при занятом Claude
 - [x] Форварды с мета-данными
-- [x] Логирование в файл с ротацией
+- [x] Логирование с ротацией (daily, 7 дней, Krsk timezone)
 - [x] i18n (RU/EN)
 - [x] Media кеширование (file_unique_id → persistent cache)
 - [x] Album support (aiogram-media-group)
-- [x] MCP tools: send_photo, send_file, send_video, send_audio, send_voice, schedule_message, set_model, set_debounce, toggle_debug, get_bot_status, restart_bot
+- [x] MCP tools: send_photo/file/video/audio/voice, set_model, set_debounce, toggle_debug, get_bot_status, restart_bot
 - [x] Reply context в промптах
-- [x] Smart tool/text flow: tool в отдельном бабле, text после tool в том же бабле
-- [x] MCP image generation (OpenRouter) — generate_image тул в websearch MCP
-- [x] ClaudeSDKClient — persistent connection вместо query()
-- [x] Message injection — вклинивание сообщений пока Claude думает
+- [x] Tool/text flow: tool в отдельном бабле, text после tool в том же бабле
+- [x] ClaudeSDKClient — persistent connection
+- [x] Message injection — вклинивание во время обработки
 - [x] Native interrupt через client.interrupt()
-- [x] Live model change через client.set_model()
-- [x] Context usage через client.get_context_usage()
-- [x] /stop — мягкий interrupt с сохранением текста
-- [x] Deepgram cost logging
-- [x] Fix stale response buffer — receive_messages() + ResultMessage counting
-- [x] Injection turn separation — каждый turn в отдельном TG бабле
-- [x] Reminders system — SQLite + 3 типа (plain/urgent_llm/lazy_llm), repeat (30m/2h/1d/1w/3mo + HH:MM align), lazy TTL 24h promotion, missed-on-startup delivery
-- [x] Stream stall detection: `asyncio.wait_for` per-chunk timeout (120s), finalize partial, reconnect session, show "⚠️ ответ прервался" вместо тишины
+- [x] Live model change, context usage
+- [x] /stop — мягкий interrupt
+- [x] Reminders — SQLite, 3 типа (plain/urgent_llm/lazy_llm), repeat, lazy TTL promotion
+- [x] Stream stall detection (120s timeout, reconnect)
+- [x] Context compaction (/compact, auto at 95%, MCP tool)
+- [x] Live tool status bubble с таймерами и per-MCP иконками
+- [x] Singleton lock (flock) — защита от двух инстансов
+- [x] can_use_tool auto-approve callback (обход .claude/skills/ bug)
+- [x] **Refactor v2.0** — ChatState state machine, bot.py split (1385→196 строк, 7 модулей)
 
 ## Open
 - [ ] Inline кнопки для частых действий
-- [ ] Webhook вместо polling (для production)
-- [ ] Rate limiting
+- [ ] Webhook вместо polling
+- [ ] Rate limiting per-user
