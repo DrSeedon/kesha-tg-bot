@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.0 — 2026-04-24
+
+### Fixed
+- **[P0] ToolStatus Markdown parse error spam** — `_format_hint` wrapped tool input in backticks without escaping Markdown V1 special chars (`*`, `_`, `` ` ``, `[`). Telegram rejected every `edit_message_text` with "can't parse entities" → tool bubble froze, ticker spammed error every 1s (116 errors in one session). Now `_escape_md()` escapes V1 control chars. Tool name also escaped in `_render_text`. Codex review caught that initial fix used MarkdownV2 escape set (too aggressive, visible backslashes) — corrected to V1-only.
+- **[P1] `compact_context` MCP tool could recurse into active `send_message()`** — when Claude called `compact_context` as a tool during `_ask()`, it tried to run `compact_session()` which calls `send_message()` again on the same client. Two concurrent `query()`/`receive_messages()` on one `ClaudeSDKClient` = undefined. Now returns error "use /compact between messages" when `_processing`.
+- **[P1] Multi-user session leak** — `set_model`, `get_bot_status`, `compact_context` all used global `_bot_ref.claude` (= first ALLOWED user's session). If Katya changed model → Maxim's session changed. Now resolved via `_resolve_chat()` helper → `get_current_chat()` with safe fallback.
+- **[P2] Path traversal in `download_file`** — `doc.file_name` from Telegram went directly into `MEDIA_DIR / name`. A crafted `../../../etc/passwd` filename would write outside media dir. Now `Path(name).name` strips directory components.
+- **[P2] Retry after session error consumed dead stream** — `continue` in inner loop kept iterating the old (disconnected) async generator instead of creating a fresh `send_message()`. Codex review caught this. Restructured to `break` inner → `continue` outer with `for/while...else` pattern. Also guards retry with `not finalized` (no retry after user-visible messages sent).
+- **[P3] Singleton lock fd could be GC'd** — `_lock_fp` was local in `main()`. Moved to global `_singleton_lock_fp`.
+
+### Triggered case
+- User reported "Kesha тупит" → logs showed 116x `ToolStatus edit error: can't parse entities` at byte offset 189 — the `mcp__yougile__create_task` input contained HTML tags (`<br>`, `<b>`) which broke Markdown V1 parsing inside the backtick hint. Tool bubble froze mid-update, user saw stale "⏳ create_task" forever.
+- Codex adversarial review (GPT-5.4 via `codex exec`) caught 4 additional issues in v1.7.0 first-pass fixes, including the retry-loop `continue`-vs-`break` bug and MarkdownV1-vs-V2 escape mismatch.
+
 ## v1.6.4 — 2026-04-23
 
 ### Changed

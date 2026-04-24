@@ -31,6 +31,10 @@ def get_current_chat() -> int | None:
     return _current_chat_id.get(None)
 
 
+def _resolve_chat() -> int | None:
+    return get_current_chat() or (next(iter(_bot_ref.ALLOWED), None) if _bot_ref else None)
+
+
 ALLOWED_MODELS = {
     "opus": "claude-opus-4-6",
     "opus 1m": "claude-opus-4-6",
@@ -50,7 +54,7 @@ async def set_model(args):
     model_id = ALLOWED_MODELS.get(name)
     if not model_id:
         return {"content": [{"type": "text", "text": f"Unknown model '{name}'. Available: opus, sonnet, haiku (+ '200k' for standard context)"}], "is_error": True}
-    claude = _bot_ref.get_session(get_current_chat() or next(iter(_bot_ref.ALLOWED)))
+    claude = _bot_ref.get_session(_resolve_chat())
     claude.use_1m = not use_200k
     await claude.set_model_live(model_id)
     ctx = "200K" if use_200k else "1M"
@@ -79,7 +83,7 @@ async def toggle_debug(args):
 
 @tool("get_bot_status", "Get current bot configuration and status", {})
 async def get_bot_status(args):
-    c = _bot_ref.get_session(get_current_chat() or next(iter(_bot_ref.ALLOWED)))
+    c = _bot_ref.get_session(_resolve_chat())
     rl = c.rate_limit
     if rl:
         util = rl.get('utilization')
@@ -127,7 +131,7 @@ async def _do_restart():
 async def send_photo(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -147,7 +151,7 @@ async def send_photo(args):
 async def send_file(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -173,7 +177,7 @@ async def send_file(args):
     {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
 )
 async def create_reminder(args):
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:
@@ -195,7 +199,7 @@ async def create_reminder(args):
 @tool("list_reminders", "List reminders for current chat. include_fired=true to also show delivered/past ones.",
       {"include_fired": bool})
 async def list_reminders(args):
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     include = bool(args.get("include_fired", False))
@@ -255,7 +259,7 @@ async def update_reminder(args):
 async def send_video(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -275,7 +279,7 @@ async def send_video(args):
 async def send_audio(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -294,7 +298,7 @@ async def send_audio(args):
 @tool("send_voice", "Send a voice message to the user in Telegram", {"path": str})
 async def send_voice(args):
     path = args["path"]
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     p = Path(path)
@@ -315,7 +319,7 @@ async def send_voice(args):
     "reactions": list,
 })
 async def react(args):
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     try:
@@ -356,7 +360,7 @@ async def react(args):
     {},
 )
 async def compact_context(args):
-    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
+    chat_id = _resolve_chat()
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     if chat_id in _bot_ref._processing:

@@ -910,13 +910,18 @@ async def _ask(message: types.Message, prompt: str):
                         logger.warning(f"Session error, reconnecting: {err}")
                         get_session(cid).reconnect()
                         retries += 1
-                        if retries <= MAX_RETRIES:
+                        if retries <= MAX_RETRIES and not finalized:
                             await _send_safe(message, t(message, "reconnecting", n=retries))
                             parts.clear()
                             has_deltas = False
-                            continue
+                            if status:
+                                await status.cancel_empty()
+                                status = None
+                            break  # break inner → outer while retries fresh stream
                     parts.append(f"Error: {err}")
-            break
+            else:
+                break  # inner loop ended normally (StopAsyncIteration/cancel) → exit outer
+            continue  # inner loop was broken by retry → continue outer to create fresh stream
         except Exception as e:
             logger.error(f"Error: {e}", exc_info=True)
             retries += 1

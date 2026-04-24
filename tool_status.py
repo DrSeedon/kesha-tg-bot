@@ -68,7 +68,7 @@ def _tool_short_name(name: str) -> str:
 
 def _escape_md(s: str) -> str:
     import re
-    return re.sub(r'([*_\[\]()~>#+\-=|{}.!`])', r'\\\1', s)
+    return re.sub(r'([*_`\[])', r'\\\1', s)
 
 
 def _format_hint(tool_input: Any) -> str:
