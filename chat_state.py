@@ -221,6 +221,10 @@ class ChatState:
             if self.pending:
                 self.deferred.append(list(self.pending))
                 self.pending.clear()
+            if self.pending_transcriptions > 0:
+                self.media_generation += 1
+                self.pending_transcriptions = 0
+                logger.info(f"Chat {self.chat_id}: compact cancelled {self.pending_transcriptions} pending transcriptions")
             self.phase = ChatPhase.COMPACTING
         await self._do_compact()
         return True
@@ -453,9 +457,7 @@ class ChatState:
                 self.phase = ChatPhase.COMPACTING
             await self._do_compact()
         else:
-            async with self._lock:
-                self.phase = ChatPhase.IDLE
-            await self._drain_deferred()
+            await self._drain_or_idle()
 
     async def _maybe_auto_compact(self) -> None:
         """Run auto-compact if threshold exceeded. Sets COMPACTING phase during compact."""
@@ -495,9 +497,29 @@ class ChatState:
         finally:
             async with self._lock:
                 self.compact_requested = False
-                self.phase = ChatPhase.IDLE
+            await self._drain_or_idle()
 
-        await self._drain_deferred()
+    async def _drain_or_idle(self) -> None:
+        """Atomically: if deferred exists → PROCESSING + drain, else → IDLE. No IDLE window."""
+        async with self._lock:
+            if self.deferred:
+                merged: list[PendingEntry] = []
+                for b in self.deferred:
+                    merged.extend(b)
+                self.deferred.clear()
+                if merged:
+                    self.phase = ChatPhase.PROCESSING
+                else:
+                    self.phase = ChatPhase.IDLE
+                    return
+            elif self.pending:
+                self.phase = ChatPhase.IDLE
+                await self._arm_debounce()
+                return
+            else:
+                self.phase = ChatPhase.IDLE
+                return
+        await self._start_processing(merged)
 
     async def _drain_deferred(self) -> None:
         """Process queued deferred batches after PROCESSING/COMPACTING ends."""
