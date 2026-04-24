@@ -506,6 +506,7 @@ async def download_file(file_id: str, name: str, unique_id: str = "") -> str | N
         del _file_cache[unique_id]
     try:
         f = await bot.get_file(file_id)
+        name = Path(name).name
         path = MEDIA_DIR / name
         if path.exists():
             stem = path.stem
@@ -911,6 +912,8 @@ async def _ask(message: types.Message, prompt: str):
                         retries += 1
                         if retries <= MAX_RETRIES:
                             await _send_safe(message, t(message, "reconnecting", n=retries))
+                            parts.clear()
+                            has_deltas = False
                             continue
                     parts.append(f"Error: {err}")
             break
@@ -1399,9 +1402,11 @@ def _acquire_singleton_lock():
     return lock_fp
 
 
+_singleton_lock_fp = None
+
 async def main():
-    global BOT_START_TIME
-    _lock_fp = _acquire_singleton_lock()
+    global BOT_START_TIME, _singleton_lock_fp
+    _singleton_lock_fp = _acquire_singleton_lock()
     BOT_START_TIME = time.time()
     cleanup_media()
     cleanup_logs()

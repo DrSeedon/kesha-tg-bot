@@ -50,8 +50,9 @@ async def set_model(args):
     model_id = ALLOWED_MODELS.get(name)
     if not model_id:
         return {"content": [{"type": "text", "text": f"Unknown model '{name}'. Available: opus, sonnet, haiku (+ '200k' for standard context)"}], "is_error": True}
-    _bot_ref.claude.use_1m = not use_200k
-    await _bot_ref.claude.set_model_live(model_id)
+    claude = _bot_ref.get_session(get_current_chat() or next(iter(_bot_ref.ALLOWED)))
+    claude.use_1m = not use_200k
+    await claude.set_model_live(model_id)
     ctx = "200K" if use_200k else "1M"
     logger.info(f"Model changed to {model_id} ({ctx})")
     return {"content": [{"type": "text", "text": f"Model changed to {model_id} ({ctx} context)"}]}
@@ -78,7 +79,7 @@ async def toggle_debug(args):
 
 @tool("get_bot_status", "Get current bot configuration and status", {})
 async def get_bot_status(args):
-    c = _bot_ref.claude
+    c = _bot_ref.get_session(get_current_chat() or next(iter(_bot_ref.ALLOWED)))
     rl = c.rate_limit
     if rl:
         util = rl.get('utilization')
@@ -355,9 +356,11 @@ async def react(args):
     {},
 )
 async def compact_context(args):
-    chat_id = next(iter(_bot_ref.ALLOWED), None)
+    chat_id = get_current_chat() or next(iter(_bot_ref.ALLOWED), None)
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    if chat_id in _bot_ref._processing:
+        return {"content": [{"type": "text", "text": "Cannot compact while processing — use /compact command between messages instead"}], "is_error": True}
     import compact as _compact
     try:
         async def _notify(text):

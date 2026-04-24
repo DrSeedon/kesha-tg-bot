@@ -66,16 +66,21 @@ def _tool_short_name(name: str) -> str:
     return name
 
 
+def _escape_md(s: str) -> str:
+    import re
+    return re.sub(r'([*_\[\]()~>#+\-=|{}.!`])', r'\\\1', s)
+
+
 def _format_hint(tool_input: Any) -> str:
     if not isinstance(tool_input, dict):
         return ""
     for key in ("command", "file_path", "path", "pattern", "query", "prompt", "url", "description"):
         if key in tool_input and tool_input[key]:
             val = str(tool_input[key])
-            val = val.replace("\n", " ").replace("`", "'")
+            val = val.replace("\n", " ")
             if len(val) > MAX_HINT_LEN:
                 val = val[:MAX_HINT_LEN] + "…"
-            return f" `{val}`"
+            return f" {_escape_md(val)}"
     return ""
 
 
@@ -132,9 +137,9 @@ class ToolStatusTracker:
                 marker = "⏳"
                 if dur >= STALL_HINT_AFTER:
                     marker = "⏱"
-                lines.append(f"{marker} {t['icon']} {t['name']}{t['hint']} · {dur}s")
+                lines.append(f"{marker} {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
             else:
-                lines.append(f"✅ {t['icon']} {t['name']}{t['hint']} · {dur}s")
+                lines.append(f"✅ {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
         return "\n".join(lines)
 
     async def _render(self, force: bool = False):
