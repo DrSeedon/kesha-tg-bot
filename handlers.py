@@ -11,10 +11,10 @@ from aiogram.types import BotCommand, BotCommandScopeDefault
 from aiogram_media_group import media_group_handler
 
 from chat_state import PendingEntry
+import config as _cfg
 from config import (
     ALLOWED,
     ALLOWED_MODELS,
-    DEBUG,
     LOG_DIR,
     STRINGS,
     WORK_DIR,
@@ -90,7 +90,7 @@ async def enqueue(msg: types.Message, prompt: str):
         f"Chat {chat_id}: received msg_id={msg.message_id} from={msg.from_user.id} "
         f"kind={_kind} len={len(full_prompt)} mg={mg} preview={_preview!r}"
     )
-    if DEBUG:
+    if _cfg.DEBUG:
         logger.debug(f"Chat {chat_id} raw prompt: {full_prompt}")
 
     entry = PendingEntry(
@@ -115,7 +115,7 @@ async def h_start(msg: types.Message):
         model=s.model,
         cwd=WORK_DIR,
         debounce=_registry.get(msg.chat.id).debounce_sec,
-        debug="on" if DEBUG else "off",
+        debug="on" if _cfg.DEBUG else "off",
     ))
 
 
@@ -149,7 +149,7 @@ async def h_status(msg: types.Message):
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
         debounce=cs.debounce_sec,
-        debug="on" if DEBUG else "off",
+        debug="on" if _cfg.DEBUG else "off",
         uptime=uptime,
         context=ctx_str,
         rate_limit=rl_str,

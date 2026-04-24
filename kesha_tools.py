@@ -67,22 +67,26 @@ async def set_debounce(args):
     sec = args["seconds"]
     if not 0 <= sec <= 30:
         return {"content": [{"type": "text", "text": "Debounce must be 0-30 seconds"}], "is_error": True}
-    _bot_ref.DEBOUNCE_SEC = sec
+    import config as _cfg
+    _cfg.DEBOUNCE_SEC = sec
     logger.info(f"Debounce changed to {sec}s")
     return {"content": [{"type": "text", "text": f"Debounce changed to {sec}s"}]}
 
 
 @tool("toggle_debug", "Toggle debug logging on/off", {})
 async def toggle_debug(args):
-    _bot_ref.DEBUG = not _bot_ref.DEBUG
-    _bot_ref.logger.setLevel(logging.DEBUG if _bot_ref.DEBUG else logging.INFO)
-    state = "on" if _bot_ref.DEBUG else "off"
+    import config as _cfg
+    _cfg.DEBUG = not _cfg.DEBUG
+    _cfg.logger.setLevel(logging.DEBUG if _cfg.DEBUG else logging.INFO)
+    state = "on" if _cfg.DEBUG else "off"
     logger.info(f"Debug toggled {state}")
     return {"content": [{"type": "text", "text": f"Debug is now {state}"}]}
 
 
 @tool("get_bot_status", "Get current bot configuration and status", {})
 async def get_bot_status(args):
+    import config as _cfg
+    import media as _media
     c = _bot_ref.get_session(_resolve_chat())
     rl = c.rate_limit
     if rl:
@@ -97,15 +101,15 @@ async def get_bot_status(args):
     status = (
         f"Model: {c.model}\n"
         f"Session: {c.session_id or 'none'}\n"
-        f"Debounce: {_bot_ref.DEBOUNCE_SEC}s\n"
-        f"Debug: {'on' if _bot_ref.DEBUG else 'off'}\n"
-        f"CWD: {_bot_ref.WORK_DIR}\n"
+        f"Debounce: {_cfg.DEBOUNCE_SEC}s\n"
+        f"Debug: {'on' if _cfg.DEBUG else 'off'}\n"
+        f"CWD: {_cfg.WORK_DIR}\n"
         f"Rate limit: {rl_str}\n"
         f"Session cost: ${c.total_cost_usd:.4f}\n"
         f"Context: {ctx_str}\n"
         f"Last response: {dur}, {c.last_num_turns} turns, stop={c.last_stop_reason}\n"
-        f"Media files: {_bot_ref.media_count()}\n"
-        f"Log size: {_bot_ref.log_size()}"
+        f"Media files: {_media.media_count()}\n"
+        f"Log size: {_media.log_size()}"
     )
     return {"content": [{"type": "text", "text": status}]}
 

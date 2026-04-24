@@ -7,7 +7,8 @@ from typing import Optional
 from aiogram import types
 from aiogram.methods import SendMessageDraft
 
-from config import DEBUG, MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
+import config as _config
+from config import MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
 from telegram_io import (
     _next_draft_id,
     _send_safe,
@@ -224,7 +225,7 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
 
     text = "".join(parts)
     logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}, draft_hanging={draft_has_text}")
-    if DEBUG:
+    if _config.DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
     if parts:
