@@ -125,9 +125,10 @@ class ChatState:
                 await self._arm_debounce()
                 return
 
-        # Outside lock: do the inject I/O
         ok = await self.session.inject(inject_prompt)
-        if not ok:
+        if ok:
+            logger.info(f"Chat {self.chat_id}: inject ok ({len(inject_prompt)} chars)")
+        else:
             logger.warning(f"Chat {self.chat_id}: inject failed, requeuing")
             async with self._lock:
                 self.batch_message_ids.append(inject_id)
@@ -442,6 +443,7 @@ class ChatState:
 
     async def _finish_processing(self) -> None:
         """Finalize: apply pending_model, run deferred compact, transition to IDLE, drain deferred."""
+        logger.info(f"Chat {self.chat_id}: _finish_processing start")
         needs_compact = False
         model_id = None
         use_1m = False
@@ -476,6 +478,12 @@ class ChatState:
         """Run auto-compact if threshold exceeded. Sets COMPACTING phase during compact."""
         if self.auto_compact_pct <= 0:
             return
+        usage = await self.session.get_context_usage()
+        pct = usage.get("percentage", 0) if usage else 0
+        if pct < self.auto_compact_pct:
+            logger.info(f"Chat {self.chat_id}: auto-compact skip ({pct:.0f}% < {self.auto_compact_pct:.0f}%)")
+            return
+        logger.info(f"Chat {self.chat_id}: auto-compact triggered ({pct:.0f}% >= {self.auto_compact_pct:.0f}%)")
         async with self._lock:
             self.phase = ChatPhase.COMPACTING
         try:
@@ -487,6 +495,8 @@ class ChatState:
                     f"Chat {self.chat_id}: auto-compact ok, "
                     f"{result.get('before_pct', 0):.1f}% → {result.get('after_pct', 0):.1f}%"
                 )
+            elif result:
+                logger.info(f"Chat {self.chat_id}: auto-compact not needed ({result})")
         except Exception as e:
             logger.error(f"Chat {self.chat_id}: auto-compact failed: {e}", exc_info=True)
         finally:
