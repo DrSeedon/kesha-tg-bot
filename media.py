@@ -8,7 +8,7 @@ from pathlib import Path
 
 from aiogram import types
 
-from config import DEEPGRAM, LOG_DIR, MEDIA_DIR, MEDIA_MAX_AGE_H, logger
+from config import DEEPGRAM, LOG_DIR, MEDIA_DIR, MEDIA_MAX_AGE_H, MEDIA_MAX_MB, logger
 
 _bot = None
 
@@ -26,16 +26,34 @@ LOG_MAX_AGE_DAYS = 7
 
 def cleanup_media():
     global _file_cache
+    skip = (".cache.json", ".transcription_cache.json")
+    files = []
+    total_bytes = 0
+    for f in MEDIA_DIR.iterdir():
+        if f.is_file() and f.name not in skip:
+            st = f.stat()
+            files.append((f, st.st_mtime, st.st_size))
+            total_bytes += st.st_size
+    limit_bytes = MEDIA_MAX_MB * 1024 * 1024
+    if total_bytes <= limit_bytes:
+        logger.info(f"Media cleanup: {total_bytes // (1024*1024)}MB / {MEDIA_MAX_MB}MB — all good")
+        return
+    files.sort(key=lambda x: x[1])
     cutoff = time.time() - MEDIA_MAX_AGE_H * 3600
     count = 0
-    for f in MEDIA_DIR.iterdir():
-        if f.is_file() and f.name not in (".cache.json", ".transcription_cache.json") and f.stat().st_mtime < cutoff:
+    for f, mtime, size in files:
+        if total_bytes <= limit_bytes:
+            break
+        if mtime < cutoff:
             f.unlink()
+            total_bytes -= size
             count += 1
     if count:
-        logger.info(f"Cleaned up {count} old media files")
+        logger.info(f"Cleaned up {count} old media files ({total_bytes // (1024*1024)}MB remaining, limit {MEDIA_MAX_MB}MB)")
         _file_cache = {k: v for k, v in _file_cache.items() if Path(v).exists()}
         _save_cache(_file_cache)
+    elif total_bytes > limit_bytes:
+        logger.warning(f"Media {total_bytes // (1024*1024)}MB > {MEDIA_MAX_MB}MB but no files older than {MEDIA_MAX_AGE_H}h to delete")
 
 
 def cleanup_logs():

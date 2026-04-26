@@ -26,6 +26,7 @@ MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
 GREET_FLAG = Path(__file__).parent / "storage" / "greet_on_restart"
 MEDIA_MAX_AGE_H = 24
+MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
 ALLOWED_MODELS = {
     "opus": "claude-opus-4-6",
