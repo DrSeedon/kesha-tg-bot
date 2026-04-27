@@ -38,7 +38,7 @@ MCP_SERVER_ICONS = {
 EDIT_INTERVAL = 1.0         # min seconds between message edits (TG limit ~1 edit/s per message)
 TICK_INTERVAL = 1.0         # how often the timer refreshes the display
 STALL_HINT_AFTER = 60       # seconds — show "⏱ still working" hint when current tool runs longer
-MAX_HINT_LEN = 60
+MAX_HINT_LEN = 120
 
 
 def _tool_icon(name: str) -> str:
