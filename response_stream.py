@@ -41,15 +41,7 @@ def _get_session(chat_id: int):
     return _registry.get(chat_id).session
 
 
-import re as _re
-
-def _sanitize_md(text: str) -> str:
-    text = text.replace("\\_", "_")
-    text = text.replace("\\*", "*")
-    text = text.replace("\\`", "`")
-    text = text.replace("\\[", "[")
-    text = _re.sub(r'```[a-zA-Z]+\n', '```\n', text)
-    return text
+from telegramify_markdown import convert as _md_convert
 
 
 async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
@@ -115,14 +107,23 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
 
     async def _finalize_text_block():
         nonlocal parts, has_deltas, draft_has_text, draft_id, last_draft_time, last_draft_text
-        text = _sanitize_md("".join(parts))
-        if not text:
+        raw = "".join(parts)
+        if not raw:
             return
-        for p in split_msg(text):
-            from aiogram.exceptions import TelegramRetryAfter
+        try:
+            converted_text, entities = _md_convert(raw)
+            ent_dicts = [e.to_dict() for e in entities] if entities else None
+        except Exception as e:
+            logger.warning(f"telegramify_markdown convert failed: {e}, sending plain")
+            converted_text = raw
+            ent_dicts = None
+        chunks = split_msg(converted_text)
+        from aiogram.exceptions import TelegramRetryAfter
+        for i, p in enumerate(chunks):
+            use_ents = ent_dicts if len(chunks) == 1 else None
             for attempt in range(3):
                 try:
-                    m = await _answer(p)
+                    m = await _answer(p, parse_mode=None, entities=use_ents)
                     if m:
                         finalized.append(m.message_id)
                     break
@@ -130,16 +131,13 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
                     logger.warning(f"Flood control, retry after {e.retry_after}s (attempt {attempt+1})")
                     await asyncio.sleep(e.retry_after + 1)
                 except Exception as e:
-                    err_str = str(e)
-                    if "can't parse" in err_str.lower() or "parse entities" in err_str.lower():
-                        try:
-                            m = await _answer(p, parse_mode=None)
-                            if m:
-                                finalized.append(m.message_id)
-                        except Exception:
-                            pass
-                    else:
-                        logger.error(f"_finalize_text_block error: {e}")
+                    logger.error(f"_finalize_text_block error: {e}")
+                    try:
+                        m = await _answer(p, parse_mode=None)
+                        if m:
+                            finalized.append(m.message_id)
+                    except Exception:
+                        pass
                     break
         draft_has_text = False
         draft_id = _next_draft_id()
