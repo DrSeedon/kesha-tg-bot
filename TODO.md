@@ -25,6 +25,9 @@
 - [x] Singleton lock (flock) — защита от двух инстансов
 - [x] can_use_tool auto-approve callback (обход .claude/skills/ bug)
 - [x] **Refactor v2.0** — ChatState state machine, bot.py split (1385→196 строк, 7 модулей)
+- [x] MEDIA_MAX_MB limit (default 100MB, deletes oldest >24h first)
+- [x] Verbose logging — auto-compact skip/trigger reason, phase transitions, inject ok/fail
+- [x] Markdown fix — `telegramify-markdown` entities вместо хрупкого Markdown V1 parse_mode
 
 ## Open
 - [ ] Inline кнопки для частых действий

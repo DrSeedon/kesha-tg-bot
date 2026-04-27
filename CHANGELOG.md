@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.0.1 — 2026-04-27
+
+### Fixed
+- **Markdown formatting broken on long Claude responses** — Claude generates CommonMark (`**bold**`, `---`, ` ```bash `, `\_`) which TG Markdown V1 can't parse → whole message fell back to plain text (visible `*asterisks*`). Replaced fragile `parse_mode="Markdown"` with `telegramify-markdown` library — converts to plain text + explicit MessageEntity offsets. No more parse failures, formatting always works.
+
+### Added
+- `MEDIA_MAX_MB` env var (default 100) — media cleanup now respects size limit, deletes oldest (>24h) files first
+- Verbose compact logging — shows skip reason (`7% < 95%`), summary text in DEBUG mode
+- Phase transition logs — `phase idle → collecting [arm_debounce]` for all ChatState transitions
+- Inject result logging — `inject ok (150 chars)` / `inject failed, requeuing`
+
+### Changed
+- Deepgram transcription uses `aiohttp` in-process instead of `curl` subprocess (API key no longer visible in `ps`)
+
 ## v2.0.0 — 2026-04-24
 
 ### Changed
