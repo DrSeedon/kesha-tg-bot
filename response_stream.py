@@ -48,6 +48,7 @@ def _sanitize_md(text: str) -> str:
     text = text.replace("\\*", "*")
     text = text.replace("\\`", "`")
     text = text.replace("\\[", "[")
+    text = _re.sub(r'```[a-zA-Z]+\n', '```\n', text)
     return text
 
 
