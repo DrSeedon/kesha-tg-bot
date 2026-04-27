@@ -41,6 +41,16 @@ def _get_session(chat_id: int):
     return _registry.get(chat_id).session
 
 
+import re as _re
+
+def _sanitize_md(text: str) -> str:
+    text = text.replace("\\_", "_")
+    text = text.replace("\\*", "*")
+    text = text.replace("\\`", "`")
+    text = text.replace("\\[", "[")
+    return text
+
+
 async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
     """Stream a Claude response. message may be None for reminder turns (uses bot.send_message)."""
     cid = chat_id
@@ -104,7 +114,7 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
 
     async def _finalize_text_block():
         nonlocal parts, has_deltas, draft_has_text, draft_id, last_draft_time, last_draft_text
-        text = "".join(parts)
+        text = _sanitize_md("".join(parts))
         if not text:
             return
         for p in split_msg(text):
