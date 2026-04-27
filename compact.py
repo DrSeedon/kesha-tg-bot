@@ -82,6 +82,7 @@ async def compact_session(claude, notify=None) -> dict:
         return {"ok": False, "before_pct": before_pct, "after_pct": before_pct, "summary_chars": 0, "error": "empty summary"}
 
     logger.info(f"Compact: got summary {len(summary)} chars, resetting session")
+    logger.debug(f"Compact summary:\n{summary}")
 
     # 2. Reset session → new session_id. Await disconnect so the next send_message
     #    doesn't race the old client's shutdown (causes 'NoneType has no write' errors).
