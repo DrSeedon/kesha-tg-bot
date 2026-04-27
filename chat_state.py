@@ -158,7 +158,16 @@ class ChatState:
                 return
             self.pending_transcriptions = max(0, self.pending_transcriptions - 1)
             if entry is not None:
-                self.pending.append(entry)
+                if self.phase == ChatPhase.PROCESSING:
+                    inject_entry = entry
+                elif self.phase in (ChatPhase.STOPPING, ChatPhase.COMPACTING):
+                    self.deferred.append([entry])
+                    return
+                else:
+                    self.pending.append(entry)
+                    inject_entry = None
+            else:
+                inject_entry = None
             if self.pending_transcriptions == 0:
                 if self.phase == ChatPhase.WAITING_MEDIA:
                     ready_batch = list(self.pending)
@@ -171,7 +180,15 @@ class ChatState:
                     await self._arm_debounce()
                     return
 
-        if ready_batch:
+        if inject_entry is not None:
+            ok = await self.session.inject(inject_entry.prompt)
+            if ok:
+                logger.info(f"Chat {self.chat_id}: voice inject ok ({len(inject_entry.prompt)} chars)")
+            else:
+                logger.warning(f"Chat {self.chat_id}: voice inject failed, requeuing")
+                async with self._lock:
+                    self.deferred.append([inject_entry])
+        elif ready_batch:
             await self._start_processing(ready_batch)
 
     async def request_stop(self) -> bool:
