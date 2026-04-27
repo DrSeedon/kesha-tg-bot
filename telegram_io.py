@@ -1,11 +1,9 @@
 """Telegram I/O utilities: message helpers, typing loop, split, send_safe, draft helpers."""
 
 import asyncio
-import logging
 
 from aiogram import types
 from aiogram.enums import ChatAction
-from aiogram.methods import SendMessageDraft
 
 from config import TG_MSG_LIMIT, logger
 
@@ -157,10 +155,3 @@ def _next_draft_id() -> int:
     global _draft_counter
     _draft_counter += 1
     return _draft_counter
-
-
-async def _clear_draft(chat_id: int, did: int):
-    try:
-        await _bot(SendMessageDraft(chat_id=chat_id, draft_id=did, text=""))
-    except Exception:
-        pass

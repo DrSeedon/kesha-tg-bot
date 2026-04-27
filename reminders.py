@@ -249,8 +249,8 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
                 f"Text: {text}\n"
                 f"Action: deliver this reminder to the user in your style. Be brief."
             )
-            db.mark_fired(rid, delivered=True)
-            asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))
+            db.mark_fired(rid, delivered=False)
+            asyncio.create_task(_run_urgent_llm_and_mark(rid, payload, chat_id, claude, bot, db))
             logger.info(f"Reminder #{rid} urgent_llm dispatched via run_urgent_prompt")
         elif rtype == "lazy_llm":
             db.mark_fired(rid, delivered=False)
@@ -272,6 +272,15 @@ def set_urgent_llm_handler(handler):
     """Set callback: async handler(chat_id, prompt) that runs through normal _ask pipeline."""
     global _urgent_llm_handler
     _urgent_llm_handler = handler
+
+
+async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude, bot, db: ReminderDB):
+    try:
+        await _run_urgent_llm(payload, chat_id, claude, bot)
+        db.update(rid, delivered=1)
+        logger.info(f"Reminder #{rid} urgent_llm delivered ok")
+    except Exception as e:
+        logger.error(f"Reminder #{rid} urgent_llm delivery failed: {e}")
 
 
 async def _run_urgent_llm(payload: str, chat_id: int, claude, bot):

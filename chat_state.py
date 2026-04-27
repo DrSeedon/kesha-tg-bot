@@ -362,7 +362,6 @@ class ChatState:
 
     async def _run_batch(self, batch: list[PendingEntry]) -> None:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
-        import json as _json
         from datetime import timezone, timedelta
 
         self._set_current_chat(self.chat_id)
@@ -550,30 +549,6 @@ class ChatState:
                 return
         await self._start_processing(merged)
 
-    async def _drain_deferred(self) -> None:
-        """Process queued deferred batches after PROCESSING/COMPACTING ends."""
-        async with self._lock:
-            if not self.deferred:
-                return
-            # Merge all deferred batches
-            merged: list[PendingEntry] = []
-            for b in self.deferred:
-                merged.extend(b)
-            self.deferred.clear()
-            if not merged:
-                return
-            self.phase = ChatPhase.PROCESSING
-
-        await self._start_processing(merged)
-
-    async def _try_inject(self, batch: list[PendingEntry]) -> bool:
-        """Try to inject batch into running Claude turn. Returns True if successful."""
-        combined = "\n\n".join(e.prompt for e in batch)
-        ok = await self.session.inject(combined)
-        if ok:
-            async with self._lock:
-                self.batch_message_ids.extend(e.message_id for e in batch if e.message_id)
-        return ok
 
 
 class ChatRegistry:
