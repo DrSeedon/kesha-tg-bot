@@ -110,10 +110,8 @@ class ChatState:
                 logger.info(f"Chat {self.chat_id}: queued 1 msg during STOPPING")
                 return
             if self.phase == ChatPhase.PROCESSING:
-                combined = entry.prompt
-                logger.info(f"Chat {self.chat_id}: injecting 1 msg while processing ({len(combined)} chars)")
-                inject_prompt = combined
-                inject_id = entry.message_id
+                inject_prompt = entry.prompt
+                logger.info(f"Chat {self.chat_id}: injecting 1 msg while processing ({len(inject_prompt)} chars)")
             elif self.phase == ChatPhase.COMPACTING:
                 # Queue for after compaction
                 self.deferred.append([entry])
@@ -130,9 +128,7 @@ class ChatState:
             logger.info(f"Chat {self.chat_id}: inject ok ({len(inject_prompt)} chars)")
         else:
             logger.warning(f"Chat {self.chat_id}: inject failed, requeuing")
-            async with self._lock:
-                self.batch_message_ids.append(inject_id)
-                self.deferred.append([entry])
+            await self._requeue_after_failed_inject([entry])
 
     async def transcription_started(self) -> tuple[int, int]:
         """Call before starting an async transcription. Returns (generation, media_generation) snapshot."""
@@ -186,8 +182,7 @@ class ChatState:
                 logger.info(f"Chat {self.chat_id}: voice inject ok ({len(inject_entry.prompt)} chars)")
             else:
                 logger.warning(f"Chat {self.chat_id}: voice inject failed, requeuing")
-                async with self._lock:
-                    self.deferred.append([inject_entry])
+                await self._requeue_after_failed_inject([inject_entry])
         elif ready_batch:
             await self._start_processing(ready_batch)
 
@@ -283,8 +278,7 @@ class ChatState:
             return
         ok = await self.session.inject(inject_prompt)
         if not ok:
-            async with self._lock:
-                self.deferred.append([entry])
+            await self._requeue_after_failed_inject([entry])
 
     async def set_model(self, model_id: str, use_1m: bool) -> None:
         """Set model immediately or defer if processing."""
@@ -321,6 +315,17 @@ class ChatState:
             )
 
     # --- Internal state machine ---
+
+    async def _requeue_after_failed_inject(self, entries: list[PendingEntry]) -> None:
+        """After inject fails, re-check phase: if still busy → deferred; if idle → pending + debounce."""
+        async with self._lock:
+            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING, ChatPhase.COMPACTING):
+                self.deferred.append(entries)
+            else:
+                # Prepend to preserve message order (these arrived before current pending)
+                self.pending = entries + self.pending
+                await self._arm_debounce()
+                logger.info(f"Chat {self.chat_id}: inject failed at IDLE, armed debounce for {len(entries)} entries")
 
     async def _arm_debounce(self) -> None:
         """(Re)arm debounce timer. MUST be called under lock."""

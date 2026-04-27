@@ -30,6 +30,7 @@
 - [x] Markdown fix — `telegramify-markdown` entities вместо хрупкого Markdown V1 parse_mode
 
 ## Open
+- [ ] Processing watchdog — kill stuck Claude CLI if no activity for N minutes (current stall detection only covers stream chunks, not tool gaps)
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling
 - [ ] Rate limiting per-user

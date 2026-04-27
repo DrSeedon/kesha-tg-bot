@@ -102,6 +102,9 @@ async def typing_loop(chat_id: int):
             await asyncio.sleep(4)
         except asyncio.CancelledError:
             break
+        except Exception as e:
+            logger.debug(f"typing_loop error: {e}")
+            await asyncio.sleep(4)
 
 
 def split_msg(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
