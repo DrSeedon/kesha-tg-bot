@@ -259,7 +259,9 @@ async def _ask_inner(message, prompt, cid, typer):
                             break
                     parts.append(f"Error: {err}")
             if not need_retry:
+                logger.info(f"Chat {cid}: inner loop done, no retry needed")
                 break
+            logger.info(f"Chat {cid}: need_retry=True, continuing outer loop (retries={retries})")
         except Exception as e:
             logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {e}", exc_info=True)
             retries += 1
@@ -267,8 +269,10 @@ async def _ask_inner(message, prompt, cid, typer):
                 _get_session(cid).reconnect()
                 if message is not None:
                     await _send_safe(message, _t_cfg(message, "error_retry", n=retries))
+                logger.info(f"Chat {cid}: error retry, continuing (retries={retries})")
             else:
                 parts.append(f"Error: {e}")
+                logger.info(f"Chat {cid}: max retries reached, giving up")
                 break
 
     text = "".join(parts)
