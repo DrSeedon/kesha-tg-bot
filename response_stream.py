@@ -49,7 +49,10 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
     cid = chat_id
     typer = asyncio.create_task(typing_loop(cid))
     try:
-      return await _ask_inner(message, prompt, cid, typer)
+        return await _ask_inner(message, prompt, cid, typer)
+    except asyncio.CancelledError:
+        logger.warning(f"Chat {cid}: _ask cancelled (CancelledError)")
+        raise
     finally:
         typer.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -183,15 +186,19 @@ async def _ask_inner(message, prompt, cid, typer):
                         logger.info(f"Chat {cid}: stall on empty response, retrying ({retries+1}/{MAX_RETRIES})")
                         _get_session(cid).reconnect()
                         retries += 1
-                        if message is not None:
-                            await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
-                        if status:
-                            if status.tools:
-                                await status.finalize()
-                            else:
-                                await status.cancel_empty()
-                            status = None
                         need_retry = True
+                        try:
+                            if message is not None:
+                                await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
+                            if status:
+                                if status.tools:
+                                    await status.finalize()
+                                else:
+                                    await status.cancel_empty()
+                                status = None
+                        except asyncio.CancelledError:
+                            logger.warning(f"Chat {cid}: CancelledError during retry cleanup, continuing")
+                        logger.info(f"Chat {cid}: breaking inner loop for retry")
                         break
                     if parts:
                         parts.append("\n\n⚠️ _ответ прервался (stream timeout)_")
@@ -245,25 +252,28 @@ async def _ask_inner(message, prompt, cid, typer):
                         _get_session(cid).reconnect()
                         retries += 1
                         if retries <= MAX_RETRIES and not finalized:
-                            if message is not None:
-                                await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
-                            parts.clear()
-                            has_deltas = False
-                            if status:
-                                if status.tools:
-                                    await status.finalize()
-                                else:
-                                    await status.cancel_empty()
-                                status = None
                             need_retry = True
+                            try:
+                                if message is not None:
+                                    await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
+                                parts.clear()
+                                has_deltas = False
+                                if status:
+                                    if status.tools:
+                                        await status.finalize()
+                                    else:
+                                        await status.cancel_empty()
+                                    status = None
+                            except asyncio.CancelledError:
+                                logger.warning(f"Chat {cid}: CancelledError during error retry cleanup, continuing")
                             break
                     parts.append(f"Error: {err}")
             if not need_retry:
                 logger.info(f"Chat {cid}: inner loop done, no retry needed")
                 break
             logger.info(f"Chat {cid}: need_retry=True, continuing outer loop (retries={retries})")
-        except Exception as e:
-            logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {e}", exc_info=True)
+        except (Exception, asyncio.CancelledError) as e:
+            logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {type(e).__name__}: {e}", exc_info=True)
             retries += 1
             if retries <= MAX_RETRIES:
                 _get_session(cid).reconnect()
