@@ -1,6 +1,6 @@
 """Claude session via ClaudeSDKClient — persistent connection with injection support."""
 
-import asyncio
+
 import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -46,6 +46,7 @@ class ClaudeSession:
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
         self.use_1m = True
+        self._pending_disconnect = None
         self._last_ctx_usage: Optional[dict] = None
         self._expected_results = 0
         self._is_processing = False
@@ -95,6 +96,12 @@ class ClaudeSession:
     async def _ensure_connected(self):
         if self._client and self._connected:
             return
+        if self._pending_disconnect is not None:
+            try:
+                await self._pending_disconnect.disconnect()
+            except Exception:
+                pass
+            self._pending_disconnect = None
         if self._client:
             try:
                 await self._client.disconnect()
@@ -228,8 +235,7 @@ class ClaudeSession:
         self._connected = False
         old_client = self._client
         self._client = None
-        if old_client:
-            asyncio.create_task(self._safe_disconnect(old_client))
+        self._pending_disconnect = old_client
         logger.info("Session reconnecting (keeping session_id)")
 
     async def reset_async(self):
