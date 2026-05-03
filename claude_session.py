@@ -46,6 +46,7 @@ class ClaudeSession:
         self._client: Optional[ClaudeSDKClient] = None
         self._connected = False
         self.use_1m = True
+        self._last_ctx_usage: Optional[dict] = None
         self._expected_results = 0
         self._is_processing = False
 
@@ -112,8 +113,11 @@ class ClaudeSession:
         logger.info(f"Prompt: {text[:150]}...")
 
         try:
+            logger.info("send_message: ensuring connected...")
             await self._ensure_connected()
+            logger.info("send_message: connected, sending query...")
             await self._client.query(text)
+            logger.info("send_message: query sent, receiving messages...")
             self._expected_results = 1
             self._is_processing = True
 
@@ -205,9 +209,19 @@ class ClaudeSession:
     async def get_context_usage(self) -> Optional[dict]:
         if self._client and self._connected:
             try:
-                return await self._client.get_context_usage()
+                result = await self._client.get_context_usage()
+                if result and result.get("percentage", 0) > 0:
+                    self._last_ctx_usage = result
+                    return result
+                elif self._last_ctx_usage and result and result.get("percentage", 0) == 0:
+                    logger.warning(f"get_context_usage returned 0%, using cached {self._last_ctx_usage.get('percentage', 0):.0f}%")
+                    return self._last_ctx_usage
+                return result
             except Exception as e:
                 logger.error(f"get_context_usage error: {e}")
+        if self._last_ctx_usage:
+            logger.warning("get_context_usage: client unavailable, using cached value")
+            return self._last_ctx_usage
         return None
 
     def reconnect(self):
@@ -222,6 +236,7 @@ class ClaudeSession:
         """Reset session and WAIT for disconnect to complete before returning.
         Use this when immediately calling send_message() on a new session."""
         self.session_id = None
+        self._last_ctx_usage = None
         self._save_session()
         self._connected = False
         old_client = self._client
@@ -235,6 +250,7 @@ class ClaudeSession:
 
     def reset(self):
         self.session_id = None
+        self._last_ctx_usage = None
         self._save_session()
         self.reconnect()
         logger.info("Session reset (cleared session_id)")

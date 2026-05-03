@@ -1,5 +1,7 @@
 """Streaming response handler: _ask() — streams Claude response to Telegram."""
 
+import asyncio
+import contextlib
 import json
 import time
 from typing import Optional
@@ -16,8 +18,6 @@ from telegram_io import (
     typing_loop,
 )
 from tool_status import ToolStatusTracker
-
-import asyncio
 
 STREAM_DRAFT_INTERVAL = 0.3
 
@@ -48,6 +48,15 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
     """Stream a Claude response. message may be None for reminder turns (uses bot.send_message)."""
     cid = chat_id
     typer = asyncio.create_task(typing_loop(cid))
+    try:
+      return await _ask_inner(message, prompt, cid, typer)
+    finally:
+        typer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typer
+
+
+async def _ask_inner(message, prompt, cid, typer):
     retries = 0
 
     parts: list[str] = []
@@ -154,13 +163,44 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
                 finalized.append(mid)
             status = None
 
+    CHUNK_TIMEOUT_TEXT = 45
+    CHUNK_TIMEOUT_TOOL = 300
+
     while retries <= MAX_RETRIES:
         need_retry = False
+        _last_chunk_type = None
+        logger.info(f"Chat {cid}: retry loop iteration retries={retries}/{MAX_RETRIES}")
         try:
             stream = _get_session(cid).send_message(prompt).__aiter__()
             while True:
                 try:
-                    chunk = await stream.__anext__()
+                    _in_tool_phase = _last_chunk_type in ("tool", "result")
+                    timeout = CHUNK_TIMEOUT_TOOL if _in_tool_phase else CHUNK_TIMEOUT_TEXT
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Chat {cid}: stream stall after {timeout}s (last_chunk={_last_chunk_type}), finalizing")
+                    if not parts and not finalized and retries < MAX_RETRIES:
+                        logger.info(f"Chat {cid}: stall on empty response, retrying ({retries+1}/{MAX_RETRIES})")
+                        _get_session(cid).reconnect()
+                        retries += 1
+                        if message is not None:
+                            await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
+                        if status:
+                            if status.tools:
+                                await status.finalize()
+                            else:
+                                await status.cancel_empty()
+                            status = None
+                        need_retry = True
+                        break
+                    if parts:
+                        parts.append("\n\n⚠️ _ответ прервался (stream timeout)_")
+                    elif status is not None:
+                        await _finalize_status()
+                        if message is not None:
+                            await _send_safe(message, "⚠️ _ответ прервался (stream timeout)_")
+                    _get_session(cid).reconnect()
+                    break
                 except StopAsyncIteration:
                     break
                 cs = _registry.get(cid)
@@ -169,6 +209,7 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
                         parts.append("\n\n_(stopped)_")
                     break
                 ct = chunk["type"]
+                _last_chunk_type = ct
                 if ct == "text_delta":
                     if status is not None:
                         await _finalize_status()
@@ -220,7 +261,7 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
             if not need_retry:
                 break
         except Exception as e:
-            logger.error(f"Error: {e}", exc_info=True)
+            logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {e}", exc_info=True)
             retries += 1
             if retries <= MAX_RETRIES:
                 _get_session(cid).reconnect()
@@ -229,8 +270,6 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
             else:
                 parts.append(f"Error: {e}")
                 break
-
-    typer.cancel()
 
     text = "".join(parts)
     logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}, draft_hanging={draft_has_text}")

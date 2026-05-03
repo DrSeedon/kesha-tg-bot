@@ -182,8 +182,12 @@ async def send_file(args):
     "type: 'plain' (raw text at time, no LLM), 'urgent_llm' (Claude formulates and sends at time), "
     "'lazy_llm' (silent until user writes — then injected into next prompt). "
     "repeat_interval optional: '30m'/'2h'/'1d'/'1w'/'3mo'. "
-    "repeat_at_time optional: 'HH:MM' (Krsk +07) to align repeats to specific time of day.",
-    {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str},
+    "repeat_at_time optional: 'HH:MM' (Krsk +07) to align repeats to specific time of day. "
+    "CYCLE mode (for supplements, courses): set cycle_on_days + cycle_off_days + text_off. "
+    "Example: cycle_on_days=60, cycle_off_days=30, text='ВЕРНУТЬ цинк', text_off='ПЕРЕРЫВ цинк'. "
+    "Fires text at start, after on_days fires text_off, after off_days fires text again, etc forever.",
+    {"text": str, "when_iso": str, "type": str, "repeat_interval": str, "repeat_at_time": str,
+     "cycle_on_days": int, "cycle_off_days": int, "text_off": str},
 )
 async def create_reminder(args):
     chat_id = _resolve_chat()
@@ -195,12 +199,21 @@ async def create_reminder(args):
         type_ = args["type"]
         rep_int = args.get("repeat_interval") or None
         rep_at = args.get("repeat_at_time") or None
+        cycle_on = args.get("cycle_on_days") or None
+        cycle_off = args.get("cycle_off_days") or None
+        text_off = args.get("text_off") or None
+        if cycle_on:
+            cycle_on = int(cycle_on)
+        if cycle_off:
+            cycle_off = int(cycle_off)
         due = _rem.parse_iso(when_iso)
-        rid = _rem.get_db().create(chat_id, text, due, type_, rep_int, rep_at)
+        rid = _rem.get_db().create(chat_id, text, due, type_, rep_int, rep_at,
+                                    cycle_on, cycle_off, text_off)
         local = due.astimezone(_rem.KRSK_TZ).strftime("%Y-%m-%d %H:%M %z")
         rep_str = f", repeat={rep_int}" + (f"@{rep_at}" if rep_at else "") if rep_int else ""
-        logger.info(f"Reminder #{rid} created: {type_} at {when_iso}{rep_str}: {text[:60]}")
-        return {"content": [{"type": "text", "text": f"Reminder #{rid} saved: [{type_}] {local}{rep_str} — {text}"}]}
+        cycle_str = f", cycle={cycle_on}d on/{cycle_off}d off" if cycle_on else ""
+        logger.info(f"Reminder #{rid} created: {type_} at {when_iso}{rep_str}{cycle_str}: {text[:60]}")
+        return {"content": [{"type": "text", "text": f"Reminder #{rid} saved: [{type_}] {local}{rep_str}{cycle_str} — {text}"}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Failed to create reminder: {e}"}], "is_error": True}
 

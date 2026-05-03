@@ -102,18 +102,39 @@ class ReminderDB:
             CREATE INDEX IF NOT EXISTS idx_pending ON reminders(due_at, fired_at);
             CREATE INDEX IF NOT EXISTS idx_lazy ON reminders(type, fired_at, delivered);
         """)
+        self._migrate_cycle()
+
+    def _migrate_cycle(self):
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(reminders)").fetchall()}
+        for col, default in [
+            ("cycle_on_days", "NULL"),
+            ("cycle_off_days", "NULL"),
+            ("text_off", "NULL"),
+            ("cycle_phase", "NULL"),
+        ]:
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE reminders ADD COLUMN {col} TEXT DEFAULT {default}")
+                logger.info(f"Migrated: added column {col} to reminders")
 
     def create(self, chat_id: int, text: str, due_at: datetime, type_: str,
-               repeat_interval: Optional[str] = None, repeat_at_time: Optional[str] = None) -> int:
+               repeat_interval: Optional[str] = None, repeat_at_time: Optional[str] = None,
+               cycle_on_days: Optional[int] = None, cycle_off_days: Optional[int] = None,
+               text_off: Optional[str] = None) -> int:
         if type_ not in VALID_TYPES:
             raise ValueError(f"Invalid type '{type_}'. Must be one of: {VALID_TYPES}")
         if repeat_interval:
             parse_interval(repeat_interval)
         if repeat_at_time and not re.match(r"^\d{1,2}:\d{2}$", repeat_at_time):
             raise ValueError(f"Invalid repeat_at_time '{repeat_at_time}'. Use HH:MM")
+        is_cycle = cycle_on_days is not None and cycle_off_days is not None
+        if is_cycle and not text_off:
+            raise ValueError("cycle requires text_off (message for off-phase)")
+        phase = "on" if is_cycle else None
         cur = self.conn.execute(
-            "INSERT INTO reminders(chat_id,text,due_at,type,repeat_interval,repeat_at_time) VALUES(?,?,?,?,?,?)",
-            (chat_id, text, utc_iso(due_at), type_, repeat_interval, repeat_at_time),
+            "INSERT INTO reminders(chat_id,text,due_at,type,repeat_interval,repeat_at_time,"
+            "cycle_on_days,cycle_off_days,text_off,cycle_phase) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (chat_id, text, utc_iso(due_at), type_, repeat_interval, repeat_at_time,
+             cycle_on_days, cycle_off_days, text_off, phase),
         )
         return cur.lastrowid
 
@@ -135,7 +156,8 @@ class ReminderDB:
     def update(self, id_: int, **fields) -> bool:
         if not fields:
             return False
-        allowed = {"text", "due_at", "type", "repeat_interval", "repeat_at_time", "fired_at", "delivered", "promoted"}
+        allowed = {"text", "due_at", "type", "repeat_interval", "repeat_at_time", "fired_at", "delivered", "promoted",
+                   "cycle_on_days", "cycle_off_days", "text_off", "cycle_phase"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"Unknown fields: {bad}")
@@ -204,7 +226,11 @@ def format_reminder_line(r: sqlite3.Row) -> str:
         rep = f" 🔁{r['repeat_interval']}"
         if r["repeat_at_time"]:
             rep += f"@{r['repeat_at_time']}"
-    return f"#{r['id']} [{r['type']}] {due_local}{rep}: {r['text']}"
+    cycle = ""
+    if r["cycle_on_days"]:
+        phase = r["cycle_phase"] or "on"
+        cycle = f" 🔄{r['cycle_on_days']}d on/{r['cycle_off_days']}d off [{phase}]"
+    return f"#{r['id']} [{r['type']}] {due_local}{rep}{cycle}: {r['text']}"
 
 
 async def reminder_loop(bot, claude, allowed_chat_ids: set):
@@ -239,14 +265,21 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
     due_local = parse_iso(r["due_at"]).astimezone(KRSK_TZ).strftime("%H:%M")
 
     try:
+        is_cycle = bool(r["cycle_on_days"])
+        if is_cycle:
+            phase = r["cycle_phase"] or "on"
+            msg_text = text if phase == "on" else (r["text_off"] or text)
+        else:
+            msg_text = text
+
         if rtype == "plain":
-            await bot.send_message(chat_id, f"⏰ {text}")
+            await bot.send_message(chat_id, f"⏰ {msg_text}")
             db.mark_fired(rid, delivered=True)
             logger.info(f"Reminder #{rid} plain delivered to {chat_id}")
         elif rtype == "urgent_llm":
             payload = (
                 f"[REMINDER FIRED at {due_local}, type=urgent_llm, id={rid}]\n"
-                f"Text: {text}\n"
+                f"Text: {msg_text}\n"
                 f"Action: deliver this reminder to the user in your style. Be brief."
             )
             db.mark_fired(rid, delivered=False)
@@ -256,10 +289,7 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
             db.mark_fired(rid, delivered=False)
             logger.info(f"Reminder #{rid} lazy_llm fired (waiting for user activity)")
 
-        if r["repeat_interval"]:
-            new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
-            db.reschedule(rid, new_due)
-            logger.info(f"Reminder #{rid} rescheduled to {utc_iso(new_due)}")
+        _reschedule_after_fire(db, r)
 
     except Exception as e:
         logger.error(f"Failed to fire reminder #{rid}: {e}", exc_info=True)
@@ -312,6 +342,32 @@ def get_lazy_block_for_prompt(chat_id: int) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _reschedule_after_fire(db: ReminderDB, r: sqlite3.Row):
+    """Reschedule a reminder after it fires — handles both cycle and repeat."""
+    if r["cycle_on_days"]:
+        phase = r["cycle_phase"] or "on"
+        on_days = int(r["cycle_on_days"])
+        off_days = int(r["cycle_off_days"])
+        next_days = on_days if phase == "on" else off_days
+        new_phase = "off" if phase == "on" else "on"
+        new_due = parse_iso(r["due_at"]) + timedelta(days=next_days)
+        now = utc_now()
+        while new_due <= now:
+            if new_phase == "off":
+                new_due += timedelta(days=off_days)
+                new_phase = "on"
+            else:
+                new_due += timedelta(days=on_days)
+                new_phase = "off"
+        db.reschedule(r["id"], new_due)
+        db.update(r["id"], cycle_phase=new_phase)
+        logger.info(f"Reminder #{r['id']} cycle→{new_phase}, next {utc_iso(new_due)}")
+    elif r["repeat_interval"]:
+        new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
+        db.reschedule(r["id"], new_due)
+        logger.info(f"Reminder #{r['id']} rescheduled to {utc_iso(new_due)}")
+
+
 async def deliver_missed_on_startup(bot, claude, allowed: set):
     """Process missed reminders that fired while bot was down."""
     db = get_db()
@@ -336,18 +392,14 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
                 await bot.send_message(chat_id, msg[:4000])
                 for r in plain_missed:
                     db.mark_fired(r["id"], delivered=True)
-                    if r["repeat_interval"]:
-                        new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
-                        db.reschedule(r["id"], new_due)
+                    _reschedule_after_fire(db, r)
                 logger.info(f"Delivered {len(plain_missed)} missed plain reminders to {chat_id}")
             except Exception as e:
                 logger.error(f"Failed missed plain digest: {e}")
 
         for r in lazy_missed:
             db.mark_fired(r["id"], delivered=False)
-            if r["repeat_interval"]:
-                new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
-                db.reschedule(r["id"], new_due)
+            _reschedule_after_fire(db, r)
         if lazy_missed:
             logger.info(f"Marked {len(lazy_missed)} missed lazy_llm reminders for {chat_id}")
 
@@ -364,7 +416,5 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
             asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))
             for r in urgent_missed:
                 db.mark_fired(r["id"], delivered=True)
-                if r["repeat_interval"]:
-                    new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
-                    db.reschedule(r["id"], new_due)
+                _reschedule_after_fire(db, r)
             logger.info(f"Triggered urgent_llm digest for {len(urgent_missed)} missed for {chat_id}")
