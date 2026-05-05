@@ -963,3 +963,317 @@ crontab -e
 | **v7: GetUpdates allowlisted** | ✅ **Block ALL calls including GetUpdates when not owner** |
 | **v7: polling_task unmonitored** | ✅ **Owner tick checks `_polling_task.done()` → fail_closed** |
 | **v7: asyncio.wait(coroutines)** | ✅ **Wrapped in `create_task()`** |
+
+## FAQ — Context, Motivation, Edge Cases
+
+### What is this project?
+
+Kesha is a Telegram bot wrapping Claude Agent SDK (`claude-agent-sdk` Python lib).
+Users write to a Telegram bot, messages go to Claude (Anthropic's AI), Claude
+responds with text/tool calls. The bot handles streaming, message batching
+(debounce), media transcription, reminders, and MCP tool execution.
+
+Codebase: ~3000 lines Python, aiogram 3.27, asyncio-based.
+
+### What is Claude Agent SDK?
+
+Official Anthropic SDK for persistent Claude sessions. Key concepts:
+- `ClaudeSDKClient` — persistent WebSocket connection to Claude
+- `session_id` — string key to resume a conversation (context stored on Anthropic servers)
+- `send_message()` → async generator yielding stream events (text deltas, tool calls)
+- `query()` + `receive_messages()` — lower-level: inject mid-conversation, receive results
+- `connect()` / `disconnect()` — manage WebSocket lifecycle
+- Works through HTTPS proxy (laptop uses Hiddify VPN proxy to reach Anthropic API)
+
+### Why do we need failover?
+
+Owner works remotely (dacha/country house) with unstable mobile WiFi tethering.
+The laptop runs the bot but can't reliably reach Claude API through the VPN proxy.
+Result: bot sends message to Claude → 45 second timeout → empty response → user
+gets nothing. This happens repeatedly, making the bot unusable.
+
+VPS has stable internet and direct API access (no proxy needed). But we don't
+want to move the bot permanently to VPS because:
+- Laptop has full file access (user's projects, documents, knowledge base)
+- Laptop has all MCP tools (smart home, desktop control)
+- Laptop is the primary development machine
+- When home internet is stable, laptop works perfectly
+
+### Why not just run on VPS permanently?
+
+VPS has limited capabilities:
+- No access to user's local files, desktop, smart home
+- No aperant MCP (home automation) or kwin MCP (desktop control)
+- Would need constant sync of all files (impractical for large projects)
+- User prefers laptop as primary — VPS is backup only
+
+### Why not webhook instead of polling?
+
+Webhook would make VPS the single ingress point → VPS down = everything down.
+Polling allows both nodes to be fully independent. The tradeoff (more complex
+leader election) is worth it for the independence guarantee.
+
+### What is `session_id` and why does it need syncing?
+
+`session_id` is a string like `"sess_abc123..."` stored locally in
+`./storage/sessions/<chat_id>`. It's a key to resume the Claude conversation
+on Anthropic's servers — all context (messages, tool results, system prompt)
+is stored remotely. By syncing session_id, the VPS can continue the exact
+same conversation the laptop was having.
+
+Without sync: VPS starts a fresh conversation, Claude has no context.
+With sync: VPS resumes where laptop left off, Claude remembers everything.
+
+### What is COG-second-brain?
+
+User's personal knowledge base — a git repository with:
+- Personal notes and documents
+- Project files and resources
+- Work materials and references
+
+This is the CWD (working directory) where Claude operates. Claude can read/write
+files here via tools (Read, Write, Edit, Bash). If VPS doesn't have COG,
+Claude on VPS can't access any of the user's files.
+
+### What is ChatState and why does it have phases?
+
+ChatState is a per-chat state machine managing the message lifecycle:
+```
+IDLE → COLLECTING (debounce) → PROCESSING (Claude working) → IDLE
+```
+
+Key concepts:
+- **Debounce**: when user sends multiple messages quickly, they're batched into one
+  Claude request (default 3 second wait)
+- **Inject**: if user sends a message while Claude is processing, it's injected
+  into the active conversation (not queued for next turn)
+- **Deferred**: messages that arrive during STOPPING/COMPACTING are queued and
+  processed after the current operation finishes
+
+Shutdown mode (`_shutdown=True`) prevents all state transitions and rejects
+new entries — needed for clean drain during failover.
+
+### What are MCP tools?
+
+Model Context Protocol — Claude can use external tools:
+- **kesha**: bot's own tools (set_model, send_photo, reminders, etc.)
+- **websearch**: web search via Perplexity API
+- **yougile**: task tracker (Yougile API)
+- **gmail/mailru**: email access
+- **aperant**: smart home control (local network only — laptop only)
+- **kwin**: KDE desktop control (laptop only)
+- **mcp-pandoc**: document conversion
+
+VPS gets all API-based tools. Laptop-only tools (aperant, kwin) excluded from VPS config.
+
+### Why Redis and not simpler coordination?
+
+Tried and rejected (Codex review rounds 1-3):
+- **Simple heartbeat**: doesn't prove "can respond to users", only "process alive"
+- **File-based lock**: no shared filesystem between nodes
+- **Git-based flag**: too slow, race conditions on push
+- **Telegram-based check**: API doesn't expose "who is polling"
+
+Redis provides:
+- Atomic operations (Lua scripts)
+- Key expiry (TTL — automatic lease release on crash)
+- Low latency (<1ms local, <50ms remote)
+- Proven distributed lock patterns (Redlock-like)
+
+### Why Lua scripts and not plain Redis commands?
+
+Atomicity. Example race without Lua:
+1. Node A: `GET lease` → sees owner=null
+2. Node B: `GET lease` → sees owner=null
+3. Node A: `SET lease owner=A` ← both think they acquired
+4. Node B: `SET lease owner=B` ← B overwrites A silently
+
+With Lua: entire check+modify+write runs as one atomic operation on Redis server.
+No interleaving possible.
+
+### What is epoch fencing?
+
+Epoch = monotonically increasing integer. Every lease acquisition increments it.
+If a node discovers the current epoch is higher than its own → it lost ownership.
+
+This prevents the "stale owner" problem:
+- Node A owns lease (epoch=5), network glitch
+- Node B acquires (epoch=6)
+- Node A reconnects, tries to renew with epoch=5
+- Redis: epoch 5 < 6 → reject → Node A knows it lost
+
+### What is the local lease deadline?
+
+Problem: `is_owner` flag is only updated every 30s (renewal interval).
+Between renewals, the flag can be stale.
+
+Solution: `is_owner_now` checks `time.time() < _lease_valid_until`.
+`_lease_valid_until` is set to `now + 45s` on each successful renewal.
+If renewal fails (any reason), the deadline expires within 15 seconds,
+and all side effects are suppressed automatically.
+
+### What happens if both nodes start simultaneously?
+
+Redis `acquire` Lua script: first writer wins (atomic check+write).
+Loser's acquire returns 0 → stays in standby mode.
+
+### What happens if Redis crashes?
+
+- **VPS**: Redis is local, VPS bot can't renew → stops polling. Bot is dead
+  until Redis restarts.
+- **Laptop**: Can't reach Redis → stops polling (safety rule). Both nodes stopped.
+  When Redis comes back → first to acquire wins.
+
+No split-brain: both stop when they can't prove ownership.
+
+### What happens during a 5-second network glitch?
+
+- Renewal is every 30s. A 5s glitch likely falls between renewals → no effect.
+- If glitch hits during renewal → renewal fails → next renewal in 30s succeeds.
+- Local deadline is 45s → plenty of margin.
+- If glitch is longer than 45s → local deadline expires → side effects suppressed.
+  But lease hasn't expired yet (TTL=120s) → no failover. Node waits, retries.
+
+### What happens if laptop loses internet completely?
+
+- Laptop can't renew lease → local deadline expires (15s) → stops all sends
+- Lease TTL expires (120s) → VPS acquires → starts polling
+- Total failover time: ~135s (15s local + 120s TTL expiry)
+- If laptop had time before dying: voluntary release (health check fails 6x in 180s) → faster
+
+### What happens if Claude is down for everyone?
+
+Both nodes: health check fails → `healthy=false` in lease → after 180s voluntary release.
+VPS acquires → same health check fails → VPS also unhealthy → voluntary release.
+Ping-pong until Claude comes back. Each node holds for 180s before releasing.
+
+To prevent ping-pong: standby should also check health before acquiring.
+Add health check in `_standby_tick` before `_lua_acquire`.
+
+### What if user creates a reminder on laptop, then laptop fails over to VPS?
+
+v1 (current plan): Reminder is in laptop's local SQLite. VPS doesn't know about it.
+If the reminder fires while VPS is active → it doesn't fire (VPS has no record).
+When laptop comes back → reminder fires (if not expired).
+
+v2 (future): Reminders in Redis → shared between both nodes.
+
+### What about media files (photos, voice, documents)?
+
+Media is downloaded to `./storage/media/` locally. NOT synced between nodes.
+If VPS needs a file that was on laptop → it downloads fresh from Telegram.
+Media cache is per-node. This is fine — Telegram stores files for ~1 hour.
+
+### What about voice transcription on VPS?
+
+VPS needs: `DEEPGRAM_API_KEY` in .env + `ffmpeg` installed.
+Same Deepgram key works from any IP. ffmpeg: `sudo apt install ffmpeg`.
+
+### How do I update the bot code on both nodes?
+
+```bash
+# On laptop: make changes, commit, push
+git add -A && git commit -m "..." && git push
+
+# On VPS: pull (automatic on next failover, or manual)
+sudo -u kesha git -C /opt/kesha-bot pull
+sudo systemctl restart kesha-bot-vps
+```
+
+If VPS is currently active (has lease), it will pull on next handback.
+For urgent updates: manually restart VPS service (it will re-acquire after restart).
+
+### Can I force failover for testing?
+
+```bash
+# On laptop, stop the bot:
+sudo systemctl stop kesha-bot
+# Lease expires in 120s → VPS takes over
+
+# Or, faster — manually release via redis-cli on VPS:
+redis-cli -a <password> DEL kesha:lease
+# VPS acquires immediately on next tick (30s)
+```
+
+### What are the costs?
+
+- **Redis**: negligible (tiny key, few ops/minute)
+- **VPS**: already have one (existing server with domain)
+- **Claude API**: same key, same billing. No double-charging — only one node active.
+- **Telegram**: free (Bot API)
+
+### What if I want to disable failover?
+
+Remove `KESHA_REDIS_URL` from laptop .env → bot runs in solo mode (no failover).
+Stop VPS service: `sudo systemctl stop kesha-bot-vps`.
+
+### What are the known limitations?
+
+1. **Failover time**: 120-180 seconds (lease TTL + health hysteresis)
+2. **Last 5 min of COG edits**: may not reach VPS (cron sync interval)
+3. **Reminders**: not shared between nodes (v1, local SQLite)
+4. **In-flight messages on crash**: lost (debounce batch, active transcription)
+5. **VPS has no aperant/kwin**: smart home and desktop control unavailable
+6. **VPS Claude responses**: may differ slightly (different CWD state, fewer tools)
+7. **Health check ping-pong**: if Claude API is down globally, nodes trade lease
+
+### What is the `HTTPS_PROXY` mentioned in the plan?
+
+Laptop uses Hiddify VPN proxy (`http://127.0.0.1:12334`) to reach Anthropic API
+(blocked in Russia). VPS has direct access (hosted outside Russia).
+VPS .env does NOT set HTTPS_PROXY — it connects directly.
+
+### What is the bot's Telegram token situation?
+
+Both nodes use the SAME bot token. Telegram allows only one active poller per token.
+If two poll simultaneously → messages split randomly (split-brain).
+The entire lease system exists to prevent this.
+
+### What Python version is required?
+
+Python 3.10+ (for `asyncio.TaskGroup`, `StrEnum`, type hints).
+Currently running 3.13 on laptop. VPS should match or be ≥3.10.
+
+### What is the VPS server?
+
+User has a VPS at 194.87.250.243 with:
+- Domain configured
+- Nginx
+- Marzban VPN (VLESS+Reality)
+- Ubuntu/Debian
+
+Redis, bot deployment, and COG clone go here.
+
+### What is aiogram's session middleware?
+
+aiogram 3.x routes ALL outgoing Telegram API calls through `bot.session`.
+A middleware on `bot.session` intercepts every call:
+`send_message`, `send_photo`, `edit_message_text`, `set_message_reaction`,
+even `message.answer()` (which internally calls `bot.send_message`).
+
+Our `LeaseGateMiddleware` returns `None` for any call when `is_owner_now=False`.
+This is the ONLY fencing mechanism needed — no per-call-site patches.
+
+Correct aiogram 3.27 signature: `async def __call__(self, make_request, bot, method)`.
+
+### What happens to typing indicators during failover?
+
+`typing_loop` sends `ChatAction.TYPING` every 4 seconds. During failover:
+- LeaseGateMiddleware blocks `send_chat_action` when not owner → typing stops
+- No visible effect to user — typing just disappears
+
+### Design decisions log
+
+| Decision | Why | Alternatives considered |
+|----------|-----|----------------------|
+| Safety > availability | Split-brain is worse than 2 min downtime | Standalone mode (rejected: split-brain) |
+| Redis for coordination | Atomic ops, TTL, proven patterns | Git flags (slow), heartbeat (wrong signal), file locks (no shared FS) |
+| Lua scripts | Atomicity for multi-step mutations | Plain Redis commands (race conditions) |
+| Local lease deadline | Eliminate stale ownership window | Per-update Redis check (too expensive), flag-only (30s stale) |
+| aiogram session middleware | Catches ALL TG sends including message.answer() | FencedBot wrapper (misses send_photo, answer bypasses it) |
+| Polling LAST in on_acquire | If earlier steps fail, no polling to leak | Polling first (leaked on failure) |
+| Don't release on drain failure | Can't prove polling stopped → let TTL expire | Always release (split-brain risk) |
+| COG sync via git | Simple, uses existing infra | rsync (complex), NFS (latency), S3 (overkill) |
+| Laptop always wins on COG conflicts | Laptop is primary, VPS is backup | Merge (complex), VPS wins (wrong priority) |
+| VPS-local .mcp.json | Different tool set than laptop | Shared config (would include aperant/kwin) |
+| Secrets via SSH | Not in git, explicit transfer | Git-crypt (complex), Vault (overkill) |
