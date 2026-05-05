@@ -224,14 +224,20 @@ async def main():
         for cs in registry._chats.values():
             await cs.exit_shutdown()
 
-        await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
+        try:
+            await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
+        except Exception as e:
+            logger.warning(f"Missed reminders delivery failed (non-critical): {e}")
 
         lease._reminder_stop.clear()
         lease._reminder_task = asyncio.create_task(
             _reminders.reminder_loop(bot, get_session, ALLOWED)
         )
 
-        await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online (epoch {epoch})")
+        try:
+            await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online (epoch {epoch})")
+        except Exception as e:
+            logger.warning(f"Greet send failed (non-critical): {e}")
 
         lease._polling_task = asyncio.create_task(dp.start_polling(bot))
 
