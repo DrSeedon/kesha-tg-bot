@@ -86,6 +86,7 @@ def get_session(chat_id: int) -> ClaudeSession:
 
 
 BOT_START_TIME = None
+_lease = None
 
 
 def uptime_str() -> str:
@@ -204,6 +205,9 @@ async def main():
     lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL)
     lease._registry = registry
     registry._dp = dp
+
+    global _lease
+    _lease = lease
 
     bot.session.middleware(LeaseGateMiddleware(lease))
 

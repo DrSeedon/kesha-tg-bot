@@ -240,6 +240,37 @@ async def h_debug(msg: types.Message):
         await _send_safe(msg, t(msg, "debug_off"))
 
 
+async def h_failover(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    try:
+        from failover import LEASE_KEY
+        import json
+        import bot as _bot_mod
+        lease = getattr(_bot_mod, '_lease', None)
+        if not lease:
+            return await _send_safe(msg, "⚠️ Failover не активен (solo mode)")
+        raw = await lease._redis.get(LEASE_KEY)
+        if not raw:
+            return await _send_safe(msg, "⚠️ Нет lease в Redis")
+        data = json.loads(raw)
+        owner = data.get("owner", "?")
+        epoch = data.get("epoch", 0)
+        node_id = lease.node_id
+        if owner == node_id:
+            await _send_safe(msg, f"🔄 Отдаю lease с *{node_id}*...")
+            await lease._lua_release(lease._build_sessions())
+            lease._is_owner = False
+            lease._lease_valid_until = 0.0
+            await _send_safe(msg, f"✅ Lease отдан. Другой узел подхватит за ~30с")
+        else:
+            await _send_safe(msg, f"📡 Сейчас owner: *{owner}* (epoch {epoch})\n{node_id} в standby — уже на другом хосте")
+    except ImportError:
+        await _send_safe(msg, "⚠️ Failover модуль не найден")
+    except Exception as e:
+        await _send_safe(msg, f"❌ Ошибка: {e}")
+
+
 async def h_restart(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
@@ -462,6 +493,7 @@ COMMANDS_RU = [
     BotCommand(command="model", description="Сменить модель"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
+    BotCommand(command="failover", description="Переключить на другой хост"),
     BotCommand(command="restart", description="Перезапустить бота"),
 ]
 
@@ -475,6 +507,7 @@ COMMANDS_EN = [
     BotCommand(command="model", description="Change model"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
+    BotCommand(command="failover", description="Switch to another host"),
     BotCommand(command="restart", description="Restart bot"),
 ]
 
@@ -524,6 +557,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_model, Command("model"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
+    dp.message.register(h_failover, Command("failover"))
     dp.message.register(h_restart, Command("restart"))
     dp.message.register(h_stop, Command("stop"))
     # Media handlers — media_group BEFORE photo
