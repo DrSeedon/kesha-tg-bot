@@ -579,26 +579,204 @@ async def reminder_loop(bot, registry, allowed, lease):
             pass
 ```
 
+## COG (Working Directory) Sync
+
+Kesha's CWD on laptop is `COG-second-brain/` — user's personal knowledge base,
+projects, docs, notes. VPS needs access to serve as a real backup.
+
+### Auto-Push on Laptop (cron)
+
+```bash
+# /etc/cron.d/cog-auto-push (laptop)
+*/5 * * * * maxim cd "/mnt/data/Рабочий стол/Cursor/COG-second-brain" && \
+  git add -A && \
+  git diff --cached --quiet || \
+  git commit -m "auto-sync $(date +\%Y-\%m-\%d\ \%H:\%M)" --no-verify && \
+  git push --quiet 2>/dev/null
+```
+
+Every 5 min: stage all → commit if changes → push. Silent, no-verify (skip hooks).
+Worst case: last 5 min of edits not on VPS.
+
+### Auto-Pull on VPS (on failover)
+
+```python
+# In on_acquire callback, before starting polling:
+async def _sync_cog():
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", WORK_DIR, "pull", "--ff-only", "--quiet",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    if proc.returncode == 0:
+        logger.info("COG sync: git pull OK")
+    else:
+        logger.warning(f"COG sync: git pull failed: {stderr.decode()}")
+```
+
+### COG on VPS
+
+```bash
+# One-time clone:
+git clone git@github.com:<user>/COG-second-brain.git /opt/cog-second-brain
+
+# WORK_DIR in .env.vps:
+WORK_DIR=/opt/cog-second-brain
+```
+
+VPS Kesha works in the SAME directory structure as laptop.
+Claude can read/edit files, access projects, notes — full context.
+
+### Conflict Resolution
+
+Laptop always wins. VPS never commits to COG (read-only + Claude tool writes).
+If VPS Claude writes a file during failover → it stays local on VPS, not pushed.
+When laptop takes back → next auto-push overwrites.
+
+If VPS needs to save something permanent: commit to kesha-tg-bot repo, not COG.
+
+## Global Claude Rules on VPS
+
+Kesha uses Claude Agent SDK which reads:
+- `~/.claude/CLAUDE.md` — global user rules
+- `<project>/CLAUDE.md` — project rules (in COG and kesha-tg-bot repos)
+- `~/.claude/settings.json` — permissions, MCP configs
+
+### Setup on VPS
+
+```bash
+# Create claude config directory
+mkdir -p /home/kesha/.claude
+
+# Copy global CLAUDE.md from laptop (one-time, update on changes)
+scp laptop:~/.claude/CLAUDE.md /home/kesha/.claude/CLAUDE.md
+
+# Copy global docs
+scp -r laptop:~/.claude/docs/ /home/kesha/.claude/docs/
+
+# Copy project-specific memory
+mkdir -p "/home/kesha/.claude/projects/-opt-cog-second-brain/memory/"
+scp -r laptop:~/.claude/projects/-mnt-data-*-COG-second-brain/memory/* \
+  /home/kesha/.claude/projects/-opt-cog-second-brain/memory/
+
+# Settings (permissions, MCP)
+scp laptop:~/.claude/settings.json /home/kesha/.claude/settings.json
+```
+
+### Sync Strategy
+
+Global rules change rarely. Manual `scp` or git-tracked dotfiles repo.
+No auto-sync needed — update after significant rule changes.
+
+Project CLAUDE.md lives in repos → synced via `git pull` automatically.
+
+## MCP Tools on VPS
+
+| MCP Server | On VPS | Config | Notes |
+|------------|--------|--------|-------|
+| **kesha** | ✅ | Built into bot | Bot's own tools |
+| **websearch** | ✅ | API key in env | Perplexity, works anywhere |
+| **yougile** | ✅ | API key in env | Task tracker, API-based |
+| **gmail** | ✅ | OAuth tokens | Copy token files from laptop |
+| **mailru** | ✅ | API key in env | Mail.ru API |
+| **mcp-pandoc** | ✅ | `apt install pandoc` | Document conversion |
+| **aperant** | ❌ | — | Smart home, local network only |
+| **kwin** | ❌ | — | Desktop control, meaningless on VPS |
+
+### VPS MCP Config
+
+```bash
+# /opt/cog-second-brain/.mcp.json (VPS version — without aperant, kwin)
+# OR environment-specific: .mcp.vps.json loaded via KESHA_MCP_CONFIG env var
+```
+
+```python
+# config.py addition:
+MCP_CONFIG = os.getenv("KESHA_MCP_CONFIG", ".mcp.json")
+
+# bot.py: _load_global_mcp() uses MCP_CONFIG instead of hardcoded ".mcp.json"
+```
+
+VPS `.mcp.json` = laptop's minus aperant + kwin. Same API keys via `.env`.
+
+### MCP Credential Files on VPS
+
+```bash
+# Gmail OAuth (one-time copy):
+scp -r laptop:~/.claude/mcp-servers/gmail/ /home/kesha/.claude/mcp-servers/gmail/
+
+# Websearch config:
+scp laptop:~/.claude/mcp-servers/websearch/config.json \
+  /home/kesha/.claude/mcp-servers/websearch/config.json
+```
+
 ## Deployment
 
 ### Redis on VPS
 ```bash
 sudo apt install redis-server
-# bind 0.0.0.0, requirepass, ufw allow from laptop IP
+# /etc/redis/redis.conf:
+#   bind 0.0.0.0
+#   requirepass <strong_password>
+# sudo ufw allow from <laptop-ip> to any port 6379
+```
+
+### VPS Full Setup
+```bash
+# 1. Bot repo
+git clone git@github.com:DrSeedon/kesha-tg-bot.git /opt/kesha-bot
+cd /opt/kesha-bot && python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. COG repo
+git clone git@github.com:<user>/COG-second-brain.git /opt/cog-second-brain
+
+# 3. Claude global config
+mkdir -p /home/kesha/.claude/docs
+scp laptop:~/.claude/CLAUDE.md /home/kesha/.claude/
+scp -r laptop:~/.claude/docs/ /home/kesha/.claude/docs/
+scp laptop:~/.claude/settings.json /home/kesha/.claude/
+
+# 4. MCP credentials
+mkdir -p /home/kesha/.claude/mcp-servers
+scp -r laptop:~/.claude/mcp-servers/gmail/ /home/kesha/.claude/mcp-servers/
+scp -r laptop:~/.claude/mcp-servers/websearch/ /home/kesha/.claude/mcp-servers/
+
+# 5. System tools
+sudo apt install pandoc ffmpeg
+
+# 6. .env
+cat > /opt/kesha-bot/.env << 'EOF'
+TELEGRAM_BOT_TOKEN=<same>
+ANTHROPIC_API_KEY=<same>
+KESHA_NODE_ID=vps
+KESHA_REDIS_URL=redis://:password@localhost:6379/0
+DEEPGRAM_API_KEY=<key>
+ALLOWED_USERS=720740564,893553748
+WORK_DIR=/opt/cog-second-brain
+CLAUDE_MODEL=claude-opus-4-6
+KESHA_MCP_CONFIG=.mcp.json
+# NO HTTPS_PROXY — VPS has direct API access
+EOF
+
+# 7. Systemd
+sudo cp kesha-bot.service /etc/systemd/system/kesha-bot-vps.service
+# Edit: WorkingDirectory, ExecStart, Environment
+sudo systemctl enable kesha-bot-vps
+sudo systemctl start kesha-bot-vps
 ```
 
 ### Laptop .env additions
 ```bash
-KESHA_ROLE=primary
 KESHA_NODE_ID=laptop
-KESHA_REDIS_URL=redis://:pass@<vps-domain>:6379/0
+KESHA_REDIS_URL=redis://:password@<vps-domain>:6379/0
 ```
 
-### VPS .env
+### Laptop cron (COG auto-push)
 ```bash
-KESHA_NODE_ID=vps
-KESHA_REDIS_URL=redis://:pass@localhost:6379/0
-# no HTTPS_PROXY
+crontab -e
+# Add:
+*/5 * * * * cd "/mnt/data/Рабочий стол/Cursor/COG-second-brain" && git add -A && git diff --cached --quiet || (git commit -m "auto-sync $(date +\%Y-\%m-\%d\ \%H:\%M)" --no-verify && git push --quiet) 2>/dev/null
 ```
 
 ## Phases
@@ -607,9 +785,9 @@ KESHA_REDIS_URL=redis://:pass@localhost:6379/0
 2. **Transport fence + bot integration** (~100 lines): LeaseGateMiddleware, bot.py
 3. **ChatState shutdown + drain** (~100 lines): all methods, drain orchestrator
 4. **Session sync** (~60 lines): timestamps, build/sync payloads
-5. **VPS deploy** (~40 lines): Redis, systemd, .env, prompt
+5. **VPS deploy + COG + rules + MCP** (~80 lines): Redis, COG clone, claude config, MCP setup, systemd, cron
 
-**Total: ~650 lines**
+**Total: ~690 lines + deployment configs**
 
 ## Resolution Matrix — ALL Findings v1-v6
 
