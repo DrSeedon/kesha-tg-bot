@@ -2,6 +2,7 @@
 
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -36,6 +37,7 @@ class ClaudeSession:
         self.mcp_servers = mcp_servers or {}
         self._session_file = session_file or SESSION_DIR / "default"
         self.session_id: Optional[str] = self._load_session()
+        self.session_id_changed_at: int = 0
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
@@ -141,6 +143,7 @@ class ClaudeSession:
                 elif isinstance(msg, ResultMessage):
                     if hasattr(msg, 'session_id') and msg.session_id:
                         self.session_id = msg.session_id
+                        self.session_id_changed_at = int(time.time())
                         self._save_session()
                         logger.info(f"Session ID saved: {self.session_id[:8]}")
                     if hasattr(msg, 'total_cost_usd') and msg.total_cost_usd is not None:

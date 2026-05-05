@@ -17,7 +17,10 @@ from config import (
     AUTO_COMPACT_PCT,
     DEBOUNCE_SEC,
     GREET_FLAG,
+    KESHA_NODE_ID,
+    KESHA_REDIS_URL,
     MODEL,
+    NOTIFY_CHAT,
     STRINGS,
     TOKEN,
     WORK_DIR,
@@ -166,30 +169,77 @@ async def main():
 
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 
-    try:
-        await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
-    except Exception as e:
-        logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
-    asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
-
-    logger.info(f"Greet flag path: {GREET_FLAG}, exists: {GREET_FLAG.exists()}")
-    should_greet_llm = GREET_FLAG.exists()
-    if should_greet_llm:
-        GREET_FLAG.unlink(missing_ok=True)
-        logger.info("Greet flag found and deleted — will send LLM greeting")
-    for uid in ALLOWED:
+    async def _solo_startup():
+        """Standard startup without failover."""
         try:
-            await bot.send_message(uid, STRINGS["ru"]["started"])
-        except Exception:
-            pass
-        if should_greet_llm:
-            asyncio.create_task(_urgent_llm_handler(uid,
-                "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
+            await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
+        except Exception as e:
+            logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
+        asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await registry.shutdown()
+        should_greet_llm = GREET_FLAG.exists()
+        if should_greet_llm:
+            GREET_FLAG.unlink(missing_ok=True)
+        for uid in ALLOWED:
+            try:
+                await bot.send_message(uid, STRINGS["ru"]["started"])
+            except Exception:
+                pass
+            if should_greet_llm:
+                asyncio.create_task(_urgent_llm_handler(uid,
+                    "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
+
+        try:
+            await dp.start_polling(bot)
+        finally:
+            await registry.shutdown()
+
+    if not KESHA_REDIS_URL:
+        logger.info("No KESHA_REDIS_URL — running in solo mode (no failover)")
+        await _solo_startup()
+        return
+
+    from failover import LeaseManager, LeaseGateMiddleware, drain_for_handback, _sync_repo
+
+    lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL)
+    lease._registry = registry
+    registry._dp = dp
+
+    bot.session.middleware(LeaseGateMiddleware(lease))
+
+    @dp.update.outer_middleware()
+    async def epoch_guard(handler, event, data):
+        if not lease.is_owner_now:
+            return
+        return await handler(event, data)
+
+    async def on_acquire(epoch: int, sessions: dict):
+        await _sync_repo(WORK_DIR, "COG")
+
+        await registry.sync_from_lease(sessions)
+        for cs in registry._chats.values():
+            await cs.exit_shutdown()
+
+        await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
+
+        lease._reminder_stop.clear()
+        lease._reminder_task = asyncio.create_task(
+            _reminders.reminder_loop(bot, get_session, ALLOWED)
+        )
+
+        await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online (epoch {epoch})")
+
+        lease._polling_task = asyncio.create_task(dp.start_polling(bot))
+
+    async def on_release():
+        await drain_for_handback(registry, lease)
+
+    async def on_lost():
+        for cs in registry._chats.values():
+            await cs.enter_shutdown()
+
+    logger.info(f"Failover mode: node={KESHA_NODE_ID}")
+    await lease.run(on_acquire, on_release, on_lost)
 
 
 if __name__ == "__main__":

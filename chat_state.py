@@ -672,6 +672,23 @@ class ChatRegistry:
             logger.info(f"ChatRegistry: created ChatState for chat {chat_id}")
         return self._chats[chat_id]
 
+    async def sync_from_lease(self, sessions: dict) -> None:
+        """Restore session IDs from lease payload after failover acquire."""
+        for chat_id_str, info in sessions.items():
+            try:
+                chat_id = int(chat_id_str)
+            except (ValueError, TypeError):
+                continue
+            sid = info.get("id")
+            ts = info.get("ts", 0)
+            if not sid:
+                continue
+            cs = self.get(chat_id)
+            cs.session.session_id = sid
+            cs.session.session_id_changed_at = ts
+            cs.session._save_session()
+            logger.info(f"sync_from_lease: chat {chat_id} → session {sid[:8]}...")
+
     async def shutdown(self) -> None:
         for chat in self._chats.values():
             if chat._debounce_task and not chat._debounce_task.done():

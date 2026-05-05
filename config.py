@@ -28,6 +28,10 @@ GREET_FLAG = Path(__file__).parent / "storage" / "greet_on_restart"
 MEDIA_MAX_AGE_H = 24
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
+KESHA_NODE_ID = os.getenv("KESHA_NODE_ID", "laptop")
+KESHA_REDIS_URL = os.getenv("KESHA_REDIS_URL", "")
+NOTIFY_CHAT = int(os.getenv("NOTIFY_CHAT", "0")) or (list(ALLOWED)[0] if ALLOWED else 0)
+
 ALLOWED_MODELS = {
     "opus": "claude-opus-4-6",
     "sonnet": "claude-sonnet-4-6",
