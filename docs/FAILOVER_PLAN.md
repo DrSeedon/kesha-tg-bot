@@ -481,7 +481,24 @@ async def drain_for_handback(registry, lease_manager):
         except asyncio.TimeoutError:
             lease_manager._reminder_task.cancel()
 
+    # 4. Push bot repo commits (if any made during failover)
+    bot_repo = Path(__file__).parent.resolve()
+    await _push_repo(str(bot_repo), "kesha-bot")
+
     # Sessions pushed by LeaseManager after this returns
+
+async def _push_repo(path: str, name: str):
+    """Best-effort push. Failures logged but don't block drain."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", path, "push", "--quiet",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=15)
+        if proc.returncode == 0:
+            logger.info(f"{name}: pushed OK")
+    except Exception as e:
+        logger.warning(f"{name}: push failed (non-critical): {e}")
 ```
 
 ## Bot Integration — ALL Startup Gated, Polling LAST
@@ -591,27 +608,40 @@ projects, docs, notes. VPS needs access to serve as a real backup.
 */5 * * * * maxim cd "/mnt/data/Рабочий стол/Cursor/COG-second-brain" && \
   git add -A && \
   git diff --cached --quiet || \
-  git commit -m "auto-sync $(date +\%Y-\%m-\%d\ \%H:\%M)" --no-verify && \
-  git push --quiet 2>/dev/null
+  (git commit -m "auto-sync $(date +\%Y-\%m-\%d\ \%H:\%M)" --no-verify && \
+  git push --quiet) 2>/dev/null
 ```
 
-Every 5 min: stage all → commit if changes → push. Silent, no-verify (skip hooks).
+Every 5 min: stage all → commit if changes → push.
 Worst case: last 5 min of edits not on VPS.
+`.gitignore` left as-is — user manages what's tracked.
 
 ### Auto-Pull on VPS (on failover)
 
 ```python
 # In on_acquire callback, before starting polling:
-async def _sync_cog():
-    proc = await asyncio.create_subprocess_exec(
-        "git", "-C", WORK_DIR, "pull", "--ff-only", "--quiet",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    if proc.returncode == 0:
-        logger.info("COG sync: git pull OK")
-    else:
-        logger.warning(f"COG sync: git pull failed: {stderr.decode()}")
+async def _sync_repo(path: str, name: str):
+    """Force-sync to remote: fetch + reset --hard. Laptop always wins.
+    git clean excludes local config files (.mcp.json, .env, secrets)."""
+    for cmd in [
+        ["git", "-C", path, "fetch", "--quiet"],
+        ["git", "-C", path, "reset", "--hard", "origin/main"],
+        ["git", "-C", path, "clean", "-fd", "-e", ".mcp.json", "-e", ".env", "-e", "*.secret"],
+    ]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            logger.warning(f"{name} sync failed at {cmd[2]}")
+            return False
+    logger.info(f"{name} sync: OK")
+    return True
+
+# Called in on_acquire:
+BOT_REPO = str(Path(__file__).parent.resolve())  # works on both laptop and VPS
+await _sync_repo(WORK_DIR, "COG")
+await _sync_repo(BOT_REPO, "kesha-bot")
 ```
 
 ### COG on VPS
@@ -629,11 +659,37 @@ Claude can read/edit files, access projects, notes — full context.
 
 ### Conflict Resolution
 
-Laptop always wins. VPS never commits to COG (read-only + Claude tool writes).
-If VPS Claude writes a file during failover → it stays local on VPS, not pushed.
-When laptop takes back → next auto-push overwrites.
+Laptop always wins. VPS sync uses `git fetch && git reset --hard origin/main`
+which discards any local VPS changes and forces to match remote.
 
-If VPS needs to save something permanent: commit to kesha-tg-bot repo, not COG.
+VPS Claude CAN write files during failover (Claude tools: Write, Edit).
+These writes are local-only. On next sync (handback → laptop takes over →
+laptop pushes → VPS next acquire → `reset --hard`) they're overwritten.
+
+If VPS Claude creates important files → it should commit + push to kesha-tg-bot
+repo (not COG), or notify user to save manually.
+
+### Bi-Directional Sync (kesha-tg-bot repo)
+
+Both nodes may commit to the bot repo (code changes, config).
+On failover, VPS pulls latest. On handback, laptop pulls latest.
+
+```python
+# In on_acquire, sync BOTH repos:
+await _sync_repo(WORK_DIR, "COG")           # user's knowledge base
+await _sync_repo("/opt/kesha-bot", "kesha-bot")  # bot code
+```
+
+Auto-push from VPS (for bot commits made during failover):
+```bash
+# In on_release (drain), before releasing lease:
+async def _push_bot_repo():
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", "/opt/kesha-bot", "push", "--quiet",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await asyncio.wait_for(proc.communicate(), timeout=15)
+```
 
 ## Global Claude Rules on VPS
 
@@ -645,8 +701,11 @@ Kesha uses Claude Agent SDK which reads:
 ### Setup on VPS
 
 ```bash
-# Create claude config directory
-mkdir -p /home/kesha/.claude
+# Create service user
+sudo useradd -m -s /bin/bash kesha
+sudo mkdir -p /home/kesha/.claude/docs
+sudo mkdir -p /home/kesha/.claude/mcp-servers
+sudo mkdir -p /home/kesha/.claude/projects/-opt-cog-second-brain/memory/
 
 # Copy global CLAUDE.md from laptop (one-time, update on changes)
 scp laptop:~/.claude/CLAUDE.md /home/kesha/.claude/CLAUDE.md
@@ -655,12 +714,23 @@ scp laptop:~/.claude/CLAUDE.md /home/kesha/.claude/CLAUDE.md
 scp -r laptop:~/.claude/docs/ /home/kesha/.claude/docs/
 
 # Copy project-specific memory
-mkdir -p "/home/kesha/.claude/projects/-opt-cog-second-brain/memory/"
 scp -r laptop:~/.claude/projects/-mnt-data-*-COG-second-brain/memory/* \
   /home/kesha/.claude/projects/-opt-cog-second-brain/memory/
 
-# Settings (permissions, MCP)
-scp laptop:~/.claude/settings.json /home/kesha/.claude/settings.json
+# VPS-SPECIFIC settings.json — minimal, WITHOUT aperant/kwin MCP paths
+# DO NOT copy laptop's settings.json directly — it has laptop-specific paths/perms
+cat > /home/kesha/.claude/settings.json << 'SETTINGS'
+{
+  "permissions": {
+    "allow": ["Bash(*)","Read(*)","Write(*)","Edit(*)","WebSearch(*)","WebFetch(*)"]
+  }
+}
+SETTINGS
+
+# Set ownership + permissions
+sudo chown -R kesha:kesha /home/kesha/.claude /opt/kesha-bot /opt/cog-second-brain
+sudo find /home/kesha/.claude -type d -exec chmod 700 {} +
+sudo find /home/kesha/.claude -type f -exec chmod 600 {} +
 ```
 
 ### Sync Strategy
@@ -685,19 +755,54 @@ Project CLAUDE.md lives in repos → synced via `git pull` automatically.
 
 ### VPS MCP Config
 
+VPS uses its own `.mcp.json` in WORK_DIR (`/opt/cog-second-brain/.mcp.json`).
+This file is NOT synced via git — it's VPS-local. Create manually on VPS,
+exclude aperant + kwin, keep everything else.
+
+The current `_load_global_mcp()` in `bot.py` already reads `WORK_DIR/.mcp.json`.
+Since VPS has `WORK_DIR=/opt/cog-second-brain`, it reads the VPS-specific file.
+No code changes needed — just place the right `.mcp.json` on VPS.
+
 ```bash
-# /opt/cog-second-brain/.mcp.json (VPS version — without aperant, kwin)
-# OR environment-specific: .mcp.vps.json loaded via KESHA_MCP_CONFIG env var
+# On VPS — create .mcp.json without aperant/kwin:
+# Copy laptop's, then remove aperant + kwin entries:
+scp laptop:"/mnt/data/Рабочий стол/Cursor/COG-second-brain/.mcp.json" \
+  /opt/cog-second-brain/.mcp.json
+# Edit: remove "aperant" and "kwin" server entries
+
+# IMPORTANT: add .mcp.json to COG's .gitignore or make it untracked
+# so laptop's auto-push doesn't overwrite VPS version:
+cd /opt/cog-second-brain && git update-index --skip-worktree .mcp.json
 ```
 
-```python
-# config.py addition:
-MCP_CONFIG = os.getenv("KESHA_MCP_CONFIG", ".mcp.json")
+VPS `.mcp.json` = laptop's minus aperant + kwin. Same API keys via env/config.
 
-# bot.py: _load_global_mcp() uses MCP_CONFIG instead of hardcoded ".mcp.json"
+### Secrets & Credentials Transfer (via SSH)
+
+Secrets that are NOT in git (API keys, OAuth tokens, creds files) — transfer
+once via SSH. Update manually when they change.
+
+```bash
+# On VPS — pull secrets from laptop:
+
+# 1. Bot .env (API keys, tokens)
+scp laptop:/mnt/data/Projects/Python/kesha-tg-bot/.env /opt/kesha-bot/.env
+# Then edit: remove HTTPS_PROXY, set KESHA_NODE_ID=vps, KESHA_REDIS_URL=localhost
+
+# 2. MCP server credentials
+scp -r laptop:~/.claude/mcp-servers/ /home/kesha/.claude/mcp-servers/
+
+# 3. Gmail OAuth tokens (if using gmail MCP)
+scp -r laptop:~/.claude/mcp-configs/ /home/kesha/.claude/mcp-configs/
+
+# 4. Any COG secrets (not in git)
+scp laptop:"/mnt/data/Рабочий стол/Cursor/COG-second-brain/.env" \
+  /opt/cog-second-brain/.env 2>/dev/null || true
+
+# 5. Permissions
+sudo chown -R kesha:kesha /home/kesha/.claude /opt/kesha-bot /opt/cog-second-brain
+sudo chmod 600 /opt/kesha-bot/.env /opt/cog-second-brain/.env 2>/dev/null || true
 ```
-
-VPS `.mcp.json` = laptop's minus aperant + kwin. Same API keys via `.env`.
 
 ### MCP Credential Files on VPS
 
@@ -722,46 +827,84 @@ sudo apt install redis-server
 ```
 
 ### VPS Full Setup
+
 ```bash
-# 1. Bot repo
-git clone git@github.com:DrSeedon/kesha-tg-bot.git /opt/kesha-bot
-cd /opt/kesha-bot && python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+# 0. Service user + directories
+sudo useradd -m -s /bin/bash kesha
+sudo install -d -o kesha -g kesha -m 700 /home/kesha/.ssh
+sudo install -d -o kesha -g kesha /opt/kesha-bot /opt/cog-second-brain
 
-# 2. COG repo
-git clone git@github.com:<user>/COG-second-brain.git /opt/cog-second-brain
+# 1. SSH deploy key for git repos (as kesha user)
+sudo -u kesha ssh-keygen -t ed25519 -N "" -f /home/kesha/.ssh/id_ed25519
+# Add /home/kesha/.ssh/id_ed25519.pub as deploy key on GitHub repos
+# (kesha-tg-bot + COG-second-brain, read-write access)
+sudo -u kesha bash -c 'echo "Host github.com
+  StrictHostKeyChecking accept-new
+  IdentityFile ~/.ssh/id_ed25519" > ~/.ssh/config'
 
-# 3. Claude global config
-mkdir -p /home/kesha/.claude/docs
-scp laptop:~/.claude/CLAUDE.md /home/kesha/.claude/
-scp -r laptop:~/.claude/docs/ /home/kesha/.claude/docs/
-scp laptop:~/.claude/settings.json /home/kesha/.claude/
+# 2. Bot repo
+sudo -u kesha git clone git@github.com:DrSeedon/kesha-tg-bot.git /opt/kesha-bot
+cd /opt/kesha-bot && sudo -u kesha python3 -m venv .venv
+sudo -u kesha .venv/bin/pip install -r requirements.txt
+sudo -u kesha .venv/bin/pip install redis
 
-# 4. MCP credentials
-mkdir -p /home/kesha/.claude/mcp-servers
-scp -r laptop:~/.claude/mcp-servers/gmail/ /home/kesha/.claude/mcp-servers/
-scp -r laptop:~/.claude/mcp-servers/websearch/ /home/kesha/.claude/mcp-servers/
+# 3. COG repo
+sudo -u kesha git clone git@github.com:<user>/COG-second-brain.git /opt/cog-second-brain
 
-# 5. System tools
-sudo apt install pandoc ffmpeg
+# 4. System tools
+sudo apt install pandoc ffmpeg redis-server
 
-# 6. .env
-cat > /opt/kesha-bot/.env << 'EOF'
-TELEGRAM_BOT_TOKEN=<same>
-ANTHROPIC_API_KEY=<same>
-KESHA_NODE_ID=vps
-KESHA_REDIS_URL=redis://:password@localhost:6379/0
-DEEPGRAM_API_KEY=<key>
-ALLOWED_USERS=720740564,893553748
-WORK_DIR=/opt/cog-second-brain
-CLAUDE_MODEL=claude-opus-4-6
-KESHA_MCP_CONFIG=.mcp.json
-# NO HTTPS_PROXY — VPS has direct API access
-EOF
+# 5. Claude global config (run from laptop):
+#    scp -r ~/.claude/CLAUDE.md vps:/home/kesha/.claude/
+#    scp -r ~/.claude/docs/ vps:/home/kesha/.claude/docs/
+#    scp -r ~/.claude/mcp-servers/ vps:/home/kesha/.claude/mcp-servers/
+#    scp -r ~/.claude/mcp-configs/ vps:/home/kesha/.claude/mcp-configs/
 
-# 7. Systemd
-sudo cp kesha-bot.service /etc/systemd/system/kesha-bot-vps.service
-# Edit: WorkingDirectory, ExecStart, Environment
+# 6. VPS-specific settings.json (minimal, no aperant/kwin)
+sudo -u kesha bash -c 'cat > /home/kesha/.claude/settings.json << SETTINGS
+{
+  "permissions": {
+    "allow": ["Bash(*)","Read(*)","Write(*)","Edit(*)","WebSearch(*)","WebFetch(*)"]
+  }
+}
+SETTINGS'
+
+# 7. .env (copy from laptop, edit)
+#    scp laptop:/mnt/data/Projects/Python/kesha-tg-bot/.env /opt/kesha-bot/.env
+#    Edit: remove HTTPS_PROXY, set:
+#      KESHA_NODE_ID=vps
+#      KESHA_REDIS_URL=redis://:password@localhost:6379/0
+#      WORK_DIR=/opt/cog-second-brain
+
+# 8. VPS-specific .mcp.json in COG (without aperant/kwin)
+#    scp laptop:"COG-second-brain/.mcp.json" /opt/cog-second-brain/.mcp.json
+#    Edit: remove aperant + kwin entries
+#    Then: cd /opt/cog-second-brain && git update-index --skip-worktree .mcp.json
+
+# 9. Permissions
+sudo chown -R kesha:kesha /home/kesha /opt/kesha-bot /opt/cog-second-brain
+sudo chmod 600 /opt/kesha-bot/.env
+
+# 10. Systemd
+sudo bash -c 'cat > /etc/systemd/system/kesha-bot-vps.service << SERVICE
+[Unit]
+Description=Kesha Telegram Bot (VPS failover)
+After=network.target redis.target
+
+[Service]
+Type=simple
+User=kesha
+WorkingDirectory=/opt/kesha-bot
+ExecStart=/opt/kesha-bot/.venv/bin/python3 bot.py
+EnvironmentFile=/opt/kesha-bot/.env
+Environment=HOME=/home/kesha
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE'
+sudo systemctl daemon-reload
 sudo systemctl enable kesha-bot-vps
 sudo systemctl start kesha-bot-vps
 ```
