@@ -91,6 +91,7 @@ class ChatState:
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._shutdown: bool = False
 
     @property
     def is_busy(self) -> bool:
@@ -102,6 +103,7 @@ class ChatState:
     async def accept_entry(self, entry: PendingEntry) -> None:
         """Enqueue a new user/reminder entry. Arms debounce or injects if already processing."""
         async with self._lock:
+            if self._shutdown: return
             if entry.source == "user" and entry.message_id:
                 self.last_user_message_id = entry.message_id
 
@@ -133,6 +135,7 @@ class ChatState:
     async def transcription_started(self) -> tuple[int, int]:
         """Call before starting an async transcription. Returns (generation, media_generation) snapshot."""
         async with self._lock:
+            if self._shutdown: return (self.generation, self.media_generation)
             self.pending_transcriptions += 1
             return (self.generation, self.media_generation)
 
@@ -145,6 +148,9 @@ class ChatState:
         """Call after transcription completes. Discards stale results if /clear happened."""
         ready_batch: list[PendingEntry] | None = None
         async with self._lock:
+            if self._shutdown:
+                self.pending_transcriptions = max(0, self.pending_transcriptions - 1)
+                return
             if generation != self.generation or media_generation != self.media_generation:
                 logger.info(
                     f"Chat {self.chat_id}: stale transcription discarded "
@@ -189,6 +195,7 @@ class ChatState:
     async def request_stop(self) -> bool:
         """Request stop of current processing. Returns True if there was something to stop."""
         async with self._lock:
+            if self._shutdown: return False
             if self.phase not in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
                 return False
             prev = self.phase
@@ -201,6 +208,7 @@ class ChatState:
     async def request_clear(self) -> bool:
         """Clear session. Rejected during PROCESSING/COMPACTING/STOPPING. Returns True if cleared."""
         async with self._lock:
+            if self._shutdown: return False
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.COMPACTING, ChatPhase.STOPPING):
                 return False
             # Cancel debounce timer
@@ -227,6 +235,7 @@ class ChatState:
     async def request_compact(self) -> bool:
         """Request compaction. Deferred during PROCESSING/STOPPING, runs now from IDLE/COLLECTING/WAITING_MEDIA."""
         async with self._lock:
+            if self._shutdown: return False
             if self.phase == ChatPhase.COMPACTING:
                 return True
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
@@ -261,6 +270,7 @@ class ChatState:
         start_now = False
         inject_prompt = entry.prompt
         async with self._lock:
+            if self._shutdown: return
             if self.phase == ChatPhase.PROCESSING:
                 pass  # will inject below
             elif self.phase in (ChatPhase.STOPPING, ChatPhase.COMPACTING):
@@ -283,6 +293,7 @@ class ChatState:
     async def set_model(self, model_id: str, use_1m: bool) -> None:
         """Set model immediately or defer if processing."""
         async with self._lock:
+            if self._shutdown: return
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING, ChatPhase.COMPACTING):
                 self.pending_model = (model_id, use_1m)
                 return
@@ -293,10 +304,36 @@ class ChatState:
     async def set_debounce(self, seconds: int) -> None:
         """Update debounce value. Already-armed timer runs with old value."""
         async with self._lock:
+            if self._shutdown: return
             self.debounce_sec = seconds
 
     def should_stop(self) -> bool:
         return self.cancel_requested
+
+    async def enter_shutdown(self) -> None:
+        """Stop accepting new work. Cancels debounce, waits for active processing (up to 60s)."""
+        async with self._lock:
+            self._shutdown = True
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+        # Yield once to let any coroutine that checked _shutdown==False under lock
+        # but hasn't yet created _processing_task finish its create_task() call.
+        await asyncio.sleep(0)
+        task = self._processing_task
+        if task and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=60)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+
+    async def exit_shutdown(self) -> None:
+        """Re-enable work acceptance after shutdown."""
+        async with self._lock:
+            self._shutdown = False
 
     async def get_snapshot(self) -> ChatSnapshot:
         async with self._lock:
@@ -546,6 +583,9 @@ class ChatState:
     async def _drain_or_idle(self) -> None:
         """Atomically: if deferred exists → PROCESSING + drain, else → IDLE. No IDLE window."""
         async with self._lock:
+            if self._shutdown:
+                self.phase = ChatPhase.IDLE
+                return
             if self.deferred:
                 merged: list[PendingEntry] = []
                 for b in self.deferred:
