@@ -207,5 +207,5 @@ SYSTEM_PROMPT_FILE = Path(__file__).parent / "system_prompt.txt"
 def load_system_prompt() -> str:
     if SYSTEM_PROMPT_FILE.exists():
         raw = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
-        return raw.format(cwd=WORK_DIR, media_dir=MEDIA_DIR)
+        return raw.format(cwd=WORK_DIR, media_dir=MEDIA_DIR, node_id=KESHA_NODE_ID)
     return ""
