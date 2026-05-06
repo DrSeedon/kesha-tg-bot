@@ -144,7 +144,9 @@ async def h_status(msg: types.Message):
     else:
         ctx_str = "n/a"
     uptime = _uptime_fn() if _uptime_fn else "unknown"
+    node = _cfg.KESHA_NODE_ID
     await _send_safe(msg, t(msg, "status",
+        node=node,
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,

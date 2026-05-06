@@ -201,6 +201,7 @@ async def main():
         return
 
     from failover import LeaseManager, LeaseGateMiddleware, drain_for_handback, _sync_repo
+    from reminders_sync import init_sync
 
     lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL)
     lease._registry = registry
@@ -217,8 +218,12 @@ async def main():
             return
         return await handler(event, data)
 
+    rem_sync = await init_sync(KESHA_REDIS_URL, KESHA_NODE_ID)
+
     async def on_acquire(epoch: int, sessions: dict):
         await _sync_repo(WORK_DIR, "COG")
+
+        await rem_sync.pull_dump()
 
         await registry.sync_from_lease(sessions)
         for cs in registry._chats.values():
@@ -233,6 +238,7 @@ async def main():
         lease._reminder_task = asyncio.create_task(
             _reminders.reminder_loop(bot, get_session, ALLOWED)
         )
+        await rem_sync.push_dump()
 
         try:
             await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online (epoch {epoch})")
@@ -242,6 +248,7 @@ async def main():
         lease._polling_task = asyncio.create_task(dp.start_polling(bot))
 
     async def on_release():
+        await rem_sync.push_dump()
         await drain_for_handback(registry, lease)
 
     async def on_lost():
