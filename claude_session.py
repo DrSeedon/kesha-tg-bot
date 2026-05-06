@@ -115,7 +115,18 @@ class ClaudeSession:
             logger.info(f"Connecting with resume {self.session_id[:8]}...")
         else:
             logger.info("Connecting new session...")
-        await self._client.connect()
+        try:
+            await self._client.connect()
+        except Exception as e:
+            if "No conversation found" in str(e) and self.session_id:
+                logger.warning("Session %s not found locally, starting fresh", self.session_id[:8])
+                self.session_id = None
+                self._save_session()
+                options = self._make_options()
+                self._client = ClaudeSDKClient(options=options)
+                await self._client.connect()
+            else:
+                raise
         self._connected = True
 
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
