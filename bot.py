@@ -32,6 +32,7 @@ from claude_session import ClaudeSession
 from kesha_tools import kesha_server, set_bot_ref, set_current_chat
 import reminders as _reminders
 import compact as _compact
+import inbox_server as _inbox
 
 import telegram_io as _tio
 import media as _media
@@ -153,6 +154,9 @@ async def main():
 
     # Register all handlers
     _handlers.register(dp)
+
+    _inbox.set_refs(bot, registry)
+    await _inbox.start_inbox_server()
 
     _media.cleanup_media()
     _media.cleanup_logs()
