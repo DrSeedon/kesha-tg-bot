@@ -30,6 +30,7 @@ MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
 KESHA_NODE_ID = os.getenv("KESHA_NODE_ID", "laptop")
 KESHA_REDIS_URL = os.getenv("KESHA_REDIS_URL", "")
+KESHA_PRIORITY = os.getenv("KESHA_PRIORITY", "primary")  # primary | secondary
 NOTIFY_CHAT = int(os.getenv("NOTIFY_CHAT", "0")) or (list(ALLOWED)[0] if ALLOWED else 0)
 
 ALLOWED_MODELS = {

@@ -21,6 +21,7 @@ DRAIN_DEADLINE = 60        # max seconds for graceful drain
 HEALTH_RELEASE_STRIKES = 6 # consecutive unhealthy ticks before voluntary release
 
 LEASE_KEY = "kesha:lease"
+PRIORITY_KEY = "kesha:preferred_node"
 
 # ─── Lua Scripts ─────────────────────────────────────────────────────────────
 
@@ -143,8 +144,9 @@ class LeaseManager:
     DRAIN_DEADLINE = DRAIN_DEADLINE
     HEALTH_RELEASE_STRIKES = HEALTH_RELEASE_STRIKES
 
-    def __init__(self, node_id: str, redis_url: str) -> None:
+    def __init__(self, node_id: str, redis_url: str, priority: str = "primary") -> None:
         self.node_id = node_id
+        self.priority = priority
         self._redis_url = redis_url
         self._redis: aioredis.Redis | None = None
         self.epoch: int = 0
@@ -219,9 +221,45 @@ class LeaseManager:
         if self._unhealthy_streak >= self.HEALTH_RELEASE_STRIKES:
             await self._graceful_release(on_release, on_lost)
 
+    # ─── Priority helpers ──────────────────────────────────────────────────
+
+    async def _is_preferred(self) -> bool:
+        try:
+            preferred = await self._redis.get(PRIORITY_KEY)
+            if preferred:
+                return preferred == self.node_id
+        except Exception:
+            pass
+        return self.priority == "primary"
+
+    async def set_preferred_node(self, node_id: str) -> None:
+        await self._redis.set(PRIORITY_KEY, node_id)
+        logger.info("Preferred node set to: %s", node_id)
+
     # ─── Standby tick ────────────────────────────────────────────────────────
 
     async def _standby_tick(self, on_acquire: Callable[[int, dict], Awaitable[None]]) -> None:
+        preferred = await self._is_preferred()
+
+        if not preferred:
+            try:
+                import json
+                raw = await self._redis.get(LEASE_KEY)
+                if raw:
+                    data = json.loads(raw)
+                    if data.get("owner") not in (None, "null"):
+                        return
+            except Exception:
+                pass
+
+        if preferred and not self._is_owner:
+            try:
+                result = await self._lua_request_handback()
+                if result > 0:
+                    logger.info("Requested handback (preferred node)")
+            except Exception:
+                pass
+
         try:
             epoch = await self._lua_acquire(self._build_sessions())
         except Exception:

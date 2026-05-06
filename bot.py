@@ -207,7 +207,8 @@ async def main():
     from failover import LeaseManager, LeaseGateMiddleware, drain_for_handback, _sync_repo
     from reminders_sync import init_sync
 
-    lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL)
+    from config import KESHA_PRIORITY
+    lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL, priority=KESHA_PRIORITY)
     lease._registry = registry
     registry._dp = dp
 

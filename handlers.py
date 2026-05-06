@@ -314,6 +314,33 @@ async def h_failover(msg: types.Message):
         await _send_safe(msg, f"❌ Ошибка: {e}")
 
 
+async def h_priority(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    try:
+        from config import KESHA_NODE_ID
+        lease = _lease
+        if not lease or not lease._redis:
+            return await _send_safe(msg, "⚠️ Failover не активен")
+
+        from failover import PRIORITY_KEY
+        args = (msg.text or "").split()
+        if len(args) < 2:
+            preferred = await lease._redis.get(PRIORITY_KEY)
+            current = preferred or f"{KESHA_NODE_ID} (default .env)"
+            return await _send_safe(msg, (
+                f"📡 *Приоритет:* `{current}`\n"
+                f"Этот узел: `{KESHA_NODE_ID}` ({lease.priority})\n\n"
+                f"Использование: `/priority laptop` или `/priority vps`"
+            ))
+
+        target = args[1].strip().lower()
+        await lease.set_preferred_node(target)
+        await _send_safe(msg, f"✅ Приоритет переключён на *{target}*\nПереключение произойдёт в течение ~30с")
+    except Exception as e:
+        await _send_safe(msg, f"❌ Ошибка: {e}")
+
+
 async def h_restart(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
@@ -601,6 +628,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
     dp.message.register(h_failover, Command("failover"))
+    dp.message.register(h_priority, Command("priority"))
     dp.message.register(h_restart, Command("restart"))
     dp.message.register(h_stop, Command("stop"))
     # Media handlers — media_group BEFORE photo
