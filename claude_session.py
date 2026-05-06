@@ -118,8 +118,8 @@ class ClaudeSession:
         try:
             await self._client.connect()
         except Exception as e:
-            if "No conversation found" in str(e) and self.session_id:
-                logger.warning("Session %s not found locally, starting fresh", self.session_id[:8])
+            if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
+                logger.warning("Session %s failed (%s), starting fresh", self.session_id[:8], type(e).__name__)
                 self.session_id = None
                 self._save_session()
                 options = self._make_options()
@@ -191,8 +191,8 @@ class ClaudeSession:
                     }
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
         except Exception as e:
-            if "No conversation found" in str(e) and self.session_id:
-                logger.warning("Session %s not found, resetting and retrying", self.session_id[:8])
+            if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
+                logger.warning("Session %s failed (%s), resetting and retrying", self.session_id[:8], type(e).__name__)
                 self.session_id = None
                 self._save_session()
                 self._connected = False
