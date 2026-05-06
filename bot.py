@@ -213,6 +213,7 @@ async def main():
 
     global _lease
     _lease = lease
+    _handlers.set_lease(lease)
 
     bot.session.middleware(LeaseGateMiddleware(lease))
 
@@ -249,7 +250,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Greet send failed (non-critical): {e}")
 
-        lease._polling_task = asyncio.create_task(dp.start_polling(bot))
+        lease._polling_task = asyncio.create_task(dp.start_polling(bot, close_bot_session=False))
 
     async def on_release():
         await rem_sync.push_dump()

@@ -40,6 +40,12 @@ from telegram_io import (
 _bot = None
 _registry = None
 _uptime_fn = None
+_lease = None
+
+
+def set_lease(lease_manager) -> None:
+    global _lease
+    _lease = lease_manager
 _denied_notified: set[int] = set()
 
 
@@ -247,26 +253,61 @@ async def h_failover(msg: types.Message):
         return
     try:
         from failover import LEASE_KEY
+        from config import KESHA_REDIS_URL, KESHA_NODE_ID
         import json
-        import bot as _bot_mod
-        lease = getattr(_bot_mod, '_lease', None)
-        if not lease:
-            return await _send_safe(msg, "⚠️ Failover не активен (solo mode)")
-        raw = await lease._redis.get(LEASE_KEY)
-        if not raw:
-            return await _send_safe(msg, "⚠️ Нет lease в Redis")
-        data = json.loads(raw)
-        owner = data.get("owner", "?")
-        epoch = data.get("epoch", 0)
-        node_id = lease.node_id
-        if owner == node_id:
-            await _send_safe(msg, f"🔄 Отдаю lease с *{node_id}*...")
-            await lease._lua_release(lease._build_sessions())
-            lease._is_owner = False
-            lease._lease_valid_until = 0.0
-            await _send_safe(msg, f"✅ Lease отдан. Другой узел подхватит за ~30с")
+
+        lease = _lease
+
+        if lease:
+            raw = await lease._redis.get(LEASE_KEY)
+            if not raw:
+                return await _send_safe(msg, "⚠️ Нет lease в Redis")
+            data = json.loads(raw)
+            owner = data.get("owner", "?")
+            epoch = data.get("epoch", 0)
+            node_id = lease.node_id
+            if owner == node_id:
+                await _send_safe(msg, f"🔄 Отдаю lease с *{node_id}* (graceful drain)...")
+                from failover import drain_for_handback
+                try:
+                    await asyncio.wait_for(
+                        drain_for_handback(_registry, lease),
+                        timeout=lease.DRAIN_DEADLINE,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("/failover: drain timed out, forcing release")
+                except Exception as e:
+                    logger.warning("/failover: drain error: %s", e)
+                await lease._lua_release(lease._build_sessions())
+                lease._is_owner = False
+                lease._lease_valid_until = 0.0
+                await _send_safe(msg, f"✅ Lease отдан. Другой узел подхватит за ~30с")
+            else:
+                await _send_safe(msg, f"📡 Сейчас owner: *{owner}* (epoch {epoch})\n{node_id} в standby — уже на другом хосте")
+        elif KESHA_REDIS_URL:
+            import redis.asyncio as aioredis
+            r = aioredis.from_url(KESHA_REDIS_URL, decode_responses=True)
+            try:
+                raw = await r.get(LEASE_KEY)
+                if raw:
+                    data = json.loads(raw)
+                    owner = data.get("owner", "?")
+                    epoch = data.get("epoch", 0)
+                    ttl = await r.ttl(LEASE_KEY)
+                    await _send_safe(msg, (
+                        f"📡 Lease info (direct Redis):\n"
+                        f"• Owner: *{owner}* (epoch {epoch})\n"
+                        f"• TTL: {ttl}s\n"
+                        f"• Этот узел: *{KESHA_NODE_ID}*\n\n"
+                        f"⚠️ _lease объект не инициализирован (бот стартует?)\n"
+                        f"Подожди 30с и попробуй снова"
+                    ))
+                else:
+                    await _send_safe(msg, "⚠️ Нет lease в Redis. Оба узла в standby?")
+            finally:
+                await r.aclose()
         else:
-            await _send_safe(msg, f"📡 Сейчас owner: *{owner}* (epoch {epoch})\n{node_id} в standby — уже на другом хосте")
+            await _send_safe(msg, "⚠️ Failover не активен (solo mode — нет KESHA\\_REDIS\\_URL)")
     except ImportError:
         await _send_safe(msg, "⚠️ Failover модуль не найден")
     except Exception as e:

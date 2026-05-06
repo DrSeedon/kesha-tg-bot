@@ -117,14 +117,17 @@ return 1
 # ─── LeaseGateMiddleware ──────────────────────────────────────────────────────
 
 class LeaseGateMiddleware:
-    """Blocks ALL outgoing Telegram API calls when not lease owner."""
+    """Blocks outgoing Telegram API calls when not lease owner (except GetMe)."""
+
+    _PASSTHROUGH = frozenset({"GetMe"})
 
     def __init__(self, lease_manager: "LeaseManager") -> None:
         self._lm = lease_manager
 
     async def __call__(self, make_request: Any, bot: Any, method: TelegramMethod) -> Any:
-        if self._lm and not self._lm.is_owner_now:
-            logger.debug("Suppressed %s (not lease owner)", type(method).__name__)
+        method_name = type(method).__name__
+        if self._lm and not self._lm.is_owner_now and method_name not in self._PASSTHROUGH:
+            logger.debug("Suppressed %s (not lease owner)", method_name)
             return None
         return await make_request(bot, method)
 
@@ -235,6 +238,12 @@ class LeaseManager:
         sessions = await self._get_sessions_from_lease()
         try:
             await on_acquire(epoch, sessions)
+            # Renew immediately after acquire — don't wait 30s for next tick
+            try:
+                await self._lua_renew(healthy=True, sessions=self._build_sessions())
+                self._lease_valid_until = time.time() + self.LOCAL_TTL
+            except Exception:
+                pass
         except Exception as e:
             logger.error("on_acquire failed: %s", e, exc_info=True)
             await self._emergency_stop()
@@ -263,9 +272,15 @@ class LeaseManager:
             self._polling_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(self._polling_task), timeout=5)
-            except Exception:
+            except BaseException:
                 pass
         self._reminder_stop.set()
+        if self._reminder_task and not self._reminder_task.done():
+            self._reminder_task.cancel()
+            try:
+                await asyncio.wait_for(self._reminder_task, timeout=5)
+            except BaseException:
+                pass
 
     # ─── Graceful release ────────────────────────────────────────────────────
 
@@ -398,7 +413,7 @@ class LeaseManager:
                 kw: dict[str, Any] = {"timeout": timeout}
                 if proxy:
                     kw["proxy"] = proxy
-                async with s.get("https://api.anthropic.com/", **kw) as r:
+                async with s.get("https://api.telegram.org/", **kw) as r:
                     return r.status < 500
         except Exception:
             return False
