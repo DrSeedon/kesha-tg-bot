@@ -191,6 +191,15 @@ class ClaudeSession:
                     }
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
         except Exception as e:
+            if "No conversation found" in str(e) and self.session_id:
+                logger.warning("Session %s not found, resetting and retrying", self.session_id[:8])
+                self.session_id = None
+                self._save_session()
+                self._connected = False
+                self._client = None
+                async for chunk in self.send_message(text):
+                    yield chunk
+                return
             logger.error(f"SDK error: {e}", exc_info=True)
             self._connected = False
             self._client = None
