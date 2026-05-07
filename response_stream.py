@@ -166,7 +166,7 @@ async def _ask_inner(message, prompt, cid, typer):
                 finalized.append(mid)
             status = None
 
-    CHUNK_TIMEOUT_TEXT = 45
+    CHUNK_TIMEOUT_TEXT = 120
     CHUNK_TIMEOUT_TOOL = 300
 
     while retries <= MAX_RETRIES:
