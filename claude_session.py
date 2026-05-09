@@ -54,12 +54,33 @@ class ClaudeSession:
         self._is_processing = False
 
     def _load_session(self) -> Optional[str]:
+        redis_sid = self._load_session_from_redis()
+        file_sid = None
         if self._session_file.exists():
-            sid = self._session_file.read_text().strip()
-            if sid:
-                logger.info(f"Loaded session from {self._session_file.name}: {sid[:8]}...")
-                return sid
+            file_sid = self._session_file.read_text().strip() or None
+        if redis_sid and redis_sid != file_sid:
+            logger.info(f"Session from Redis: {redis_sid[:8]}... (file had {file_sid[:8] + '...' if file_sid else 'none'})")
+            self._session_file.parent.mkdir(parents=True, exist_ok=True)
+            self._session_file.write_text(redis_sid)
+            return redis_sid
+        if file_sid:
+            logger.info(f"Loaded session from {self._session_file.name}: {file_sid[:8]}...")
+            return file_sid
         return None
+
+    def _load_session_from_redis(self) -> Optional[str]:
+        try:
+            from config import KESHA_REDIS_URL
+            if not KESHA_REDIS_URL:
+                return None
+            import redis as sync_redis
+            chat_id = self._session_file.stem
+            r = sync_redis.from_url(KESHA_REDIS_URL, decode_responses=True, socket_timeout=3)
+            sid = r.get(f"kesha:sessions:{chat_id}")
+            r.close()
+            return sid
+        except Exception:
+            return None
 
     def _save_session(self):
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
