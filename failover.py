@@ -261,7 +261,7 @@ class LeaseManager:
                 pass
 
         try:
-            epoch = await self._lua_acquire(self._build_sessions())
+            epoch = await self._lua_acquire({})
         except Exception:
             return
 
