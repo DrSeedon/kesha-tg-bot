@@ -90,21 +90,14 @@ class ClaudeSession:
         if not self.session_id:
             return
         try:
-            import asyncio
             from config import KESHA_REDIS_URL
             if not KESHA_REDIS_URL:
                 return
+            import redis as sync_redis
             chat_id = self._session_file.stem
-            async def _push():
-                import redis.asyncio as aioredis
-                r = aioredis.from_url(KESHA_REDIS_URL, decode_responses=True)
-                await r.set(f"kesha:sessions:{chat_id}", self.session_id)
-                await r.aclose()
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_push())
-            except RuntimeError:
-                pass
+            r = sync_redis.from_url(KESHA_REDIS_URL, decode_responses=True, socket_timeout=3)
+            r.set(f"kesha:sessions:{chat_id}", self.session_id)
+            r.close()
         except Exception:
             pass
 
@@ -141,6 +134,12 @@ class ClaudeSession:
     async def _ensure_connected(self):
         if self._client and self._connected:
             return
+        redis_sid = self._load_session_from_redis()
+        if redis_sid and redis_sid != self.session_id:
+            logger.info(f"Session refreshed from Redis before connect: {redis_sid[:8]}... (was {self.session_id[:8] + '...' if self.session_id else 'none'})")
+            self.session_id = redis_sid
+            self.session_id_changed_at = int(time.time())
+            self._save_session()
         if self._pending_disconnect is not None:
             try:
                 await self._pending_disconnect.disconnect()
