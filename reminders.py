@@ -137,7 +137,6 @@ class ReminderDB:
              cycle_on_days, cycle_off_days, text_off, phase),
         )
         rid = cur.lastrowid
-        _publish_event("create", dict(self.get(rid)))
         return rid
 
     def get(self, id_: int) -> Optional[sqlite3.Row]:
@@ -154,7 +153,6 @@ class ReminderDB:
     def cancel(self, id_: int) -> bool:
         cur = self.conn.execute("DELETE FROM reminders WHERE id=?", (id_,))
         if cur.rowcount > 0:
-            _publish_event("cancel", {"id": id_})
             return True
         return False
 
@@ -173,7 +171,6 @@ class ReminderDB:
         sets = ", ".join(f"{k}=?" for k in fields)
         cur = self.conn.execute(f"UPDATE reminders SET {sets} WHERE id=?", (*fields.values(), id_))
         if cur.rowcount > 0:
-            _publish_event("update", {"id": id_, **fields})
             return True
         return False
 
@@ -203,7 +200,6 @@ class ReminderDB:
             (now, 1 if delivered else 0, id_),
         )
         if cur.rowcount > 0:
-            _publish_event("mark_fired", {"id": id_, "fired_at": now, "delivered": 1 if delivered else 0})
             return True
         return False
 
@@ -212,7 +208,6 @@ class ReminderDB:
             return
         qs = ",".join("?" * len(ids))
         self.conn.execute(f"UPDATE reminders SET delivered=1 WHERE id IN ({qs})", tuple(ids))
-        _publish_event("mark_delivered_batch", {"ids": ids})
 
     def reschedule(self, id_: int, new_due: datetime):
         due_str = utc_iso(new_due)
@@ -220,7 +215,6 @@ class ReminderDB:
             "UPDATE reminders SET due_at=?, fired_at=NULL, delivered=0 WHERE id=?",
             (due_str, id_),
         )
-        _publish_event("reschedule", {"id": id_, "due_at": due_str})
 
 
 _db: Optional[ReminderDB] = None
@@ -231,21 +225,6 @@ def get_db() -> ReminderDB:
     if _db is None:
         _db = ReminderDB()
     return _db
-
-
-def _publish_event(action: str, data: dict):
-    try:
-        from reminders_sync import get_sync
-        sync = get_sync()
-        if sync:
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(sync.publish_event(action, data))
-            except RuntimeError:
-                pass
-    except ImportError:
-        pass
 
 
 def format_reminder_line(r: sqlite3.Row) -> str:

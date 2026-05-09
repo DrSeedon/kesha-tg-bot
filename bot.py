@@ -204,65 +204,49 @@ async def main():
         await _solo_startup()
         return
 
-    from failover import LeaseManager, LeaseGateMiddleware, drain_for_handback, _sync_repo
-    from reminders_sync import init_sync
+    from failover import FailoverNode, LeaseGateMiddleware, _sync_repo
 
-    from config import KESHA_PRIORITY
-    lease = LeaseManager(KESHA_NODE_ID, KESHA_REDIS_URL, priority=KESHA_PRIORITY)
-    lease._registry = registry
-    registry._dp = dp
+    node = FailoverNode(KESHA_NODE_ID, KESHA_REDIS_URL)
 
     global _lease
-    _lease = lease
-    _handlers.set_lease(lease)
+    _lease = node
+    _handlers.set_lease(node)
 
-    bot.session.middleware(LeaseGateMiddleware(lease))
+    bot.session.middleware(LeaseGateMiddleware(node))
 
     @dp.update.outer_middleware()
     async def epoch_guard(handler, event, data):
-        if not lease.is_owner_now:
+        if not node.is_active:
             return
         return await handler(event, data)
 
-    rem_sync = await init_sync(KESHA_REDIS_URL, KESHA_NODE_ID)
-
-    async def on_acquire(epoch: int, sessions: dict):
+    async def start_bot():
         await _sync_repo(WORK_DIR, "COG")
-
-        await rem_sync.pull_dump()
-
-        await registry.sync_from_lease(sessions, redis_client=lease._redis)
-        for cs in registry._chats.values():
-            await cs.exit_shutdown()
+        await node.pull_reminders_dump()
 
         try:
             await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
         except Exception as e:
             logger.warning(f"Missed reminders delivery failed (non-critical): {e}")
 
-        lease._reminder_stop.clear()
-        lease._reminder_task = asyncio.create_task(
-            _reminders.reminder_loop(bot, get_session, ALLOWED)
-        )
-        await rem_sync.push_dump()
+        asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
         try:
-            await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online (epoch {epoch})")
+            await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online")
         except Exception as e:
             logger.warning(f"Greet send failed (non-critical): {e}")
 
-        lease._polling_task = asyncio.create_task(dp.start_polling(bot, close_bot_session=False))
+        await dp.start_polling(bot)
 
-    async def on_release():
-        await rem_sync.push_dump()
-        await drain_for_handback(registry, lease)
-
-    async def on_lost():
-        for cs in registry._chats.values():
-            await cs.enter_shutdown()
+    async def stop_bot():
+        await dp.stop_polling()
+        await node.push_reminders_dump()
 
     logger.info(f"Failover mode: node={KESHA_NODE_ID}")
-    await lease.run(on_acquire, on_release, on_lost)
+    if node.is_laptop:
+        await node.run_laptop(start_bot, stop_bot)
+    else:
+        await node.run_vps(start_bot, stop_bot)
 
 
 if __name__ == "__main__":
