@@ -106,7 +106,7 @@ class FailoverNode:
             return False
 
     async def run_laptop(self, start_bot_fn, stop_bot_fn):
-        """Laptop main loop: heartbeat + sync from VPS + run bot."""
+        """Laptop main loop: heartbeat + run bot. Blocks forever."""
         await self.connect()
         await self.send_heartbeat()
         await self.pull_reminders_dump()
@@ -116,6 +116,8 @@ class FailoverNode:
 
         try:
             await start_bot_fn()
+            if self._polling_task:
+                await self._polling_task
         finally:
             self._active = False
             await self.push_reminders_dump()

@@ -236,10 +236,16 @@ async def main():
         except Exception as e:
             logger.warning(f"Greet send failed (non-critical): {e}")
 
-        await dp.start_polling(bot)
+        node._polling_task = asyncio.create_task(dp.start_polling(bot))
 
     async def stop_bot():
         await dp.stop_polling()
+        if node._polling_task and not node._polling_task.done():
+            try:
+                await asyncio.wait_for(node._polling_task, timeout=10)
+            except (asyncio.TimeoutError, Exception):
+                pass
+            node._polling_task = None
         await node.push_reminders_dump()
 
     logger.info(f"Failover mode: node={KESHA_NODE_ID}")
