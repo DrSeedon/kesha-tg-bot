@@ -394,8 +394,6 @@ async def compact_context(args):
     if not chat_id:
         return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
     cs = _bot_ref.registry.get(chat_id)
-    if cs.is_busy:
-        return {"content": [{"type": "text", "text": "Cannot compact while processing — use /compact command between messages instead"}], "is_error": True}
     import compact as _compact
     try:
         async def _notify(text):
