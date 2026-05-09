@@ -65,6 +65,28 @@ class ClaudeSession:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_file.write_text(self.session_id or "")
 
+    def _save_session_to_redis(self):
+        if not self.session_id:
+            return
+        try:
+            import asyncio
+            from config import KESHA_REDIS_URL
+            if not KESHA_REDIS_URL:
+                return
+            chat_id = self._session_file.stem
+            async def _push():
+                import redis.asyncio as aioredis
+                r = aioredis.from_url(KESHA_REDIS_URL, decode_responses=True)
+                await r.set(f"kesha:sessions:{chat_id}", self.session_id)
+                await r.aclose()
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_push())
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
+
     @staticmethod
     async def _auto_approve_tool(tool_name, tool_input, _context=None):
         try:
@@ -156,6 +178,7 @@ class ClaudeSession:
                         self.session_id = msg.session_id
                         self.session_id_changed_at = int(time.time())
                         self._save_session()
+                        self._save_session_to_redis()
                         logger.info(f"Session ID saved: {self.session_id[:8]}")
                     if hasattr(msg, 'total_cost_usd') and msg.total_cost_usd is not None:
                         self.last_cost_usd = msg.total_cost_usd

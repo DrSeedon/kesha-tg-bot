@@ -231,7 +231,7 @@ async def main():
 
         await rem_sync.pull_dump()
 
-        await registry.sync_from_lease(sessions)
+        await registry.sync_from_lease(sessions, redis_client=lease._redis)
         for cs in registry._chats.values():
             await cs.exit_shutdown()
 

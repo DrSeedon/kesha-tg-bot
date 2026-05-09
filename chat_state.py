@@ -672,8 +672,10 @@ class ChatRegistry:
             logger.info(f"ChatRegistry: created ChatState for chat {chat_id}")
         return self._chats[chat_id]
 
-    async def sync_from_lease(self, sessions: dict) -> None:
-        """Restore session IDs from lease payload after failover acquire."""
+    async def sync_from_lease(self, sessions: dict, redis_client=None) -> None:
+        """Restore session IDs from lease payload after failover acquire.
+        Falls back to dedicated Redis keys if lease sessions empty."""
+        synced = set()
         for chat_id_str, info in sessions.items():
             try:
                 chat_id = int(chat_id_str)
@@ -687,7 +689,23 @@ class ChatRegistry:
             cs.session.session_id = sid
             cs.session.session_id_changed_at = ts
             cs.session._save_session()
+            synced.add(chat_id)
             logger.info(f"sync_from_lease: chat {chat_id} → session {sid[:8]}...")
+        if redis_client:
+            try:
+                from config import ALLOWED
+                for chat_id in ALLOWED:
+                    if chat_id in synced:
+                        continue
+                    sid = await redis_client.get(f"kesha:sessions:{chat_id}")
+                    if sid:
+                        cs = self.get(chat_id)
+                        cs.session.session_id = sid
+                        cs.session._save_session()
+                        synced.add(chat_id)
+                        logger.info(f"sync_from_lease (redis fallback): chat {chat_id} → session {sid[:8]}...")
+            except Exception as e:
+                logger.debug(f"sync_from_lease redis fallback error: {e}")
 
     async def shutdown(self) -> None:
         for chat in self._chats.values():
