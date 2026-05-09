@@ -151,6 +151,11 @@ async def _ask_inner(message, prompt, cid, typer):
                     except Exception:
                         pass
                     break
+        if draft_has_text:
+            try:
+                await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=""))
+            except Exception:
+                pass
         draft_has_text = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0

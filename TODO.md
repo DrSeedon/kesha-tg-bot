@@ -30,6 +30,8 @@
 - [x] Markdown fix — `telegramify-markdown` entities вместо хрупкого Markdown V1 parse_mode
 
 ## Open
+- [ ] **Draft ghost** — при финализации ответа старый unformatted draft висит 2-3 секунды с loading emoji, потом удаляется. Юзер видит дубль (draft + final). Причина: send нового → delete старого с задержкой. Фикс: edit-in-place вместо delete+send, или delete первым
+- [ ] **Reminders sync v2** — reminders_sync.py создан (pub/sub + dump), но не протестирован в бою. Проверить что create/cancel реплицируются между нодами
 - [ ] Processing watchdog — kill stuck Claude CLI if no activity for N minutes (current stall detection only covers stream chunks, not tool gaps)
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling
