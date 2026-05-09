@@ -52,6 +52,7 @@ class ClaudeSession:
         self._last_ctx_usage: Optional[dict] = None
         self._expected_results = 0
         self._is_processing = False
+        self._session_resumed = bool(self.session_id)
 
     def _load_session(self) -> Optional[str]:
         redis_sid = self._load_session_from_redis()
@@ -161,8 +162,9 @@ class ClaudeSession:
             await self._client.connect()
         except Exception as e:
             if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
-                logger.warning("Session %s failed (%s), starting fresh", self.session_id[:8], type(e).__name__)
+                logger.warning("Session %s expired, starting fresh (NOT overwriting Redis)", self.session_id[:8], type(e).__name__)
                 self.session_id = None
+                self._session_resumed = False
                 self._save_session()
                 options = self._make_options()
                 self._client = ClaudeSDKClient(options=options)
@@ -199,7 +201,7 @@ class ClaudeSession:
                         self.session_id_changed_at = int(time.time())
                         self._save_session()
                         self._save_session_to_redis()
-                        logger.info(f"Session ID saved: {self.session_id[:8]}")
+                        logger.info(f"Session ID saved: {self.session_id[:8]}...")
                     if hasattr(msg, 'total_cost_usd') and msg.total_cost_usd is not None:
                         self.last_cost_usd = msg.total_cost_usd
                         self.total_cost_usd += msg.total_cost_usd
