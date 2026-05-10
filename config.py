@@ -120,7 +120,7 @@ STRINGS = {
         ),
         "status": (
             "📊 *Статус Kesha:*\n\n"
-            "🖥 Хост: `{node}`\n"
+            "🖥 Хост: `{node}` {failover}\n"
             "🤖 Модель: `{model}`\n"
             "📌 Сессия: `{session}`\n"
             "📂 CWD: `{cwd}`\n"
@@ -175,7 +175,7 @@ STRINGS = {
         ),
         "status": (
             "📊 *Kesha Status:*\n\n"
-            "🖥 Host: `{node}`\n"
+            "🖥 Host: `{node}` {failover}\n"
             "🤖 Model: `{model}`\n"
             "📌 Session: `{session}`\n"
             "📂 CWD: `{cwd}`\n"

@@ -151,8 +151,17 @@ async def h_status(msg: types.Message):
         ctx_str = "n/a"
     uptime = _uptime_fn() if _uptime_fn else "unknown"
     node = _cfg.KESHA_NODE_ID
+    failover_str = ""
+    if _lease:
+        try:
+            active = _lease.is_active
+            alive = await _lease.laptop_is_alive()
+            failover_str = f"({'🟢 active' if active else '💤 standby'} | laptop: {'🟢' if alive else '🔴'})"
+        except Exception:
+            pass
     await _send_safe(msg, t(msg, "status",
         node=node,
+        failover=failover_str,
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
@@ -248,51 +257,6 @@ async def h_debug(msg: types.Message):
         await _send_safe(msg, t(msg, "debug_off"))
 
 
-async def h_failover(msg: types.Message):
-    if not allowed(msg.from_user.id):
-        return
-    try:
-        from failover import HEARTBEAT_KEY
-        from config import KESHA_REDIS_URL, KESHA_NODE_ID
-        node = _lease
-        if not node or not node._redis:
-            return await _send_safe(msg, "⚠️ Failover не активен (solo mode)")
-        alive = await node.laptop_is_alive()
-        active = node.is_active
-        await _send_safe(msg, (
-            f"📡 *Failover статус:*\n"
-            f"🖥 Этот узел: `{KESHA_NODE_ID}` ({'🟢 active' if active else '💤 standby'})\n"
-            f"💻 Ноутбук: {'🟢 online' if alive else '🔴 offline'}"
-        ))
-    except Exception as e:
-        await _send_safe(msg, f"❌ Ошибка: {e}")
-
-
-async def h_priority(msg: types.Message):
-    if not allowed(msg.from_user.id):
-        return
-    try:
-        from config import KESHA_NODE_ID
-        lease = _lease
-        if not lease or not lease._redis:
-            return await _send_safe(msg, "⚠️ Failover не активен")
-
-        from failover import PRIORITY_KEY
-        args = (msg.text or "").split()
-        if len(args) < 2:
-            preferred = await lease._redis.get(PRIORITY_KEY)
-            current = preferred or f"{KESHA_NODE_ID} (default .env)"
-            return await _send_safe(msg, (
-                f"📡 *Приоритет:* `{current}`\n"
-                f"Этот узел: `{KESHA_NODE_ID}` ({lease.priority})\n\n"
-                f"Использование: `/priority laptop` или `/priority vps`"
-            ))
-
-        target = args[1].strip().lower()
-        await lease.set_preferred_node(target)
-        await _send_safe(msg, f"✅ Приоритет переключён на *{target}*\nПереключение произойдёт в течение ~30с")
-    except Exception as e:
-        await _send_safe(msg, f"❌ Ошибка: {e}")
 
 
 async def h_restart(msg: types.Message):
@@ -517,7 +481,6 @@ COMMANDS_RU = [
     BotCommand(command="model", description="Сменить модель"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
-    BotCommand(command="failover", description="Переключить на другой хост"),
     BotCommand(command="restart", description="Перезапустить бота"),
 ]
 
@@ -531,7 +494,6 @@ COMMANDS_EN = [
     BotCommand(command="model", description="Change model"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
-    BotCommand(command="failover", description="Switch to another host"),
     BotCommand(command="restart", description="Restart bot"),
 ]
 
@@ -581,8 +543,6 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_model, Command("model"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
-    dp.message.register(h_failover, Command("failover"))
-    dp.message.register(h_priority, Command("priority"))
     dp.message.register(h_restart, Command("restart"))
     dp.message.register(h_stop, Command("stop"))
     # Media handlers — media_group BEFORE photo
