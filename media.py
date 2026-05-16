@@ -129,7 +129,7 @@ async def transcribe(path: str, unique_id: str = "") -> tuple[str, str | None]:
             with open(path, "rb") as _af:
                 audio_data = _af.read()
             async with _http.post(
-                "https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true",
+                "https://api.deepgram.com/v1/listen?model=nova-3&language=ru&smart_format=true",
                 headers={"Authorization": f"Token {DEEPGRAM}", "Content-Type": "audio/ogg"},
                 data=audio_data,
                 timeout=_aiohttp.ClientTimeout(total=120),
