@@ -59,6 +59,13 @@ async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
             await typer
 
 
+async def _stop_typer(typer: asyncio.Task) -> None:
+    if not typer.done():
+        typer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typer
+
+
 async def _ask_inner(message, prompt, cid, typer):
     retries = 0
 
@@ -122,6 +129,11 @@ async def _ask_inner(message, prompt, cid, typer):
         raw = "".join(parts)
         if not raw:
             return
+        await _stop_typer(typer)
+        if draft_has_text:
+            with contextlib.suppress(Exception):
+                await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=""))
+            draft_has_text = False
         try:
             converted_text, entities = _md_convert(raw)
             ent_dicts = [e.to_dict() for e in entities] if entities else None
@@ -151,12 +163,6 @@ async def _ask_inner(message, prompt, cid, typer):
                     except Exception:
                         pass
                     break
-        if draft_has_text:
-            try:
-                await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=""))
-            except Exception:
-                pass
-        draft_has_text = False
         draft_id = _next_draft_id()
         last_draft_time = 0.0
         last_draft_text = ""
