@@ -88,12 +88,10 @@ async def compact_session(claude, notify=None) -> dict:
     logger.info(f"Compact: got summary {len(summary)} chars, resetting session")
     logger.debug(f"Compact summary:\n{summary}")
 
-    # 2. Reset session → new session_id. Await disconnect so the next send_message
-    #    doesn't race the old client's shutdown (causes 'NoneType has no write' errors).
+    logger.info(f"Compact: pre-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
     await claude.reset_async()
+    logger.info(f"Compact: post-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
 
-    # 3. Start fresh with summary as opening message. We use send_message so SDK
-    #    connects with new session_id and summary becomes the conversation foundation.
     preamble = CONTINUATION_PREAMBLE.format(summary=summary)
     try:
         got_first = False
@@ -103,7 +101,7 @@ async def compact_session(claude, notify=None) -> dict:
             elif not got_first and chunk.get("type") in ("text", "text_delta"):
                 got_first = True
                 await claude.interrupt()
-                logger.info("Compact: interrupted preamble response to save context")
+                logger.info(f"Compact: interrupted preamble, new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
                 break
     except Exception as e:
         logger.error(f"Compact preamble failed: {e}", exc_info=True)

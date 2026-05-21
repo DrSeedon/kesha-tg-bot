@@ -90,8 +90,6 @@ class ClaudeSession:
         self._session_file.write_text(self.session_id or "")
 
     def _save_session_to_redis(self):
-        if not self.session_id:
-            return
         try:
             from config import KESHA_REDIS_URL
             if not KESHA_REDIS_URL:
@@ -99,7 +97,10 @@ class ClaudeSession:
             import redis as sync_redis
             chat_id = self._session_file.stem
             r = sync_redis.from_url(KESHA_REDIS_URL, decode_responses=True, socket_timeout=3)
-            r.set(f"kesha:sessions:{chat_id}", self.session_id)
+            if self.session_id:
+                r.set(f"kesha:sessions:{chat_id}", self.session_id)
+            else:
+                r.delete(f"kesha:sessions:{chat_id}")
             r.close()
         except Exception:
             pass
@@ -315,7 +316,9 @@ class ClaudeSession:
         Use this when immediately calling send_message() on a new session."""
         self.session_id = None
         self._last_ctx_usage = None
+        self._session_resumed = False
         self._save_session()
+        self._save_session_to_redis()
         self._connected = False
         old_client = self._client
         self._client = None
@@ -324,14 +327,16 @@ class ClaudeSession:
                 await old_client.disconnect()
             except Exception as e:
                 logger.debug(f"reset_async disconnect error: {e}")
-        logger.info("Session reset (cleared session_id, disconnect awaited)")
+        logger.info("Session reset (cleared session_id + redis, disconnect awaited)")
 
     def reset(self):
         self.session_id = None
         self._last_ctx_usage = None
+        self._session_resumed = False
         self._save_session()
+        self._save_session_to_redis()
         self.reconnect()
-        logger.info("Session reset (cleared session_id)")
+        logger.info("Session reset (cleared session_id + redis)")
 
     async def _safe_disconnect(self, client=None):
         client = client or self._client
