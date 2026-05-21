@@ -281,7 +281,10 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
             msg_text = text
 
         if rtype == "plain":
-            await bot.send_message(chat_id, f"⏰ {msg_text}")
+            try:
+                await bot.send_message(chat_id, f"⏰ {msg_text}")
+            except Exception:
+                await bot.send_message(chat_id, f"⏰ {msg_text}", parse_mode=None)
             db.mark_fired(rid, delivered=True)
             logger.info(f"Reminder #{rid} plain delivered to {chat_id}")
         elif rtype == "urgent_llm":
