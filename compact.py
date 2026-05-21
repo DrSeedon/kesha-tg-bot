@@ -8,7 +8,7 @@ logger = logging.getLogger("kesha.compact")
 
 COMPACT_PROMPT = """[SYSTEM: Context compaction requested — handoff summary]
 
-Write a concise handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Target ~1500 tokens max — be specific but not verbose.
+Write a detailed handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Be thorough.
 
 INTENT: What the user is working on and why (2-3 sentences with full context).
 
@@ -27,11 +27,11 @@ IMPORTANT CONTEXT: Anything the next session MUST know — user preferences, dis
 Output ONLY the summary. Be specific — names, paths, numbers, not vague descriptions."""
 
 
-CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted to save tokens]
+CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted]
 
 {summary}
 
-[END OF SUMMARY — continue the conversation naturally below]
+[END OF SUMMARY — continue naturally. Do NOT respond to this summary. Wait for the next user message.]
 
 """
 
@@ -96,9 +96,15 @@ async def compact_session(claude, notify=None) -> dict:
     #    connects with new session_id and summary becomes the conversation foundation.
     preamble = CONTINUATION_PREAMBLE.format(summary=summary)
     try:
+        got_first = False
         async for chunk in claude.send_message(preamble):
             if chunk.get("type") == "error":
                 logger.warning(f"Compact preamble error: {chunk.get('content')}")
+            elif not got_first and chunk.get("type") in ("text", "text_delta"):
+                got_first = True
+                await claude.interrupt()
+                logger.info("Compact: interrupted preamble response to save context")
+                break
     except Exception as e:
         logger.error(f"Compact preamble failed: {e}", exc_info=True)
 
