@@ -8,7 +8,7 @@ logger = logging.getLogger("kesha.compact")
 
 COMPACT_PROMPT = """[SYSTEM: Context compaction requested — handoff summary]
 
-Write a detailed handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Be thorough.
+Write a concise handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Target ~1500 tokens max — be specific but not verbose.
 
 INTENT: What the user is working on and why (2-3 sentences with full context).
 
