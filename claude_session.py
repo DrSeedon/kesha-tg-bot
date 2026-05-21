@@ -30,12 +30,14 @@ class ClaudeSession:
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
                  system_prompt: str = "",
                  mcp_servers: dict[str, McpSdkServerConfig] | None = None,
-                 session_file: Optional[Path] = None):
+                 session_file: Optional[Path] = None,
+                 on_connecting=None):
         self.cwd = cwd
         self.model = model
         self.system_prompt = system_prompt
         self.mcp_servers = mcp_servers or {}
         self._session_file = session_file or SESSION_DIR / "default"
+        self._on_connecting = on_connecting
         self.session_id: Optional[str] = self._load_session()
         self.session_id_changed_at: int = 0
         self.last_cost_usd: Optional[float] = None
@@ -152,6 +154,8 @@ class ClaudeSession:
                 await self._client.disconnect()
             except Exception:
                 pass
+        if self._on_connecting is not None:
+            self._on_connecting()
         options = self._make_options()
         self._client = ClaudeSDKClient(options=options)
         if self.session_id:

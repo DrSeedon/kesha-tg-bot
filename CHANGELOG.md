@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.0.2 — 2026-05-21
+
+### Fixed
+- **`send_file` / `send_photo` и другие MCP media tools слали файлы не в тот чат при одновременных активных сессиях** — `ContextVar('_current_chat_id')` устанавливался в `_run_batch` Task, но anyio `start_soon(_read_messages)` внутри SDK создавал Task с контекстом момента подключения, а не момента запроса. При persistent connection tool handlers всегда видели `chat_id` первого подключения.
+  - **Техническая суть**: перенесли `set_current_chat(chat_id)` из `_run_batch` в `ClaudeSession._ensure_connected()` через новый `on_connecting` callback — вызывается прямо перед `client.connect()`, гарантируя что `_read_messages` Task создаётся с правильным `chat_id` в контексте. Работает при первом подключении и всех reconnect'ах.
+  - **Triggered case**: Катя и Максим одновременно активны → Claude у Максима вызывает `send_file` → файл улетел Кате.
+
 ## v2.0.1 — 2026-04-27
 
 ### Fixed

@@ -423,7 +423,6 @@ class ChatState:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
         from datetime import timezone, timedelta
 
-        self._set_current_chat(self.chat_id)
         async with self._lock:
             self.batch_message_ids = [
                 e.message_id for e in batch if e.message_id
@@ -655,6 +654,7 @@ class ChatRegistry:
                 system_prompt=self._system_prompt,
                 mcp_servers=self._mcp_config,
                 session_file=session_file,
+                on_connecting=lambda: self._set_current_chat(chat_id),
             )
             self._chats[chat_id] = ChatState(
                 chat_id=chat_id,
