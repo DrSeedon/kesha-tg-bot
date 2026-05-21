@@ -94,17 +94,12 @@ async def compact_session(claude, notify=None) -> dict:
 
     preamble = CONTINUATION_PREAMBLE.format(summary=summary)
     try:
-        got_first = False
         async for chunk in claude.send_message(preamble):
             if chunk.get("type") == "error":
                 logger.warning(f"Compact preamble error: {chunk.get('content')}")
-            elif not got_first and chunk.get("type") in ("text", "text_delta"):
-                got_first = True
-                await claude.interrupt()
-                logger.info(f"Compact: interrupted preamble, new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
-                break
     except Exception as e:
         logger.error(f"Compact preamble failed: {e}", exc_info=True)
+    logger.info(f"Compact: preamble done, new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
 
     # 4. Check context usage after
     after = await claude.get_context_usage()
