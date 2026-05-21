@@ -6,21 +6,25 @@ from typing import Optional
 logger = logging.getLogger("kesha.compact")
 
 
-COMPACT_PROMPT = """[SYSTEM: Context compaction requested]
+COMPACT_PROMPT = """[SYSTEM: Context compaction requested — handoff summary]
 
-Summarize our conversation so far so it can continue after a context reset. Output in this exact structure (plain text, no markdown headers, ~800 tokens max):
+Write a detailed handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Be thorough.
 
-INTENT: What the user is working on right now (1-2 sentences).
+INTENT: What the user is working on and why (2-3 sentences with full context).
 
-DECISIONS: Key technical/design decisions we made (bullet points).
+DECISIONS: Key decisions made during this session (bullet points, include reasoning).
 
-FILES: Files touched in this session with a brief note what was done (path — purpose).
+FILES: Files touched with what was done (path — description of change).
 
-PENDING: Open questions, TODOs, next steps (bullet points).
+PENDING: Open questions, TODOs, next steps, blockers.
 
-RECENT: Verbatim copy of the last 3-5 user messages and your replies for continuity.
+RECENT: Last 5-10 exchanges — what was asked, what you did, what the result was.
 
-Do NOT answer the user. Do NOT be creative. Output ONLY the summary block. This will be injected into a fresh session as the starting context."""
+BUGS: Bugs found, workarounds applied, things that didn't work.
+
+IMPORTANT CONTEXT: Anything the next session MUST know — user preferences, discovered quirks, traps to avoid, active reminders context.
+
+Output ONLY the summary. Be specific — names, paths, numbers, not vague descriptions."""
 
 
 CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted to save tokens]
@@ -91,17 +95,12 @@ async def compact_session(claude, notify=None) -> dict:
     # 3. Start fresh with summary as opening message. We use send_message so SDK
     #    connects with new session_id and summary becomes the conversation foundation.
     preamble = CONTINUATION_PREAMBLE.format(summary=summary)
-    primer_chunks: list[str] = []
     try:
-        async for chunk in claude.send_message(preamble + "Ack the summary briefly (one short line)."):
-            if chunk.get("type") == "text":
-                primer_chunks.append(chunk["content"])
-            elif chunk.get("type") == "error":
-                # Session will still work, just log — don't fail compact
-                logger.warning(f"Compact primer chunk error: {chunk.get('content')}")
+        async for chunk in claude.send_message(preamble):
+            if chunk.get("type") == "error":
+                logger.warning(f"Compact preamble error: {chunk.get('content')}")
     except Exception as e:
-        logger.error(f"Compact primer failed: {e}", exc_info=True)
-        # Continue anyway — new session exists, summary was set, primer is best-effort
+        logger.error(f"Compact preamble failed: {e}", exc_info=True)
 
     # 4. Check context usage after
     after = await claude.get_context_usage()
