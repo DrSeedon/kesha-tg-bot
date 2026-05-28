@@ -142,6 +142,8 @@ async def _ask_inner(message, prompt, cid, typer):
             chunks = [(p, []) for p in split_msg(raw)]
         from aiogram.exceptions import TelegramRetryAfter
         for chunk_text, chunk_ents in chunks:
+            if not chunk_text:
+                continue
             ent_dicts = [e.to_dict() for e in chunk_ents] if chunk_ents else None
             for attempt in range(3):
                 try:
