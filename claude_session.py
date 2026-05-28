@@ -38,8 +38,8 @@ class ClaudeSession:
         self.mcp_servers = mcp_servers or {}
         self._session_file = session_file or SESSION_DIR / "default"
         self._on_connecting = on_connecting
-        self.session_id: Optional[str] = self._load_session()
         self.session_id_changed_at: int = 0
+        self.session_id: Optional[str] = self._load_session()
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
