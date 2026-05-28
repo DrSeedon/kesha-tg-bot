@@ -326,10 +326,14 @@ async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude,
         logger.error(f"Reminder #{rid} urgent_llm delivery failed: {e}")
 
 
-async def _run_urgent_batch_and_mark(rids: list[int], payload: str, chat_id: int, claude, bot, db: ReminderDB):
+async def _run_urgent_batch_and_mark(rids: list[int], payload: str, chat_id: int, claude, bot, db: ReminderDB,
+                                     rows: list | None = None):
     try:
         await _run_urgent_llm(payload, chat_id, claude, bot)
         db.mark_delivered_batch(rids)
+        if rows:
+            for r in rows:
+                _reschedule_after_fire(db, r)
         logger.info(f"Missed urgent_llm batch delivered ok: {rids}")
     except Exception as e:
         logger.error(f"Missed urgent_llm batch delivery failed: {e}")
@@ -437,9 +441,8 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
                 + "\n".join(payload_lines)
                 + "\nAction: deliver these to the user briefly."
             )
-            rids = [r["id"] for r in urgent_missed]
             for r in urgent_missed:
                 db.mark_fired(r["id"], delivered=False)
-                _reschedule_after_fire(db, r)
-            asyncio.create_task(_run_urgent_batch_and_mark(rids, payload, chat_id, claude, bot, db))
+            rids = [r["id"] for r in urgent_missed]
+            asyncio.create_task(_run_urgent_batch_and_mark(rids, payload, chat_id, claude, bot, db, urgent_missed))
             logger.info(f"Triggered urgent_llm digest for {len(urgent_missed)} missed for {chat_id}")
