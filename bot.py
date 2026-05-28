@@ -230,7 +230,13 @@ async def main():
             logger.warning(f"Missed reminders delivery failed (non-critical): {e}")
         await node.push_reminders_dump()
 
-        asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
+        if node._reminder_task and not node._reminder_task.done():
+            node._reminder_task.cancel()
+            try:
+                await node._reminder_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        node._reminder_task = asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
         try:
             await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online")
@@ -240,6 +246,13 @@ async def main():
         node._polling_task = asyncio.create_task(dp.start_polling(bot))
 
     async def stop_bot():
+        if node._reminder_task and not node._reminder_task.done():
+            node._reminder_task.cancel()
+            try:
+                await node._reminder_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            node._reminder_task = None
         await dp.stop_polling()
         if node._polling_task and not node._polling_task.done():
             try:
