@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.0.3 — 2026-05-28
+
+### Fixed
+- **P0: `reminder_loop` leaked on failover cycles** — `start_bot()` created new loop via `create_task()` but `stop_bot()` never cancelled it. After laptop↔VPS switches, multiple loops ran simultaneously → duplicate fires, SQLite races. Now stores task in `node._reminder_task`, cancels+awaits in `stop_bot()`.
+  - `bot.py` — start_bot/stop_bot lifecycle. Fixes #1 and #4 from review.
+- **P0: expired session not deleted from Redis → reconnect loop** — when SDK returned "No conversation found", local session_id was cleared but Redis kept the stale value. Next `_ensure_connected()` re-read it → infinite retry loop. Extracted `_invalidate_session()` helper that clears both file and Redis.
+  - `claude_session.py:_invalidate_session()`, `_ensure_connected()`, `send_message()` retry path.
+- **P0: missed `urgent_llm` marked delivered before actual delivery** — `deliver_missed_on_startup` used fire-and-forget `create_task(_run_urgent_llm(...))` but immediately set `delivered=True`. Now uses `_run_urgent_batch_and_mark()` which sets delivered only on success.
+  - `reminders.py:deliver_missed_on_startup`, `_run_urgent_batch_and_mark()`.
+- **P0: compact returned `ok=True` even when preamble failed** — preamble errors were only logged, user saw "Контекст сжат" but session had no summary. Now tracks `preamble_ok` flag; returns `ok=False` if preamble exception or no session_id after.
+  - `compact.py:compact_session()`.
+- **P1: compact summary ignored `text_delta` events** — SDK can stream response as deltas only; compact collected only `type=="text"` → empty summary → silent abort. Now collects both `text_delta` and `text` (same pattern as response_stream.py).
+  - `compact.py` summary collection.
+- **P1: Redis session sync had no epoch → stale overwrite** — `_save_session_to_redis` now stores `{sid}:{ts}` format; `_ensure_connected` compares `redis_ts >= session_id_changed_at` before accepting Redis value.
+  - `claude_session.py:_load_session_from_redis()`, `_save_session_to_redis()`, `_ensure_connected()`.
+- **P1: lazy_llm with repeat lost fired instance** — `_reschedule_after_fire()` ran immediately after `mark_fired(delivered=False)`, overwriting the row before `get_lazy_block_for_prompt()` could deliver it. Now skips reschedule for lazy_llm; reschedules only when delivered via `get_lazy_block_for_prompt()`.
+  - `reminders.py:_fire_reminder()`, `get_lazy_block_for_prompt()`, `deliver_missed_on_startup()`.
+- **P2: `_save_session_to_redis` silently swallowed errors** — bare `except: pass` → `logger.warning` with chat_id.
+- **P2: empty chunk guard in `_finalize_text_block`** — `split_entities` could return empty chunks → Telegram error. Added `if not chunk_text: continue`.
+  - `response_stream.py:_finalize_text_block()`.
+- **P2: reminders parse_mode fallback caught all exceptions** — `except Exception` → `except TelegramBadRequest` (only formatting errors trigger fallback).
+  - `reminders.py:_fire_reminder()`.
+- **P2: compact preamble instruction tightened** — "reply with exactly OK" instead of "do NOT respond" to minimize wasted tokens.
+
 ## v2.0.2 — 2026-05-21
 
 ### Fixed
