@@ -31,7 +31,7 @@ CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted]
 
 {summary}
 
-[END OF SUMMARY — continue naturally. Do NOT respond to this summary. Wait for the next user message.]
+[END OF SUMMARY — reply with exactly "OK" and nothing else. Wait for the next user message.]
 
 """
 
@@ -57,14 +57,17 @@ async def compact_session(claude, notify=None) -> dict:
 
     logger.info(f"Compact: requesting summary, before={before_pct:.1f}%")
 
-    # 1. Ask Claude to summarize — collect only text, ignore tools/streaming bits
     summary_parts: list[str] = []
+    has_deltas = False
     try:
         async for chunk in claude.send_message(COMPACT_PROMPT):
-            if chunk.get("type") == "text":
+            ct = chunk.get("type")
+            if ct == "text_delta":
+                has_deltas = True
                 summary_parts.append(chunk["content"])
-            # Ignore text_delta during summary — we only need final text blocks
-            elif chunk.get("type") == "error":
+            elif ct == "text" and not has_deltas:
+                summary_parts.append(chunk["content"])
+            elif ct == "error":
                 raise RuntimeError(f"SDK error during summary: {chunk.get('content')}")
     except Exception as e:
         logger.error(f"Compact: summary request failed: {e}", exc_info=True)
@@ -93,28 +96,42 @@ async def compact_session(claude, notify=None) -> dict:
     logger.info(f"Compact: post-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
 
     preamble = CONTINUATION_PREAMBLE.format(summary=summary)
+    preamble_ok = True
     try:
         async for chunk in claude.send_message(preamble):
             if chunk.get("type") == "error":
                 logger.warning(f"Compact preamble error: {chunk.get('content')}")
+                preamble_ok = False
     except Exception as e:
         logger.error(f"Compact preamble failed: {e}", exc_info=True)
-    logger.info(f"Compact: preamble done, new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
+        preamble_ok = False
 
-    # 4. Check context usage after
+    if not claude.session_id:
+        logger.error("Compact: no session_id after preamble — session lost")
+        preamble_ok = False
+
+    logger.info(f"Compact: preamble done (ok={preamble_ok}), new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
+
     after = await claude.get_context_usage()
     after_pct = after.get("percentage", 0) if after else 0
 
     logger.info(f"Compact: done, {before_pct:.1f}% → {after_pct:.1f}%, summary={len(summary)} chars")
 
-    if notify:
-        try:
-            await notify(f"✅ Контекст сжат: {before_pct:.0f}% → {after_pct:.0f}%")
-        except Exception:
-            pass
+    if preamble_ok:
+        if notify:
+            try:
+                await notify(f"✅ Контекст сжат: {before_pct:.0f}% → {after_pct:.0f}%")
+            except Exception:
+                pass
+    else:
+        if notify:
+            try:
+                await notify(f"⚠️ Контекст сброшен, но саммари могло не загрузиться ({before_pct:.0f}% → {after_pct:.0f}%)")
+            except Exception:
+                pass
 
     return {
-        "ok": True,
+        "ok": preamble_ok,
         "before_pct": before_pct,
         "after_pct": after_pct,
         "summary_chars": len(summary),
