@@ -41,7 +41,7 @@ def _get_session(chat_id: int):
     return _registry.get(chat_id).session
 
 
-from telegramify_markdown import convert as _md_convert
+from telegramify_markdown import convert as _md_convert, split_entities as _split_entities
 
 
 async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
@@ -136,18 +136,16 @@ async def _ask_inner(message, prompt, cid, typer):
             draft_has_text = False
         try:
             converted_text, entities = _md_convert(raw)
-            ent_dicts = [e.to_dict() for e in entities] if entities else None
+            chunks = _split_entities(converted_text, entities, TG_MSG_LIMIT)
         except Exception as e:
             logger.warning(f"telegramify_markdown convert failed: {e}, sending plain")
-            converted_text = raw
-            ent_dicts = None
-        chunks = split_msg(converted_text)
+            chunks = [(p, []) for p in split_msg(raw)]
         from aiogram.exceptions import TelegramRetryAfter
-        for i, p in enumerate(chunks):
-            use_ents = ent_dicts if len(chunks) == 1 else None
+        for chunk_text, chunk_ents in chunks:
+            ent_dicts = [e.to_dict() for e in chunk_ents] if chunk_ents else None
             for attempt in range(3):
                 try:
-                    m = await _answer(p, parse_mode=None, entities=use_ents)
+                    m = await _answer(chunk_text, parse_mode=None, entities=ent_dicts)
                     if m:
                         finalized.append(m.message_id)
                     break
@@ -157,7 +155,7 @@ async def _ask_inner(message, prompt, cid, typer):
                 except Exception as e:
                     logger.error(f"_finalize_text_block error: {e}")
                     try:
-                        m = await _answer(p, parse_mode=None)
+                        m = await _answer(chunk_text, parse_mode=None)
                         if m:
                             finalized.append(m.message_id)
                     except Exception:
