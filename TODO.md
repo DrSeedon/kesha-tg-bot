@@ -1,38 +1,8 @@
 # TODO
 
-## Done
-- [x] Persistent session_id через файл `./storage/sessions/<chat_id>`
-- [x] Video note транскрипция (ffmpeg → Deepgram)
-- [x] Стриминг — нативный SendMessageDraft (Bot API 9.5)
-- [x] Дебаунс + merge при занятом Claude
-- [x] Форварды с мета-данными
-- [x] Логирование с ротацией (daily, 7 дней, Krsk timezone)
-- [x] i18n (RU/EN)
-- [x] Media кеширование (file_unique_id → persistent cache)
-- [x] Album support (aiogram-media-group)
-- [x] MCP tools: send_photo/file/video/audio/voice, set_model, set_debounce, toggle_debug, get_bot_status, restart_bot
-- [x] Reply context в промптах
-- [x] Tool/text flow: tool в отдельном бабле, text после tool в том же бабле
-- [x] ClaudeSDKClient — persistent connection
-- [x] Message injection — вклинивание во время обработки
-- [x] Native interrupt через client.interrupt()
-- [x] Live model change, context usage
-- [x] /stop — мягкий interrupt
-- [x] Reminders — SQLite, 3 типа (plain/urgent_llm/lazy_llm), repeat, lazy TTL promotion
-- [x] Stream stall detection (120s timeout, reconnect)
-- [x] Context compaction (/compact, auto at 95%, MCP tool)
-- [x] Live tool status bubble с таймерами и per-MCP иконками
-- [x] Singleton lock (flock) — защита от двух инстансов
-- [x] can_use_tool auto-approve callback (обход .claude/skills/ bug)
-- [x] **Refactor v2.0** — ChatState state machine, bot.py split (1385→196 строк, 7 модулей)
-- [x] MEDIA_MAX_MB limit (default 100MB, deletes oldest >24h first)
-- [x] Verbose logging — auto-compact skip/trigger reason, phase transitions, inject ok/fail
-- [x] Markdown fix — `telegramify-markdown` entities вместо хрупкого Markdown V1 parse_mode
-
-## Open
-- [ ] **Draft ghost** — при финализации ответа старый unformatted draft висит 2-3 секунды с loading emoji, потом удаляется. Юзер видит дубль (draft + final). Причина: send нового → delete старого с задержкой. Фикс: edit-in-place вместо delete+send, или delete первым
-- [ ] **Reminders sync v2** — reminders_sync.py создан (pub/sub + dump), но не протестирован в бою. Проверить что create/cancel реплицируются между нодами
-- [ ] Processing watchdog — kill stuck Claude CLI if no activity for N minutes (current stall detection only covers stream chunks, not tool gaps)
+- [ ] **Processing watchdog** — убивать зависший Claude CLI если нет активности N минут. Текущий stall detection (120s) ловит только паузы между stream-чанками, не зависание внутри tool-вызова
+- [ ] **urgent_llm delivery guarantee** — доставка urgent_llm best-effort (fire-and-forget через ChatState). Если хендлер упал — напоминалка теряется. Codex отметил как архитектурное ограничение. Фикс требует await завершения ChatState processing, что ломает non-blocking flow
+- [ ] **Compact durable handoff** — при падении между reset и preamble контекст теряется (сейчас: ok=False + юзер уведомлён, может повторить /compact). Идеал: писать summary в файл до reset
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling
 - [ ] Rate limiting per-user

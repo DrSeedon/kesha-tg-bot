@@ -67,11 +67,12 @@ IDLE → COLLECTING → PROCESSING → IDLE
 
 ## PROCESS RULES
 
-- CWD бота = `/mnt/data/Рабочий стол/Cursor/COG-second-brain`
-- Systemd сервис `kesha-bot`, sudoers для restart без пароля
-- После правок: `sudo -n systemctl restart kesha-bot`
+- **Прод = VPS** (single-node, no failover). Деплой: `deploy@72.56.235.40`, код в `/opt/kesha-bot`, CWD бота = `/opt/cog-second-brain`
+- Systemd сервис на VPS: `kesha-bot-vps`. Деплой: `ssh deploy@72.56.235.40 "sudo -u kesha git -C /opt/kesha-bot pull && sudo -n systemctl restart kesha-bot-vps"`
+- Локальный сервис (ноут): `kesha-bot` (disabled, не автостарт — failover убран)
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`
+- VPS в РФ → нужен прокси для Anthropic API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `api.telegram.org` ОБЯЗАТЕЛЬНО в `NO_PROXY`
 
 ## TODO
 
