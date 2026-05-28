@@ -228,6 +228,7 @@ async def main():
             await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
         except Exception as e:
             logger.warning(f"Missed reminders delivery failed (non-critical): {e}")
+        await node.push_reminders_dump()
 
         asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
