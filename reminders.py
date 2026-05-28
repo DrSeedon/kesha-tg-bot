@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from aiogram.exceptions import TelegramBadRequest
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger("kesha.reminders")
@@ -283,7 +284,7 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
         if rtype == "plain":
             try:
                 await bot.send_message(chat_id, f"⏰ {msg_text}")
-            except Exception:
+            except TelegramBadRequest:
                 await bot.send_message(chat_id, f"⏰ {msg_text}", parse_mode=None)
             db.mark_fired(rid, delivered=True)
             logger.info(f"Reminder #{rid} plain delivered to {chat_id}")
@@ -300,7 +301,8 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
             db.mark_fired(rid, delivered=False)
             logger.info(f"Reminder #{rid} lazy_llm fired (waiting for user activity)")
 
-        _reschedule_after_fire(db, r)
+        if rtype != "lazy_llm":
+            _reschedule_after_fire(db, r)
 
     except Exception as e:
         logger.error(f"Failed to fire reminder #{rid}: {e}", exc_info=True)
@@ -322,6 +324,15 @@ async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude,
         logger.info(f"Reminder #{rid} urgent_llm delivered ok")
     except Exception as e:
         logger.error(f"Reminder #{rid} urgent_llm delivery failed: {e}")
+
+
+async def _run_urgent_batch_and_mark(rids: list[int], payload: str, chat_id: int, claude, bot, db: ReminderDB):
+    try:
+        await _run_urgent_llm(payload, chat_id, claude, bot)
+        db.mark_delivered_batch(rids)
+        logger.info(f"Missed urgent_llm batch delivered ok: {rids}")
+    except Exception as e:
+        logger.error(f"Missed urgent_llm batch delivery failed: {e}")
 
 
 async def _run_urgent_llm(payload: str, chat_id: int, claude, bot):
@@ -350,6 +361,9 @@ def get_lazy_block_for_prompt(chat_id: int) -> str:
         fired_local = parse_iso(r["fired_at"]).astimezone(KRSK_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"[REMINDER fired at {fired_local}, id={r['id']}]: {r['text']}")
     db.mark_delivered_batch([r["id"] for r in fired])
+    for r in fired:
+        if r["repeat_interval"] or r["cycle_on_days"]:
+            _reschedule_after_fire(db, r)
     return "\n".join(lines) + "\n\n"
 
 
@@ -410,7 +424,6 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
 
         for r in lazy_missed:
             db.mark_fired(r["id"], delivered=False)
-            _reschedule_after_fire(db, r)
         if lazy_missed:
             logger.info(f"Marked {len(lazy_missed)} missed lazy_llm reminders for {chat_id}")
 
@@ -424,8 +437,9 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
                 + "\n".join(payload_lines)
                 + "\nAction: deliver these to the user briefly."
             )
-            asyncio.create_task(_run_urgent_llm(payload, chat_id, claude, bot))
+            rids = [r["id"] for r in urgent_missed]
             for r in urgent_missed:
-                db.mark_fired(r["id"], delivered=True)
+                db.mark_fired(r["id"], delivered=False)
                 _reschedule_after_fire(db, r)
+            asyncio.create_task(_run_urgent_batch_and_mark(rids, payload, chat_id, claude, bot, db))
             logger.info(f"Triggered urgent_llm digest for {len(urgent_missed)} missed for {chat_id}")
