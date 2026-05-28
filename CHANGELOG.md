@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.1.0 — 2026-05-28
+
+### Removed
+- **Failover & Redis — полностью выпилены** — бот переведён на single-node архитектуру. Один VPS, без распределённого failover'а.
+  - `failover.py` — удалён целиком (FailoverNode, LeaseGateMiddleware, heartbeat, push/pull reminders dump, \_sync\_repo)
+  - `claude_session.py` — удалены `_load_session_from_redis()`, `_save_session_to_redis()`, Redis-refresh в `_ensure_connected()`, поле `session_id_changed_at`
+  - `bot.py` — удалена failover-ветка в `main()` (FailoverNode init, epoch\_guard middleware, start\_bot/stop\_bot callbacks). Solo-путь вынесен из `_solo_startup()` в тело `main()`
+  - `chat_state.py` — удалены `enter_shutdown()`, `exit_shutdown()`, `sync_from_lease()`
+  - `handlers.py` — удалены `_lease`, `set_lease()`, failover-статус в /status
+  - `config.py` — удалены `KESHA_NODE_ID`, `KESHA_REDIS_URL`, строка `🖥 Хост` из status шаблонов
+  - `system_prompt.txt` — удалена строка "Host node: {node\_id}"
+  - `requirements.txt` — удалён `redis[hiredis]>=5.0`
+  - **Triggered case**: failover добавлял 400+ строк сложности (Redis sync, lease, heartbeat, epoch guard) при отсутствии реального второго нода. Бот работает на 1 VPS — distributed failover не нужен.
+
+### Changed
+- **`NOTIFY_CHAT` оставлен в config.py** — используется inbox\_server.py, не связан с failover
+- **`_shutdown` field в ChatState оставлен** — проверяется defensively во многих методах, всегда False в single-node
+
 ## v2.0.3 — 2026-05-28
 
 ### Fixed

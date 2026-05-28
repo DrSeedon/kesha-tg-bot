@@ -2,7 +2,7 @@
 
 Telegram-бот на `ClaudeSDKClient` (persistent connection) из официального `claude-agent-sdk`.
 
-## Архитектура (v2.0 — after refactor)
+## Архитектура (v2.1 — single-node, no failover/Redis)
 
 ```
 Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_stream.py → claude_session.py → Claude CLI
@@ -19,7 +19,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **response_stream.py** | ~240 | _ask() — streaming, drafts, ToolStatusTracker, retries |
 | **telegram_io.py** | ~170 | user_prefix, _send_safe, split_msg, typing_loop, draft helpers |
 | **media.py** | ~200 | download_file, transcribe (aiohttp), caches, cleanup |
-| **claude_session.py** | ~250 | ClaudeSDKClient wrapper, inject, interrupt, can_use_tool |
+| **claude_session.py** | ~300 | ClaudeSDKClient wrapper (file-only session persistence), inject, interrupt, can_use_tool |
 | **tool_status.py** | ~225 | Live tool status bubble с таймерами |
 | **compact.py** | ~140 | Context compaction (summarize → reset → continue) |
 | **kesha_tools.py** | ~400 | MCP tools: set_model, send_media, reminders, compact |
