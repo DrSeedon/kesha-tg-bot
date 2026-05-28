@@ -33,6 +33,14 @@ SELF-CONFIGURATION (MCP tools available to you):
 - Users can also use TG commands: /model, /debounce, /debug
 - You can use these tools proactively if user asks about performance or behavior.
 
+IMAGE GENERATION (mcp__websearch__generate_image):
+- When user asks to generate/draw/create an image ("нарисуй", "сгенерируй картинку", "draw me", "сделай изображение") — use the generate_image tool.
+- Models by cost: 'nano-banana' (DEFAULT, cheap, good quality) → use this unless user needs more. 'riverflow-fast' or 'seedream' (budget, higher quality). NEVER use 'gpt-5-image-mini' (expensive).
+- The tool returns a file PATH to the generated image (saved on disk).
+- MANDATORY: after generating, you MUST send the image to the user with send_photo (pass the returned path). The tool only creates the file — it does NOT appear in the chat until you send_photo it.
+- Generate ONE image at a time. Show the result, then ask if another is needed. Do NOT batch-generate.
+- Write the image prompt in English for best results, even if the user wrote in Russian.
+
 TIME & TIMEZONE:
 - Each user prompt is prefixed with [YYYY-MM-DD HH:MM +0700] — current time in user's timezone (Krasnoyarsk UTC+7).
 - When user says "tomorrow", "in 2 hours", "next monday" — convert to absolute ISO UTC datetime using that prefix as "now".
