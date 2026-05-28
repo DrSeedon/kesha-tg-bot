@@ -28,8 +28,6 @@ GREET_FLAG = Path(__file__).parent / "storage" / "greet_on_restart"
 MEDIA_MAX_AGE_H = 24
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
-KESHA_NODE_ID = os.getenv("KESHA_NODE_ID", "laptop")
-KESHA_REDIS_URL = os.getenv("KESHA_REDIS_URL", "")
 NOTIFY_CHAT = int(os.getenv("NOTIFY_CHAT", "0")) or (list(ALLOWED)[0] if ALLOWED else 0)
 
 ALLOWED_MODELS = {
@@ -120,7 +118,6 @@ STRINGS = {
         ),
         "status": (
             "📊 *Статус Kesha:*\n\n"
-            "🖥 Хост: `{node}` {failover}\n"
             "🤖 Модель: `{model}`\n"
             "📌 Сессия: `{session}`\n"
             "📂 CWD: `{cwd}`\n"
@@ -175,7 +172,6 @@ STRINGS = {
         ),
         "status": (
             "📊 *Kesha Status:*\n\n"
-            "🖥 Host: `{node}` {failover}\n"
             "🤖 Model: `{model}`\n"
             "📌 Session: `{session}`\n"
             "📂 CWD: `{cwd}`\n"
@@ -207,5 +203,5 @@ SYSTEM_PROMPT_FILE = Path(__file__).parent / "system_prompt.txt"
 def load_system_prompt() -> str:
     if SYSTEM_PROMPT_FILE.exists():
         raw = SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
-        return raw.format(cwd=WORK_DIR, media_dir=MEDIA_DIR, node_id=KESHA_NODE_ID)
+        return raw.format(cwd=WORK_DIR, media_dir=MEDIA_DIR)
     return ""

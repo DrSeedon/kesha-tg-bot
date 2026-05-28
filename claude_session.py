@@ -2,7 +2,6 @@
 
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -38,7 +37,6 @@ class ClaudeSession:
         self.mcp_servers = mcp_servers or {}
         self._session_file = session_file or SESSION_DIR / "default"
         self._on_connecting = on_connecting
-        self.session_id_changed_at: int = 0
         self.session_id: Optional[str] = self._load_session()
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
@@ -57,66 +55,21 @@ class ClaudeSession:
         self._session_resumed = bool(self.session_id)
 
     def _load_session(self) -> Optional[str]:
-        redis_sid, redis_ts = self._load_session_from_redis()
-        file_sid = None
         if self._session_file.exists():
-            file_sid = self._session_file.read_text().strip() or None
-        if redis_sid and redis_sid != file_sid:
-            logger.info(f"Session from Redis: {redis_sid[:8]}... ts={redis_ts} (file had {file_sid[:8] + '...' if file_sid else 'none'})")
-            self._session_file.parent.mkdir(parents=True, exist_ok=True)
-            self._session_file.write_text(redis_sid)
-            self.session_id_changed_at = redis_ts
-            return redis_sid
-        if file_sid:
-            logger.info(f"Loaded session from {self._session_file.name}: {file_sid[:8]}...")
-            return file_sid
+            sid = self._session_file.read_text().strip() or None
+            if sid:
+                logger.info(f"Loaded session from {self._session_file.name}: {sid[:8]}...")
+                return sid
         return None
-
-    def _load_session_from_redis(self) -> tuple[str | None, int]:
-        try:
-            from config import KESHA_REDIS_URL
-            if not KESHA_REDIS_URL:
-                return None, 0
-            import redis as sync_redis
-            chat_id = self._session_file.stem
-            r = sync_redis.from_url(KESHA_REDIS_URL, decode_responses=True, socket_timeout=3)
-            raw = r.get(f"kesha:sessions:{chat_id}")
-            r.close()
-            if not raw:
-                return None, 0
-            if ":" in raw:
-                sid, ts_str = raw.rsplit(":", 1)
-                return sid, int(ts_str)
-            return raw, 0
-        except Exception:
-            return None, 0
 
     def _save_session(self):
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_file.write_text(self.session_id or "")
 
-    def _save_session_to_redis(self):
-        try:
-            from config import KESHA_REDIS_URL
-            if not KESHA_REDIS_URL:
-                return
-            import redis as sync_redis
-            chat_id = self._session_file.stem
-            r = sync_redis.from_url(KESHA_REDIS_URL, decode_responses=True, socket_timeout=3)
-            if self.session_id:
-                ts = self.session_id_changed_at or int(time.time())
-                r.set(f"kesha:sessions:{chat_id}", f"{self.session_id}:{ts}")
-            else:
-                r.delete(f"kesha:sessions:{chat_id}")
-            r.close()
-        except Exception as e:
-            logger.warning(f"Redis session save failed for {self._session_file.stem}: {e}")
-
     def _invalidate_session(self):
         self.session_id = None
         self._session_resumed = False
         self._save_session()
-        self._save_session_to_redis()
 
     @staticmethod
     async def _auto_approve_tool(tool_name, tool_input, _context=None):
@@ -151,12 +104,6 @@ class ClaudeSession:
     async def _ensure_connected(self):
         if self._client and self._connected:
             return
-        redis_sid, redis_ts = self._load_session_from_redis()
-        if redis_sid and redis_sid != self.session_id and redis_ts >= self.session_id_changed_at:
-            logger.info(f"Session refreshed from Redis: {redis_sid[:8]}... ts={redis_ts} (was {self.session_id[:8] + '...' if self.session_id else 'none'} ts={self.session_id_changed_at})")
-            self.session_id = redis_sid
-            self.session_id_changed_at = redis_ts
-            self._save_session()
         if self._pending_disconnect is not None:
             try:
                 await self._pending_disconnect.disconnect()
@@ -180,7 +127,7 @@ class ClaudeSession:
             await self._client.connect()
         except Exception as e:
             if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
-                logger.warning("Session %s expired, invalidating (file+Redis)", self.session_id[:8])
+                logger.warning("Session %s expired, invalidating", self.session_id[:8])
                 self._invalidate_session()
                 options = self._make_options()
                 self._client = ClaudeSDKClient(options=options)
@@ -214,9 +161,7 @@ class ClaudeSession:
                 elif isinstance(msg, ResultMessage):
                     if hasattr(msg, 'session_id') and msg.session_id:
                         self.session_id = msg.session_id
-                        self.session_id_changed_at = int(time.time())
                         self._save_session()
-                        self._save_session_to_redis()
                         logger.info(f"Session ID saved: {self.session_id[:8]}...")
                     if hasattr(msg, 'total_cost_usd') and msg.total_cost_usd is not None:
                         self.last_cost_usd = msg.total_cost_usd
@@ -334,13 +279,13 @@ class ClaudeSession:
                 await old_client.disconnect()
             except Exception as e:
                 logger.debug(f"reset_async disconnect error: {e}")
-        logger.info("Session reset (cleared session_id + redis, disconnect awaited)")
+        logger.info("Session reset (cleared session_id, disconnect awaited)")
 
     def reset(self):
         self._invalidate_session()
         self._last_ctx_usage = None
         self.reconnect()
-        logger.info("Session reset (cleared session_id + redis)")
+        logger.info("Session reset (cleared session_id)")
 
     async def _safe_disconnect(self, client=None):
         client = client or self._client

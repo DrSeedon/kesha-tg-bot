@@ -17,10 +17,7 @@ from config import (
     AUTO_COMPACT_PCT,
     DEBOUNCE_SEC,
     GREET_FLAG,
-    KESHA_NODE_ID,
-    KESHA_REDIS_URL,
     MODEL,
-    NOTIFY_CHAT,
     STRINGS,
     TOKEN,
     WORK_DIR,
@@ -87,7 +84,6 @@ def get_session(chat_id: int) -> ClaudeSession:
 
 
 BOT_START_TIME = None
-_lease = None
 
 
 def uptime_str() -> str:
@@ -174,99 +170,28 @@ async def main():
 
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 
-    async def _solo_startup():
-        """Standard startup without failover."""
-        try:
-            await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
-        except Exception as e:
-            logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
-        asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
+    try:
+        await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
+    except Exception as e:
+        logger.error(f"Missed reminders delivery failed: {e}", exc_info=True)
+    asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
 
-        should_greet_llm = GREET_FLAG.exists()
+    should_greet_llm = GREET_FLAG.exists()
+    if should_greet_llm:
+        GREET_FLAG.unlink(missing_ok=True)
+    for uid in ALLOWED:
+        try:
+            await bot.send_message(uid, STRINGS["ru"]["started"])
+        except Exception:
+            pass
         if should_greet_llm:
-            GREET_FLAG.unlink(missing_ok=True)
-        for uid in ALLOWED:
-            try:
-                await bot.send_message(uid, STRINGS["ru"]["started"])
-            except Exception:
-                pass
-            if should_greet_llm:
-                asyncio.create_task(_urgent_llm_handler(uid,
-                    "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
+            asyncio.create_task(_urgent_llm_handler(uid,
+                "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
 
-        try:
-            await dp.start_polling(bot)
-        finally:
-            await registry.shutdown()
-
-    if not KESHA_REDIS_URL:
-        logger.info("No KESHA_REDIS_URL — running in solo mode (no failover)")
-        await _solo_startup()
-        return
-
-    from failover import FailoverNode, LeaseGateMiddleware, _sync_repo
-
-    node = FailoverNode(KESHA_NODE_ID, KESHA_REDIS_URL)
-
-    global _lease
-    _lease = node
-    _handlers.set_lease(node)
-
-    bot.session.middleware(LeaseGateMiddleware(node))
-
-    @dp.update.outer_middleware()
-    async def epoch_guard(handler, event, data):
-        if not node.is_active:
-            return
-        return await handler(event, data)
-
-    async def start_bot():
-        await _sync_repo(WORK_DIR, "COG")
-        await node.pull_reminders_dump()
-
-        try:
-            await _reminders.deliver_missed_on_startup(bot, get_session, ALLOWED)
-        except Exception as e:
-            logger.warning(f"Missed reminders delivery failed (non-critical): {e}")
-        await node.push_reminders_dump()
-
-        if node._reminder_task and not node._reminder_task.done():
-            node._reminder_task.cancel()
-            try:
-                await node._reminder_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        node._reminder_task = asyncio.create_task(_reminders.reminder_loop(bot, get_session, ALLOWED))
-
-        try:
-            await bot.send_message(NOTIFY_CHAT, f"🔄 {KESHA_NODE_ID} online")
-        except Exception as e:
-            logger.warning(f"Greet send failed (non-critical): {e}")
-
-        node._polling_task = asyncio.create_task(dp.start_polling(bot))
-
-    async def stop_bot():
-        if node._reminder_task and not node._reminder_task.done():
-            node._reminder_task.cancel()
-            try:
-                await node._reminder_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            node._reminder_task = None
-        await dp.stop_polling()
-        if node._polling_task and not node._polling_task.done():
-            try:
-                await asyncio.wait_for(node._polling_task, timeout=10)
-            except (asyncio.TimeoutError, Exception):
-                pass
-            node._polling_task = None
-        await node.push_reminders_dump()
-
-    logger.info(f"Failover mode: node={KESHA_NODE_ID}")
-    if node.is_laptop:
-        await node.run_laptop(start_bot, stop_bot)
-    else:
-        await node.run_vps(start_bot, stop_bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await registry.shutdown()
 
 
 if __name__ == "__main__":

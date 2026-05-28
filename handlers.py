@@ -40,12 +40,6 @@ from telegram_io import (
 _bot = None
 _registry = None
 _uptime_fn = None
-_lease = None
-
-
-def set_lease(lease_manager) -> None:
-    global _lease
-    _lease = lease_manager
 _denied_notified: set[int] = set()
 
 
@@ -150,18 +144,7 @@ async def h_status(msg: types.Message):
     else:
         ctx_str = "n/a"
     uptime = _uptime_fn() if _uptime_fn else "unknown"
-    node = _cfg.KESHA_NODE_ID
-    failover_str = ""
-    if _lease:
-        try:
-            active = _lease.is_active
-            alive = await _lease.laptop_is_alive()
-            failover_str = f"({'🟢 active' if active else '💤 standby'} | laptop: {'🟢' if alive else '🔴'})"
-        except Exception:
-            pass
     await _send_safe(msg, t(msg, "status",
-        node=node,
-        failover=failover_str,
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
