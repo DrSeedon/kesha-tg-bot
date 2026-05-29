@@ -46,7 +46,6 @@ class ChatSnapshot:
     generation: int
     session_id: "str | None"
     model: str
-    pending_model: "str | None"
 
 
 class ChatState:
@@ -86,8 +85,6 @@ class ChatState:
         self.last_user_message_id: int | None = None
         self.generation: int = 0
         self.media_generation: int = 0
-        self.pending_model: tuple[str, bool] | None = None
-
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -219,7 +216,6 @@ class ChatState:
             self.deferred.clear()
             self.cancel_requested = False
             self.compact_requested = False
-            self.pending_model = None
             self.batch_message_ids.clear()
             self.pending_transcriptions = 0
             self.generation += 1
@@ -290,17 +286,6 @@ class ChatState:
         if not ok:
             await self._requeue_after_failed_inject([entry])
 
-    async def set_model(self, model_id: str, use_1m: bool) -> None:
-        """Set model immediately or defer if processing."""
-        async with self._lock:
-            if self._shutdown: return
-            if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING, ChatPhase.COMPACTING):
-                self.pending_model = (model_id, use_1m)
-                return
-        self.session.model = model_id
-        self.session.use_1m = use_1m
-        await self.session.set_model_live(model_id)
-
     async def set_debounce(self, seconds: int) -> None:
         """Update debounce value. Already-armed timer runs with old value."""
         async with self._lock:
@@ -323,7 +308,6 @@ class ChatState:
                 generation=self.generation,
                 session_id=self.session.session_id,
                 model=self.session.model,
-                pending_model=self.pending_model[0] if self.pending_model else None,
             )
 
     # --- Internal state machine ---
@@ -474,30 +458,16 @@ class ChatState:
             await self._finish_processing()
 
     async def _finish_processing(self) -> None:
-        """Finalize: apply pending_model, run deferred compact, transition to IDLE, drain deferred."""
+        """Finalize: run deferred compact, transition to IDLE, drain deferred."""
         logger.info(f"Chat {self.chat_id}: _finish_processing start")
         needs_compact = False
-        model_id = None
-        use_1m = False
         async with self._lock:
-            if self.pending_model is not None:
-                model_id, use_1m = self.pending_model
-                self.pending_model = None
             if self.compact_requested:
                 needs_compact = True
                 self.compact_requested = False
 
             self.cancel_requested = False
             self.batch_message_ids.clear()
-
-        if model_id is not None:
-            try:
-                self.session.model = model_id
-                self.session.use_1m = use_1m
-                await self.session.set_model_live(model_id)
-                logger.info(f"Chat {self.chat_id}: deferred model change applied: {model_id}")
-            except Exception as e:
-                logger.error(f"Chat {self.chat_id}: deferred model change failed: {e}")
 
         if needs_compact:
             async with self._lock:

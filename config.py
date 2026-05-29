@@ -30,15 +30,6 @@ MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
 NOTIFY_CHAT = int(os.getenv("NOTIFY_CHAT", "0")) or (list(ALLOWED)[0] if ALLOWED else 0)
 
-ALLOWED_MODELS = {
-    "opus": "claude-opus-4-6",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
-    "claude-opus-4-6": "claude-opus-4-6",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
-}
-
 # --- Logging ---
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -90,8 +81,6 @@ STRINGS = {
         "cleared": "🧹 Сессия сброшена. Новая начнётся с следующего сообщения.",
         "clear_busy": "⏳ Подожди, сейчас идёт обработка. Попробуй через секунду.",
         "ping": "🏓 Session: `{session}`",
-        "model_set": "✅ Модель: `{model}`",
-        "model_usage": "Текущая: `{model}`\nИспользование: `/model claude-sonnet-4-6`",
         "debug_on": "🐛 Debug включён. Логи: `{path}`",
         "debug_off": "🐛 Debug выключен.",
         "debounce_set": "⏱ Debounce: `{sec}s`",
@@ -110,7 +99,6 @@ STRINGS = {
             "/clear — сбросить сессию\n"
             "/ping — проверить сессию\n"
             "/status — подробный статус\n"
-            "/model `<name>` — сменить модель\n"
             "/debounce `<sec>` — задержка склейки сообщений\n"
             "/debug — вкл/выкл debug логирование\n"
             "/restart — перезапустить бота\n\n"
@@ -144,8 +132,6 @@ STRINGS = {
         "cleared": "🧹 Session cleared. New one starts with next message.",
         "clear_busy": "⏳ Processing in progress. Try again in a moment.",
         "ping": "🏓 Session: `{session}`",
-        "model_set": "✅ Model: `{model}`",
-        "model_usage": "Current: `{model}`\nUsage: `/model claude-sonnet-4-6`",
         "debug_on": "🐛 Debug enabled. Logs: `{path}`",
         "debug_off": "🐛 Debug disabled.",
         "debounce_set": "⏱ Debounce: `{sec}s`",
@@ -164,7 +150,6 @@ STRINGS = {
             "/clear — reset session\n"
             "/ping — check session\n"
             "/status — detailed status\n"
-            "/model `<name>` — change model\n"
             "/debounce `<sec>` — message batching delay\n"
             "/debug — toggle debug logs\n"
             "/restart — restart bot\n\n"

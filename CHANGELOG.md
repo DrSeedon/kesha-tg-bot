@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.1.1 — 2026-05-29
+
+### Removed
+- **`set_model` MCP tool + `/model` TG command — полностью удалены** — Кеша переключил себя на Sonnet через set_model, а Sonnet с `[1m]` требует usage credits → бот упал. Модель теперь зафиксирована в `.env` (`CLAUDE_MODEL=claude-opus-4-6`), менять можно только руками.
+  - `kesha_tools.py` — удалён тул `set_model`, словарь `ALLOWED_MODELS`
+  - `handlers.py` — удалён `h_model()`, регистрация `/model`, импорт `ALLOWED_MODELS`
+  - `config.py` — удалён `ALLOWED_MODELS`, строки `model_set`/`model_usage` из STRINGS, `/model` из /help
+  - `chat_state.py` — удалён `set_model()`, `pending_model` поле и deferred model logic в `_finish_processing()`
+  - `claude_session.py` — удалён `set_model_live()`
+  - `system_prompt.txt` — убран `set_model` из SELF-CONFIGURATION, добавлено "Model is fixed, do NOT change"
+  - **Triggered case**: Кеша сам вызвал `set_model sonnet` → Sonnet с `[1m]` → "Usage credits required" → краш бота
+
 ## v2.1.0 — 2026-05-28
 
 ### Removed

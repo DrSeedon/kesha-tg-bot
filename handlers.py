@@ -14,7 +14,6 @@ from chat_state import PendingEntry
 import config as _cfg
 from config import (
     ALLOWED,
-    ALLOWED_MODELS,
     LOG_DIR,
     STRINGS,
     WORK_DIR,
@@ -187,26 +186,6 @@ async def h_ping(msg: types.Message):
         return
     sid = _registry.get(msg.chat.id).session.session_id
     await _send_safe(msg, t(msg, "ping", session=sid or "none"))
-
-
-async def h_model(msg: types.Message):
-    if not allowed(msg.from_user.id):
-        return
-    args = msg.text.split(maxsplit=1)
-    if len(args) > 1:
-        name = args[1].strip().lower()
-        use_200k = "200k" in name
-        name_clean = name.replace("200k", "").replace("1m", "").strip()
-        model_id = ALLOWED_MODELS.get(name_clean)
-        if not model_id:
-            await _send_safe(msg, "Unknown model. Available: opus, sonnet, haiku (+ 200k)")
-            return
-        use_1m = not use_200k
-        await _registry.get(msg.chat.id).set_model(model_id, use_1m)
-        ctx = "200K" if use_200k else "1M"
-        await _send_safe(msg, t(msg, "model_set", model=f"{model_id} ({ctx})"))
-    else:
-        await _send_safe(msg, t(msg, "model_usage", model=_registry.get(msg.chat.id).session.model))
 
 
 async def h_debounce(msg: types.Message):
@@ -461,7 +440,6 @@ COMMANDS_RU = [
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
     BotCommand(command="ping", description="Проверить сессию"),
-    BotCommand(command="model", description="Сменить модель"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
     BotCommand(command="restart", description="Перезапустить бота"),
@@ -474,7 +452,6 @@ COMMANDS_EN = [
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
     BotCommand(command="ping", description="Check session"),
-    BotCommand(command="model", description="Change model"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
     BotCommand(command="restart", description="Restart bot"),
@@ -523,7 +500,6 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_clear, Command("clear"))
     dp.message.register(h_compact, Command("compact"))
     dp.message.register(h_ping, Command("ping"))
-    dp.message.register(h_model, Command("model"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
     dp.message.register(h_restart, Command("restart"))

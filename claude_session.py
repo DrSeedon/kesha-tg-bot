@@ -232,15 +232,6 @@ class ClaudeSession:
             except Exception as e:
                 logger.error(f"Interrupt error: {e}")
 
-    async def set_model_live(self, model: str):
-        self.model = model
-        if self._client and self._connected:
-            try:
-                await self._client.set_model(model)
-                logger.info(f"Model changed live to {model}")
-            except Exception as e:
-                logger.error(f"set_model error: {e}")
-
     async def get_context_usage(self) -> Optional[dict]:
         if self._client and self._connected:
             try:
