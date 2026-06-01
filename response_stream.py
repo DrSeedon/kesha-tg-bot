@@ -85,8 +85,10 @@ async def _ask_inner(message, prompt, cid, typer):
             return await message.answer(text, **kwargs)
         return await _bot.send_message(cid, text, **kwargs)
 
+    typing_stopped = False
+
     async def _draft_update(final: bool = False):
-        nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text
+        nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text, typing_stopped
         text = "".join(parts)[:TG_MSG_LIMIT]
         if not text:
             return
@@ -102,6 +104,9 @@ async def _ask_inner(message, prompt, cid, typer):
         try:
             await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text, parse_mode=parse_mode))
             draft_has_text = True
+            if not typing_stopped:
+                await _stop_typer(typer)
+                typing_stopped = True
             last_draft_text = text
         except Exception as e:
             err_str = str(e)
