@@ -10,6 +10,7 @@ from typing import Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
 from config import (
@@ -37,7 +38,9 @@ import response_stream as _rs
 import handlers as _handlers
 
 # Wire up bot object via set_bot() late binding after bot is created
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+import aiohttp
+_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=120))
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN), session=_bot_session)
 dp = Dispatcher()
 
 set_bot_ref(sys.modules[__name__])
