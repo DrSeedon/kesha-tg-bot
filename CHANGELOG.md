@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.1.3 — 2026-06-02
+
+### Fixed
+- **Restart loop: `ClientTimeout + int` TypeError** — `bot.py` передавал `aiohttp.ClientTimeout(total=120)` в `AiohttpSession(timeout=...)`, а aiogram 3.28 делает `int(session.timeout + polling_timeout)`. Фикс: передавать `timeout=120` (int).
+  - `bot.py` — `AiohttpSession(timeout=120)` вместо `AiohttpSession(timeout=aiohttp.ClientTimeout(total=120))`
+  - **Triggered case**: aiogram обновился до 3.28 / aiohttp до 3.13, внутренняя арифметика сломалась → бот в restart loop, 6x "Кеша запущен!"
+
 ## v2.1.2 — 2026-06-02
 
 ### Removed

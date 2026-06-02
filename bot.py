@@ -38,8 +38,7 @@ import response_stream as _rs
 import handlers as _handlers
 
 # Wire up bot object via set_bot() late binding after bot is created
-import aiohttp
-_bot_session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=120))
+_bot_session = AiohttpSession(timeout=120)
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN), session=_bot_session)
 dp = Dispatcher()
 
