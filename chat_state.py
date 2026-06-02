@@ -407,8 +407,10 @@ class ChatState:
                 )
                 combined = time_prefix + combined
 
+            lazy_ids = []
+            lazy_reschedule = []
             try:
-                lazy_block = self._get_lazy_block(self.chat_id)
+                lazy_block, lazy_ids, lazy_reschedule = self._get_lazy_block(self.chat_id)
                 if lazy_block:
                     combined = lazy_block + combined
                     logger.info(f"Chat {self.chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
@@ -444,6 +446,13 @@ class ChatState:
             reply_msg = last_entry.message  # may be None for reminders
 
             await self._ask_fn(reply_msg, combined, self.chat_id)
+
+            if lazy_ids:
+                try:
+                    from reminders import mark_lazy_delivered
+                    mark_lazy_delivered(lazy_ids, lazy_reschedule)
+                except Exception as e:
+                    logger.error(f"Chat {self.chat_id}: mark_lazy_delivered failed: {e}")
 
             # Auto-compact after response
             await self._maybe_auto_compact()
@@ -618,9 +627,17 @@ class ChatRegistry:
         return self._chats[chat_id]
 
     async def shutdown(self) -> None:
+        tasks = []
         for chat in self._chats.values():
+            chat._shutdown = True
             if chat._debounce_task and not chat._debounce_task.done():
                 chat._debounce_task.cancel()
+                tasks.append(chat._debounce_task)
             if chat._processing_task and not chat._processing_task.done():
                 chat._processing_task.cancel()
+                tasks.append(chat._processing_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for chat in self._chats.values():
+            await chat.session._safe_disconnect()
         self._chats.clear()

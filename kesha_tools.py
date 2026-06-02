@@ -35,12 +35,21 @@ def _resolve_chat() -> int | None:
     return get_current_chat() or (next(iter(_bot_ref.ALLOWED), None) if _bot_ref else None)
 
 
+def _require_chat():
+    cid = get_current_chat()
+    if cid:
+        return cid
+    return {"content": [{"type": "text", "text": "No active chat context — cannot determine target chat"}], "is_error": True}
+
+
 @tool("set_debounce", "Change message debounce delay in seconds (0-30)", {"seconds": int})
 async def set_debounce(args):
     sec = args["seconds"]
     if not 0 <= sec <= 30:
         return {"content": [{"type": "text", "text": "Debounce must be 0-30 seconds"}], "is_error": True}
-    chat_id = _resolve_chat()
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     if chat_id and _bot_ref and hasattr(_bot_ref, 'registry') and _bot_ref.registry:
         await _bot_ref.registry.get(chat_id).set_debounce(sec)
         _bot_ref.registry._debounce_sec = sec
@@ -113,9 +122,9 @@ async def _do_restart():
 async def send_photo(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     p = Path(path)
     if not p.exists():
         return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
@@ -133,9 +142,9 @@ async def send_photo(args):
 async def send_file(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     p = Path(path)
     if not p.exists():
         return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
@@ -163,9 +172,9 @@ async def send_file(args):
      "cycle_on_days": int, "cycle_off_days": int, "text_off": str},
 )
 async def create_reminder(args):
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     try:
         text = args["text"]
         when_iso = args["when_iso"]
@@ -194,9 +203,9 @@ async def create_reminder(args):
 @tool("list_reminders", "List reminders for current chat. include_fired=true to also show delivered/past ones.",
       {"include_fired": bool})
 async def list_reminders(args):
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     include = bool(args.get("include_fired", False))
     rows = _rem.get_db().list_for(chat_id, include_fired=include)
     if not rows:
@@ -212,7 +221,9 @@ async def cancel_reminder(args):
     row = db.get(rid)
     if not row:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
-    chat_id = _resolve_chat()
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     if chat_id and row["chat_id"] != chat_id:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} belongs to another chat"}], "is_error": True}
     db.cancel(rid)
@@ -232,7 +243,9 @@ async def update_reminder(args):
     existing = db.get(rid)
     if not existing:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} not found"}], "is_error": True}
-    chat_id = _resolve_chat()
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     if chat_id and existing["chat_id"] != chat_id:
         return {"content": [{"type": "text", "text": f"Reminder #{rid} belongs to another chat"}], "is_error": True}
     fields = {}
@@ -262,9 +275,9 @@ async def update_reminder(args):
 async def send_video(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     p = Path(path)
     if not p.exists():
         return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
@@ -282,9 +295,9 @@ async def send_video(args):
 async def send_audio(args):
     path = args["path"]
     caption = args.get("caption", "")
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     p = Path(path)
     if not p.exists():
         return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
@@ -301,9 +314,9 @@ async def send_audio(args):
 @tool("send_voice", "Send a voice message to the user in Telegram", {"path": str})
 async def send_voice(args):
     path = args["path"]
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     p = Path(path)
     if not p.exists():
         return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
@@ -322,9 +335,9 @@ async def send_voice(args):
     "reactions": list,
 })
 async def react(args):
-    chat_id = _resolve_chat()
-    if not chat_id:
-        return {"content": [{"type": "text", "text": "No ALLOWED_USERS configured"}], "is_error": True}
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
     try:
         from aiogram.types import ReactionTypeEmoji
 

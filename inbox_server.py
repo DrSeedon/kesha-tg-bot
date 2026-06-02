@@ -3,7 +3,7 @@
 import logging
 from aiohttp import web
 
-from config import NOTIFY_CHAT
+from config import ALLOWED, NOTIFY_CHAT
 
 logger = logging.getLogger("kesha.inbox")
 
@@ -27,6 +27,14 @@ async def handle_inbox(request: web.Request) -> web.Response:
     message = data.get("message", "")
     sender = data.get("sender", "orchestra")
     chat_id = data.get("chat_id", NOTIFY_CHAT)
+
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid chat_id"}, status=400)
+
+    if ALLOWED and chat_id not in ALLOWED:
+        return web.json_response({"error": "chat_id not allowed"}, status=403)
 
     if not message:
         return web.json_response({"error": "empty message"}, status=400)

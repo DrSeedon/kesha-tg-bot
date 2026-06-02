@@ -1,6 +1,6 @@
 """Claude session via ClaudeSDKClient — persistent connection with injection support."""
 
-
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -53,6 +53,7 @@ class ClaudeSession:
         self._expected_results = 0
         self._is_processing = False
         self._session_resumed = bool(self.session_id)
+        self._query_lock = asyncio.Lock()
 
     def _load_session(self) -> Optional[str]:
         if self._session_file.exists():
@@ -143,9 +144,10 @@ class ClaudeSession:
             logger.info("send_message: ensuring connected...")
             await self._ensure_connected()
             logger.info("send_message: connected, sending query...")
-            await self._client.query(text)
+            async with self._query_lock:
+                await self._client.query(text)
+                self._expected_results = 1
             logger.info("send_message: query sent, receiving messages...")
-            self._expected_results = 1
             self._is_processing = True
 
             async for msg in self._client.receive_messages():
@@ -216,8 +218,9 @@ class ClaudeSession:
         if not (self._client and self._connected and self._is_processing):
             return False
         try:
-            await self._client.query(text)
-            self._expected_results += 1
+            async with self._query_lock:
+                await self._client.query(text)
+                self._expected_results += 1
             logger.info(f"Injected (expect {self._expected_results} results): {text[:80]}...")
             return True
         except Exception as e:

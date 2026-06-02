@@ -1,0 +1,9 @@
+The patch fixes several targeted issues, but it introduces remaining delivery races for lazy reminders and failed voice transcription fallbacks. These can cause duplicate reminder delivery or continued loss of failed voice messages under realistic timing conditions.
+
+Full review comments:
+
+- [P2] Claim stale lazy reminders before awaiting the response — /mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/kesha-p0-fix/chat_state.py:448-453
+  For fired `lazy_llm` rows already older than `LAZY_TTL_HOURS`, marking them only after `_ask_fn` returns leaves `delivered=0`/`promoted=0` during the whole model response. Since `reminder_loop()` runs every 30s and promotes rows returned by `fetch_lazy_old`, a long response after the user finally writes can promote and fire the same reminder as `urgent_llm` while it is already injected, causing duplicate delivery. Add a claimed/in-delivery state or otherwise exclude these ids from promotion before the await, while still marking delivered only after success.
+
+- [P2] Finish failed voice transcription before sending the notice — /mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/kesha-p0-fix/handlers.py:273-279
+  When transcription fails while another pending message has armed the debounce timer, `pending_transcriptions` is not decremented until after `_send_safe` completes. If Telegram delays that error notice past `TRANSCRIPTION_WAIT_MAX` (for example flood control), the debounce task times out and increments `media_generation`, so this later `transcription_finished(...)` call discards the fallback entry as stale and the voice file is still lost from the LLM context.

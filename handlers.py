@@ -267,11 +267,16 @@ async def h_voice(msg: types.Message):
         text, err = "", str(e)
 
     if not text:
-        await cs.transcription_finished(None, gen, media_gen)
         err_msg = t(msg, "voice_fail")
         if err:
             err_msg += f" ({err})"
         await _send_safe(msg, err_msg)
+        full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[voice: {path}] (transcription failed: {err or 'unknown'})"
+        fallback_entry = PendingEntry(
+            prompt=full_prompt, message_id=msg.message_id, message=msg,
+            source="user", reply_target=chat_id,
+        )
+        await cs.transcription_finished(fallback_entry, gen, media_gen)
         return
 
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[voice: {path} | {text}]"

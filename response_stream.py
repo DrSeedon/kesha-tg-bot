@@ -208,7 +208,7 @@ async def _ask_inner(message, prompt, cid, typer):
                                     await status.cancel_empty()
                                 status = None
                         except asyncio.CancelledError:
-                            logger.warning(f"Chat {cid}: CancelledError during retry cleanup, continuing")
+                            raise
                         logger.info(f"Chat {cid}: breaking inner loop for retry")
                         break
                     if parts:
@@ -276,14 +276,16 @@ async def _ask_inner(message, prompt, cid, typer):
                                         await status.cancel_empty()
                                     status = None
                             except asyncio.CancelledError:
-                                logger.warning(f"Chat {cid}: CancelledError during error retry cleanup, continuing")
+                                raise
                             break
                     parts.append(f"Error: {err}")
             if not need_retry:
                 logger.info(f"Chat {cid}: inner loop done, no retry needed")
                 break
             logger.info(f"Chat {cid}: need_retry=True, continuing outer loop (retries={retries})")
-        except (Exception, asyncio.CancelledError) as e:
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
             logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {type(e).__name__}: {e}", exc_info=True)
             retries += 1
             if retries <= MAX_RETRIES:

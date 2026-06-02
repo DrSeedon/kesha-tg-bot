@@ -354,21 +354,27 @@ async def _run_urgent_llm(payload: str, chat_id: int, claude, bot):
         pass
 
 
-def get_lazy_block_for_prompt(chat_id: int) -> str:
-    """Get fired-undelivered lazy reminders, mark them delivered, return formatted block for injection."""
+def get_lazy_block_for_prompt(chat_id: int) -> tuple[str, list[int], list]:
+    """Get fired-undelivered lazy reminders. Returns (block, ids, rows_to_reschedule).
+    Caller must call mark_lazy_delivered() after successful _ask_fn."""
     db = get_db()
     fired = db.fetch_lazy_undelivered(chat_id)
     if not fired:
-        return ""
+        return ("", [], [])
     lines = []
     for r in fired:
         fired_local = parse_iso(r["fired_at"]).astimezone(KRSK_TZ).strftime("%Y-%m-%d %H:%M")
         lines.append(f"[REMINDER fired at {fired_local}, id={r['id']}]: {r['text']}")
-    db.mark_delivered_batch([r["id"] for r in fired])
-    for r in fired:
-        if r["repeat_interval"] or r["cycle_on_days"]:
-            _reschedule_after_fire(db, r)
-    return "\n".join(lines) + "\n\n"
+    ids = [r["id"] for r in fired]
+    reschedule_rows = [r for r in fired if r["repeat_interval"] or r["cycle_on_days"]]
+    return ("\n".join(lines) + "\n\n", ids, reschedule_rows)
+
+
+def mark_lazy_delivered(ids: list[int], rows_to_reschedule: list) -> None:
+    db = get_db()
+    db.mark_delivered_batch(ids)
+    for r in rows_to_reschedule:
+        _reschedule_after_fire(db, r)
 
 
 def _reschedule_after_fire(db: ReminderDB, r: sqlite3.Row):
