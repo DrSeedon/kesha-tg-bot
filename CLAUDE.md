@@ -22,7 +22,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **claude_session.py** | ~300 | ClaudeSDKClient wrapper (file-only session persistence), inject, interrupt, can_use_tool |
 | **tool_status.py** | ~225 | Live tool status bubble с таймерами |
 | **compact.py** | ~140 | Context compaction (summarize → reset → continue) |
-| **kesha_tools.py** | ~380 | MCP tools: send_media, reminders, compact, config |
+| **kesha_tools.py** | ~360 | MCP tools: send_media, reminders, config |
 | **reminders.py** | ~360 | SQLite reminders (plain/urgent_llm/lazy_llm) |
 
 ### ChatState — центр per-chat state
@@ -62,7 +62,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - `set_debounce`, `toggle_debug`, `get_bot_status`, `restart_bot`
 - `send_photo`, `send_file`, `send_video`, `send_audio`, `send_voice`
 - `create_reminder`, `list_reminders`, `cancel_reminder`, `update_reminder`
-- `compact_context` — blocked during PROCESSING
+- Context compaction is automatic (95% threshold) and via /compact command — no MCP tool
 - `react` — emoji reactions
 
 ## PROCESS RULES

@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.1.2 — 2026-06-02
+
+### Removed
+- **`compact_context` MCP tool удалён** — Кеша не мог его вызвать (blocked during PROCESSING), только путался. Auto-compact (95%) и /compact команда продолжают работать.
+  - `kesha_tools.py` — удалён тул `compact_context`
+  - `system_prompt.txt` — секция CONTEXT COMPACTION переписана (auto + /compact, без упоминания тула)
+  - **Triggered case**: Кеша периодически пытался вызвать compact_context во время обработки → ошибка → wasted tool call
+
 ## v2.1.1 — 2026-05-29
 
 ### Removed
