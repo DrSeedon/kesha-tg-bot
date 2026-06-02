@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.2.0 — 2026-06-02
+
+### Fixed (3 P0 + 4 P1 from Codex-debate architecture review)
+- **P0: CancelledError swallowed in response_stream.py** — 3 except blocks глотали CancelledError → /stop и shutdown превращались в retry loop. Фикс: `except asyncio.CancelledError: raise` в 3 местах (строки 210, 278, 286).
+- **P0: `_resolve_chat()` fail-open** — MCP тулы с fallback на `next(iter(ALLOWED))` могли отправить файлы/реакции не в тот чат. Фикс: новая `_require_chat()` — fail-closed для chat-bound тулов (11 штук), `_resolve_chat()` оставлен для безопасных (get_bot_status, toggle_debug).
+- **P0: inject() race condition** — concurrent `query()` на одном ClaudeSDKClient = undefined behavior. Фикс: `asyncio.Lock` вокруг query() + expected_results в send_message() и inject().
+- **P1: shutdown() не ждёт задачи** — ChatRegistry.shutdown() не ставил `_shutdown=True`, не ждал cancelled tasks, не закрывал Claude sessions. Фикс: set flag, cancel, gather, disconnect.
+- **P1: lazy reminders delivered too early** — `get_lazy_block_for_prompt()` помечал delivered ДО успеха _ask_fn. Фикс: возвращает `(block, ids, rows_to_reschedule)`, caller помечает после успеха.
+- **P1: inbox_server.py accepts any chat_id** — `/inbox` не проверял ALLOWED. Фикс: cast to int + reject if not in ALLOWED.
+- **P1: voice fallback отсутствовал** — при ошибке Deepgram файл терялся из контекста LLM. Фикс: fallback entry через `transcription_finished()` (как video_note).
+
 ## v2.1.3 — 2026-06-02
 
 ### Fixed
