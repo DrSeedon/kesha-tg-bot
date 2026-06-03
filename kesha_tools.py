@@ -3,6 +3,8 @@
 import asyncio
 import contextvars
 import logging
+import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -370,9 +372,103 @@ async def react(args):
         return {"content": [{"type": "text", "text": f"React failed: {e}"}], "is_error": True}
 
 
+LAPTOP_SSH_CMD = "ssh -p 2222 -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -i /home/kesha/.ssh/tunnel_laptop maxim@localhost"
+
+LAPTOP_ALLOWED_COMMANDS = {
+    "sudo": ["systemctl restart orchestra", "systemctl stop orchestra",
+             "systemctl start orchestra", "systemctl status orchestra"],
+    "systemctl": ["--user restart", "--user stop", "--user start", "--user status"],
+    "journalctl": True,
+    "ps": True,
+    "df": True,
+    "free": True,
+    "uptime": True,
+    "cat": True,
+    "ls": True,
+    "head": True,
+    "tail": True,
+    "grep": True,
+    "find": True,
+    "docker": ["ps", "logs"],
+    "ss": True,
+    "ip": ["addr", "route"],
+    "ping": True,
+    "curl": True,
+    "uname": True,
+    "who": True,
+    "w": True,
+    "top": ["-b -n 1"],
+    "htop": False,
+}
+
+_SHELL_METACHAR_RE = re.compile(r"[;|&$`><\n\r]")
+
+
+def _validate_laptop_cmd(cmd: str):
+    if _SHELL_METACHAR_RE.search(cmd):
+        return "Shell metacharacters not allowed"
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        return f"Invalid command syntax: {e}"
+    if not argv:
+        return "Empty command"
+    binary = argv[0]
+    if binary not in LAPTOP_ALLOWED_COMMANDS:
+        return f"Command '{binary}' not whitelisted"
+    allowed = LAPTOP_ALLOWED_COMMANDS[binary]
+    if allowed is False:
+        return f"Command '{binary}' explicitly blocked"
+    if allowed is True:
+        if binary == "find":
+            _FIND_DANGEROUS = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+            if _FIND_DANGEROUS & set(argv[1:]):
+                return f"Dangerous find flag: {_FIND_DANGEROUS & set(argv[1:])}"
+        return None
+    rest = " ".join(argv[1:])
+    if not any(rest.startswith(sub) for sub in allowed):
+        return f"Subcommand not allowed: {binary} {rest}"
+    return None
+
+
+@tool("run_on_laptop", "Execute a whitelisted command on the user's laptop via reverse SSH tunnel. For diagnostics: logs, status, restarts.", {"command": str, "timeout": int})
+async def run_on_laptop(args):
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
+    cmd = args["command"].strip()
+    timeout = min(args.get("timeout", 30) or 30, 120)
+    err = _validate_laptop_cmd(cmd)
+    if err:
+        return {"content": [{"type": "text", "text": f"Blocked: {err}"}], "is_error": True}
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            f"{LAPTOP_SSH_CMD} {shlex.quote(cmd)}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out = stdout.decode(errors="replace")[-4000:]
+        err_out = stderr.decode(errors="replace")[-1000:]
+        result = f"exit={proc.returncode}\n"
+        if out:
+            result += f"stdout:\n{out}\n"
+        if err_out:
+            result += f"stderr:\n{err_out}"
+        logger.info(f"run_on_laptop: {cmd!r} exit={proc.returncode}")
+        return {"content": [{"type": "text", "text": result.strip()}]}
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return {"content": [{"type": "text", "text": f"Command timed out after {timeout}s"}], "is_error": True}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"SSH error: {e}"}], "is_error": True}
+
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
     tools=[set_debounce, toggle_debug, get_bot_status, restart_bot,
            send_photo, send_file, send_video, send_audio, send_voice, react,
-           create_reminder, list_reminders, cancel_reminder, update_reminder],
+           create_reminder, list_reminders, cancel_reminder, update_reminder,
+           run_on_laptop],
 )

@@ -73,3 +73,11 @@ REACTIONS (react tool):
 - Reactions are an accent, not a reply. Default: don't react at all.
 - Rule of thumb: react on at most 1-2 messages per batch, and only when the moment genuinely calls for it (funny, shocking, strong agreement).
 - NEVER fire react on 5+ messages at once. If you're tempted to, skip reactions entirely.
+
+LAPTOP ACCESS (run_on_laptop):
+- You have SSH access to the user's laptop via reverse tunnel. Use run_on_laptop to execute commands.
+- Common uses: restart Orchestra (`sudo systemctl restart orchestra`), check logs (`journalctl -u orchestra --no-pager -n 50`), system info (`df -h`, `free -h`, `uptime`, `ps aux`).
+- Commands are whitelisted — only safe diagnostic/admin commands work. Shell metacharacters (;|&$`><) are blocked.
+- Timeout default 30s, max 120s. For long output (journalctl), set higher timeout.
+- The laptop may be offline or sleeping — if SSH fails, tell the user the laptop appears unreachable.
+- Do NOT attempt to bypass the whitelist or run destructive commands.
