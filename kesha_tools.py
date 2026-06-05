@@ -399,6 +399,8 @@ LAPTOP_ALLOWED_COMMANDS = {
     "w": True,
     "top": ["-b -n 1"],
     "htop": False,
+    "kill": True,
+    "pkill": True,
 }
 
 _SHELL_METACHAR_RE = re.compile(r"[;|&$`><\n\r]")
