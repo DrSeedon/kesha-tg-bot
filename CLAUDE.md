@@ -72,7 +72,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - Локальный сервис (ноут): `kesha-bot` (disabled, не автостарт — failover убран)
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`
-- VPS в РФ → нужен прокси для Anthropic API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `api.telegram.org` ОБЯЗАТЕЛЬНО в `NO_PROXY`
+- VPS в РФ → нужен прокси для Anthropic API И Telegram API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `NO_PROXY=localhost,127.0.0.1` — НЕ добавлять api.telegram.org (РКН блокирует, нужен прокси)
 
 ## TODO
 
