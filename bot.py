@@ -38,7 +38,8 @@ import response_stream as _rs
 import handlers as _handlers
 
 # Wire up bot object via set_bot() late binding after bot is created
-_bot_session = AiohttpSession(timeout=120)
+_tg_proxy = os.getenv("TG_PROXY") or os.getenv("HTTPS_PROXY") or None
+_bot_session = AiohttpSession(timeout=120, proxy=_tg_proxy)
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN), session=_bot_session)
 dp = Dispatcher()
 
