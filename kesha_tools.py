@@ -376,7 +376,8 @@ LAPTOP_SSH_CMD = "ssh -p 2222 -o ConnectTimeout=5 -o StrictHostKeyChecking=accep
 
 LAPTOP_ALLOWED_COMMANDS = {
     "sudo": ["systemctl restart orchestra", "systemctl stop orchestra",
-             "systemctl start orchestra", "systemctl status orchestra"],
+             "systemctl start orchestra", "systemctl status orchestra",
+             "reboot"],
     "systemctl": ["--user restart", "--user stop", "--user start", "--user status"],
     "journalctl": True,
     "ps": True,
