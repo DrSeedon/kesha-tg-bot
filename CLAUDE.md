@@ -74,6 +74,44 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - MCP тулы в Кеше: `mcp__kesha__*`
 - VPS в РФ → нужен прокси для Anthropic API И Telegram API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `NO_PROXY=localhost,127.0.0.1` — НЕ добавлять api.telegram.org (РКН блокирует, нужен прокси)
 
+## VPS TROUBLESHOOTING (шпаргалка)
+
+**Ребут бота:**
+```bash
+ssh deploy@72.56.235.40 "sudo -n systemctl restart kesha-bot-vps"
+```
+
+**Логи:**
+```bash
+ssh deploy@72.56.235.40 "sudo -n journalctl -u kesha-bot-vps --no-pager -n 50"
+```
+
+**Деплой (git pull + restart):**
+```bash
+ssh deploy@72.56.235.40 "sudo -u kesha git -C /opt/kesha-bot pull && sudo -n systemctl restart kesha-bot-vps"
+```
+
+**401 / "Failed to authenticate" → токен протух:**
+```bash
+ssh deploy@72.56.235.40
+sudo -u kesha -i
+HTTPS_PROXY=http://127.0.0.1:10809 claude auth login
+# → открыть ссылку в браузере → авторизоваться → вставить код
+exit
+sudo -n systemctl restart kesha-bot-vps
+```
+
+**Claude CLI на VPS (ручной запуск):**
+```bash
+sudo -u kesha -i
+HTTPS_PROXY=http://127.0.0.1:10809 claude
+```
+
+**Статус сервиса:**
+```bash
+ssh deploy@72.56.235.40 "sudo -n systemctl status kesha-bot-vps --no-pager | head -8"
+```
+
 ## TODO
 
 См. [TODO.md](TODO.md)
