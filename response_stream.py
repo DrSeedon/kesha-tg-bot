@@ -300,6 +300,12 @@ async def _ask_inner(message, prompt, cid, typer):
 
     text = "".join(parts)
     logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}, draft_hanging={draft_has_text}")
+    if text:
+        try:
+            from message_log import get_db as _get_msg_db
+            _get_msg_db().log_assistant(cid, text)
+        except Exception:
+            pass
     if _config.DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 

@@ -125,6 +125,11 @@ class ChatState:
         ok = await self.session.inject(inject_prompt)
         if ok:
             logger.info(f"Chat {self.chat_id}: inject ok ({len(inject_prompt)} chars)")
+            try:
+                from message_log import get_db as _get_msg_db
+                _get_msg_db().log_user(self.chat_id, inject_prompt, entry.message_id)
+            except Exception:
+                pass
         else:
             logger.warning(f"Chat {self.chat_id}: inject failed, requeuing")
             await self._requeue_after_failed_inject([entry])
@@ -444,6 +449,12 @@ class ChatState:
             # Determine reply target — last user message (or bot.send_message for reminders)
             last_entry = batch[-1]
             reply_msg = last_entry.message  # may be None for reminders
+
+            try:
+                from message_log import get_db as _get_msg_db
+                _get_msg_db().log_user(self.chat_id, combined, batch[-1].message_id if batch else 0)
+            except Exception as e:
+                logger.error(f"Chat {self.chat_id}: message_log user failed: {e}")
 
             await self._ask_fn(reply_msg, combined, self.chat_id)
 
