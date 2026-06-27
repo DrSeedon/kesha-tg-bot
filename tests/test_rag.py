@@ -132,3 +132,53 @@ def test_rrf_merge():
     assert set(merged) == {1, 2, 3}
     # id 1 (rank0 vec + rank1 fts) and id 3 (rank2 vec + rank0 fts) outrank id 2 (rank1 vec only)
     assert merged.index(2) == len(merged) - 1
+
+
+def test_chunk_short_vs_long():
+    assert rag._chunk("привет как дела") == ["привет как дела"]
+    long = "слово " * 400  # ~2400 символов > CHUNK_CHAR_LIMIT
+    chunks = rag._chunk(long)
+    assert len(chunks) > 1
+    assert all(len(c) <= rag.CHUNK_SIZE + rag.CHUNK_OVERLAP + 50 for c in chunks)
+
+
+def test_dedup_preserves_best_rank():
+    assert rag._dedup([5, 3, 5, 7, 3, 1]) == [5, 3, 7, 1]
+
+
+def test_chunk_caps_at_stride():
+    """Экстремально длинный текст не должен дать idx >= CHUNK_STRIDE (chunk_id collision)."""
+    huge = "слово " * 500_000  # ~3M символов
+    chunks = rag._chunk(huge)
+    assert len(chunks) <= rag.CHUNK_STRIDE - 1
+
+
+def test_chunk_splits_oversized_token():
+    """Один токен длиннее CHUNK_SIZE (URL/blob) режется, не обходит лимит."""
+    blob = "x" * (rag.CHUNK_SIZE * 3)
+    chunks = rag._chunk(blob)
+    assert len(chunks) > 1
+    assert all(len(c) <= rag.CHUNK_SIZE + rag.CHUNK_OVERLAP + 50 for c in chunks)
+
+
+def test_expand_query_prefix():
+    assert rag.RagMemory._expand_query("ссора Катей") == '"ссора"* OR "Катей"*'
+    assert rag.RagMemory._expand_query("я и") is None  # все слова <3 символов
+    assert rag.RagMemory._expand_query("") is None
+
+
+def test_long_message_chunks_one_indexed(tmp_path):
+    """Длинное сообщение → несколько vec-строк, но одна запись в indexed (idempotency по parent)."""
+    class StubRag(rag.RagMemory):
+        def _embed(self, texts, is_query):
+            return [[0.0] * rag.DIM for _ in texts]
+
+    msg = tmp_path / "messages.db"
+    _make_messages_db(msg, [(100, "user", "слово " * 400)])
+    m = StubRag(path=tmp_path / "vec.db", msg_db=msg)
+    n = m.backfill()
+    assert n == 1
+    assert m.conn.execute("SELECT count(*) FROM vec_messages").fetchone()[0] > 1
+    assert m.conn.execute("SELECT count(*) FROM indexed").fetchone()[0] == 1
+    # повторный backfill идемпотентен
+    assert m.backfill() == 0

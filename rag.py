@@ -1,4 +1,4 @@
-"""RAG semantic memory — FastEmbed (multilingual MiniLM) + sqlite-vec hybrid search.
+"""RAG semantic memory — FastEmbed (multilingual-e5-large int8) + sqlite-vec hybrid search.
 
 ВСЕ методы RagMemory вызываются ТОЛЬКО из единого rag_executor (ThreadPoolExecutor
 max_workers=1). Коннект sqlite и embedder привязаны к этому потоку — не дёргать из
@@ -6,6 +6,7 @@ max_workers=1). Коннект sqlite и embedder привязаны к этом
 """
 
 import logging
+import re
 import struct
 from pathlib import Path
 
@@ -15,19 +16,71 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# planned mE5-small отсутствует в FastEmbed по имени (ONNX не по ожидаемому пути в HF);
-# MiniLM multilingual — нативно в FastEmbed, 384 dims, ~220MB, без torch. См. plan.md Phase 3.
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-DIM = 384
+# e5-large int8 ONNX (561MB, dim 1024) — лучшее качество русского на абстрактных запросах.
+# MiniLM (v1) проваливал абстрактное (AI/настройки 1.5/5). add_custom_model в _embed (нет нативно в FastEmbed).
+MODEL_NAME = "keisuke-miyako/multilingual-e5-large-onnx-int8"
+MODEL_FILE = "model_quantized.onnx"
+DIM = 1024
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
-# индекс — производная (backfill восстановит), дроп безопасен. Также страхует от alpha-формата sqlite-vec.
-SCHEMA_VERSION = 1
+# v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
+SCHEMA_VERSION = 2
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
+
+# Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
+# В символах (~4 символа/токен рус.), без tiktoken. message_id*CHUNK_STRIDE+idx = chunk_id.
+CHUNK_CHAR_LIMIT = 1200   # ~300 токенов — выше этого режем
+CHUNK_SIZE = 800          # ~200 токенов на кусок
+CHUNK_OVERLAP = 200       # ~50 токенов перекрытие
+CHUNK_STRIDE = 1000       # макс чанков на сообщение (chunk_id = parent*STRIDE + idx)
 
 
 def _pack(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _split_oversized(words: list[str]) -> list[str]:
+    """Слово длиннее CHUNK_SIZE (URL/base64/blob) → режем char-окном, иначе обходит лимит."""
+    out = []
+    for w in words:
+        if len(w) > CHUNK_SIZE:
+            out.extend(w[i:i + CHUNK_SIZE] for i in range(0, len(w), CHUNK_SIZE))
+        else:
+            out.append(w)
+    return out
+
+
+def _chunk(content: str) -> list[str]:
+    """Длинный content → куски ~CHUNK_SIZE символов с overlap. Короткий → [content].
+    Жёсткий cap CHUNK_STRIDE-1 чанков (chunk_id = parent*STRIDE+idx не должен пересечь следующий parent)."""
+    if len(content) <= CHUNK_CHAR_LIMIT:
+        return [content]
+    words = _split_oversized(content.split())
+    chunks, cur, cur_len = [], [], 0
+    for w in words:
+        cur.append(w)
+        cur_len += len(w) + 1
+        if cur_len >= CHUNK_SIZE:
+            chunks.append(" ".join(cur))
+            # overlap: оставить хвост слов на ~CHUNK_OVERLAP символов.
+            # слово длиннее остатка бюджета НЕ берём (иначе chunk раздувается > CHUNK_SIZE).
+            keep, klen = [], 0
+            for tw in reversed(cur):
+                if klen + len(tw) + 1 > CHUNK_OVERLAP:
+                    break
+                keep.insert(0, tw)
+                klen += len(tw) + 1
+            cur, cur_len = keep, klen
+    if cur and (not chunks or " ".join(cur) != chunks[-1]):
+        chunks.append(" ".join(cur))
+    # cap: при экстремально длинном тексте не дать idx достичь CHUNK_STRIDE (иначе chunk_id collision)
+    return chunks[:CHUNK_STRIDE - 1]
+
+
+def _dedup(ids: list[int]) -> list[int]:
+    """Уникальные с сохранением порядка (лучшего ранга). Чанки одного сообщения → один parent."""
+    seen: set = set()
+    return [x for x in ids if not (x in seen or seen.add(x))]
 
 
 class RagMemory:
@@ -61,7 +114,8 @@ class RagMemory:
                 logger.info(f"RAG schema v{ver}→v{SCHEMA_VERSION}: dropped index, will rebuild via backfill")
         self.conn.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages USING vec0(
-                message_id INTEGER PRIMARY KEY,
+                chunk_id INTEGER PRIMARY KEY,
+                parent_message_id INTEGER,
                 chat_id INTEGER PARTITION KEY,
                 role TEXT,
                 embedding FLOAT[{DIM}]
@@ -69,7 +123,7 @@ class RagMemory:
         """)
         self.conn.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
-                content, chat_id UNINDEXED, role UNINDEXED, message_id UNINDEXED
+                content, chat_id UNINDEXED, role UNINDEXED, parent_message_id UNINDEXED
             )
         """)
         self.conn.execute("CREATE TABLE IF NOT EXISTS indexed (message_id INTEGER PRIMARY KEY)")
@@ -77,7 +131,13 @@ class RagMemory:
     def _embed(self, texts: list[str], is_query: bool) -> list[list[float]]:
         if self._embedder is None:
             from fastembed import TextEmbedding
+            from fastembed.common.model_description import PoolingType, ModelSource
 
+            if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+                TextEmbedding.add_custom_model(
+                    model=MODEL_NAME, pooling=PoolingType.MEAN, normalization=True,
+                    sources=ModelSource(hf=MODEL_NAME), dim=DIM, model_file=MODEL_FILE,
+                )
             self._embedder = TextEmbedding(model_name=MODEL_NAME)
             logger.info(f"RAG embedder loaded: {MODEL_NAME}")
         prefix = "query: " if is_query else "passage: "
@@ -94,17 +154,20 @@ class RagMemory:
             return
         if self._is_indexed(message_id):
             return
-        vec = self._embed([content], is_query=False)[0]
+        chunks = _chunk(content)
+        vecs = self._embed(chunks, is_query=False)
         self.conn.execute("BEGIN")
         try:
-            self.conn.execute(
-                "INSERT INTO vec_messages(message_id, chat_id, role, embedding) VALUES(?,?,?,?)",
-                (message_id, chat_id, role, _pack(vec)),
-            )
-            self.conn.execute(
-                "INSERT INTO fts_messages(content, chat_id, role, message_id) VALUES(?,?,?,?)",
-                (content, chat_id, role, message_id),
-            )
+            for idx, (chunk, vec) in enumerate(zip(chunks, vecs)):
+                self.conn.execute(
+                    "INSERT INTO vec_messages(chunk_id, parent_message_id, chat_id, role, embedding) "
+                    "VALUES(?,?,?,?,?)",
+                    (message_id * CHUNK_STRIDE + idx, message_id, chat_id, role, _pack(vec)),
+                )
+                self.conn.execute(
+                    "INSERT INTO fts_messages(content, chat_id, role, parent_message_id) VALUES(?,?,?,?)",
+                    (chunk, chat_id, role, message_id),
+                )
             self.conn.execute("INSERT INTO indexed(message_id) VALUES(?)", (message_id,))
             self.conn.execute("COMMIT")
         except Exception:
@@ -112,33 +175,45 @@ class RagMemory:
             raise
 
     def _vec_search(self, chat_id: int, query_vec: list[float], pool: int, role: str | None) -> list[int]:
-        sql = "SELECT message_id FROM vec_messages WHERE chat_id=? AND embedding MATCH ? "
+        # pool*3 headroom: чанки одного сообщения схлопнутся в один parent при дедупе.
+        # на 2 юзера/limit=5 (pool=20→60 кандидатов) хватает уникальных parent с запасом.
+        sql = "SELECT parent_message_id FROM vec_messages WHERE chat_id=? AND embedding MATCH ? "
         params: list = [chat_id, _pack(query_vec)]
         if role:
             sql += "AND role=? "
             params.append(role)
         sql += "ORDER BY distance LIMIT ?"
-        params.append(pool)
-        return [r["message_id"] for r in self.conn.execute(sql, params).fetchall()]
+        params.append(pool * 3)
+        return _dedup([r["parent_message_id"] for r in self.conn.execute(sql, params).fetchall()])[:pool]
+
+    @staticmethod
+    def _expand_query(query: str) -> str | None:
+        """prefix-expansion для русской морфологии: 'ссора Катей' → '\"ссора\"* OR \"Катей\"*'.
+        Ловит суффиксальные словоформы (расст*→расстаться/расставание). Слова <3 символов отбрасываем."""
+        words = [w for w in re.findall(r"\w+", query) if len(w) >= 3]
+        if not words:
+            return None
+        return " OR ".join(f'"{w}"*' for w in words)
 
     def _fts_search(self, chat_id: int, query: str, pool: int, role: str | None) -> list[int]:
         role_sql = " AND role=?" if role else ""
-        sql = (f"SELECT message_id FROM fts_messages WHERE fts_messages MATCH ? AND chat_id=?{role_sql} "
+        sql = (f"SELECT parent_message_id FROM fts_messages WHERE fts_messages MATCH ? AND chat_id=?{role_sql} "
                f"ORDER BY rank LIMIT ?")
 
         def _params(q):
             p: list = [q, chat_id]
             if role:
                 p.append(role)
-            p.append(pool)
+            p.append(pool * 3)
             return p
+        match = self._expand_query(query) or ('"' + query.replace('"', '""') + '"')
         try:
-            rows = self.conn.execute(sql, _params(query)).fetchall()
+            rows = self.conn.execute(sql, _params(match)).fetchall()
         except Exception:
             # FTS5 MATCH синтаксис чувствителен к спецсимволам — фолбэк на phrase-quote
             safe = '"' + query.replace('"', '""') + '"'
             rows = self.conn.execute(sql, _params(safe)).fetchall()
-        return [r["message_id"] for r in rows]
+        return _dedup([r["parent_message_id"] for r in rows])[:pool]
 
     @staticmethod
     def _rrf(vec_ranked: list[int], fts_ranked: list[int], k: int = RRF_K) -> list[int]:
@@ -200,18 +275,25 @@ class RagMemory:
             """, (batch_size,)).fetchall()
             if not batch:
                 break
-            vecs = self._embed([r["content"] for r in batch], is_query=False)
+            # чанкуем каждое сообщение, embed плоский список всех чанков батча одним вызовом
+            per_msg = [(r, _chunk(r["content"])) for r in batch]
+            flat = [c for _, chunks in per_msg for c in chunks]
+            vecs = self._embed(flat, is_query=False)
             self.conn.execute("BEGIN")
             try:
-                for r, vec in zip(batch, vecs):
-                    self.conn.execute(
-                        "INSERT INTO vec_messages(message_id, chat_id, role, embedding) VALUES(?,?,?,?)",
-                        (r["id"], r["chat_id"], r["role"], _pack(vec)),
-                    )
-                    self.conn.execute(
-                        "INSERT INTO fts_messages(content, chat_id, role, message_id) VALUES(?,?,?,?)",
-                        (r["content"], r["chat_id"], r["role"], r["id"]),
-                    )
+                vi = 0
+                for r, chunks in per_msg:
+                    for idx, chunk in enumerate(chunks):
+                        self.conn.execute(
+                            "INSERT INTO vec_messages(chunk_id, parent_message_id, chat_id, role, embedding) "
+                            "VALUES(?,?,?,?,?)",
+                            (r["id"] * CHUNK_STRIDE + idx, r["id"], r["chat_id"], r["role"], _pack(vecs[vi])),
+                        )
+                        self.conn.execute(
+                            "INSERT INTO fts_messages(content, chat_id, role, parent_message_id) VALUES(?,?,?,?)",
+                            (chunk, r["chat_id"], r["role"], r["id"]),
+                        )
+                        vi += 1
                     self.conn.execute("INSERT INTO indexed(message_id) VALUES(?)", (r["id"],))
                 self.conn.execute("COMMIT")
                 count += len(batch)

@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.3.1 — 2026-06-27
+
+### Changed (RAG качество 3/5 → реальные кейсы найдены — #rag-memory-v2)
+- 🎯 **Модель MiniLM → multilingual-e5-large int8** (`keisuke-miyako/multilingual-e5-large-onnx-int8`, 561MB, dim 384→1024). MiniLM проваливал абстрактные русские запросы (AI/настройки 1.5/5). Измерено на реальных кейсах юзера: "ссора с девушкой"→"Катя заебала..." E5 0.80 vs MiniLM 0.43; "настройки AI"→"подкрутил промпт" E5 0.81 vs MiniLM 0.28. Оба провальных кейса теперь RANK-1.
+- ✂️ **Chunking длинных сообщений** (`_chunk`, `rag.py`) — content >1200 символов → куски ~800 с overlap 200 (голосовые на 500 слов больше не размывают семантику в 1 вектор). `chunk_id = parent_message_id*1000+idx`, новая колонка `parent_message_id`, дедуп по parent в поиске. Cap `[:999]` + `_split_oversized` (токены >CHUNK_SIZE) — защита от PK-collision и обхода лимита.
+- 🔤 **FTS5 prefix-expansion** (`_expand_query`) — `"ссора Катей"` → `'"ссора"* OR "Катей"*'`. FTS5 без стемминга русского ("Катей"≠"Катя" давало 0 хитов = мёртвая лексическая половина гибрида). Prefix ловит суффиксальные словоформы.
+- **Техническая суть**: `SCHEMA_VERSION 1→2` (dim+схема несовместимы → дроп+ребилд индекса из messages.db). `add_custom_model` в `_embed` (e5-large нет нативно в FastEmbed), `fastembed>=0.8.0`.
+
+### Reasoning
+- Корень 3/5: MiniLM-L12 (distilled, 384) не различал абстрактные русские запросы (score релевантного ≈ мусору). E5-large — топ non-instruct ruMTEB. Анизотропия E5 (cosine 0.75-0.85) не мешает — RRF юзает ранги, не raw score.
+- Codex 2 раунда: поймал PK-collision при 1000+ чанках (backfill loop) + fastembed floor — пофикшено, APPROVED.
+
+### Known tradeoff
+- e5-large latency ~15мс (vs MiniLM 3мс) — на 2 юзера несущественно. На слабом VPS-CPU без AVX-VNNI проверить; фолбэк — e5-base int8 (280MB, dim768).
+- Ребилд индекса при первом старте v2 (dim384→1024 несовместимы) — backfill переэмбедит всю историю на E5.
+
 ## v2.3.0 — 2026-06-27
 
 ### Added (RAG долговременная память — #rag-memory)
