@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.3.0 — 2026-06-27
+
+### Added (RAG долговременная память — #rag-memory)
+- 🧠 **Семантический поиск по всей истории диалогов** — переживает compact/сброс контекста. Новый `rag.py`: `RagMemory` (FastEmbed `paraphrase-multilingual-MiniLM-L12-v2` 384-dim + sqlite-vec 0.1.9 + FTS5) → гибридный поиск (вектор KNN + BM25, слияние через RRF k=60). Отдельная `storage/vec.db`, не трогает `messages.db`.
+- 🔍 **MCP tool `search_memory`** (`kesha_tools.py`) — Кеша сам зовёт когда юзер ссылается на прошлое или после compact. Фолбэк на LIKE-поиск при сломанном embedder.
+- ⚙️ **Инкрементальная индексация** — `message_log.py` `log_user/log_assistant` возвращают id + `on_message` callback; `bot.py` фоновый воркер (single-thread `ThreadPoolExecutor`) индексирует не блокируя ответы. Backfill истории при старте.
+- **Техническая суть**: `rag.run(loop, method, *args)` гоняет `get_rag().<method>` ВНУТРИ executor-потока (SQLite thread affinity — иначе `check_same_thread` crash). Schema-version migration через `PRAGMA user_version`: при изменении схемы/alpha-формата sqlite-vec дроп+ребилд индекса из messages.db.
+
+### Reasoning
+- **single-thread executor** вместо шаринга коннекта: SQLite не thread-safe, один владелец = нет race. Codex (3 раунда review) поймал 3 blocking на thread affinity + 1 на FTS5-миграции — все пофикшены.
+- **Модель MiniLM, не запланированный mE5-small**: mE5-small нет в FastEmbed по имени (ONNX не по ожидаемому пути в HF). MiniLM — нативно, те же 384 dims, без torch, русский ок.
+
+### Known tradeoff
+- Первый старт на VPS качает модель (~220MB) с HuggingFace — нужен рабочий прокси. Модельные тесты (8 шт) прогоняются на VPS после деплоя (HF недоступен из dev-среды).
+
 ## v2.2.0 — 2026-06-02
 
 ### Fixed (3 P0 + 4 P1 from Codex-debate architecture review)

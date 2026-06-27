@@ -4,3 +4,5 @@ claude-agent-sdk>=0.1.50
 python-dotenv>=1.0
 python-dateutil>=2.9
 telegramify-markdown>=1.1.2,<2
+sqlite-vec>=0.1.6
+fastembed>=0.4

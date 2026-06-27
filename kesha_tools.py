@@ -273,6 +273,39 @@ async def update_reminder(args):
         return {"content": [{"type": "text", "text": f"Update failed: {e}"}], "is_error": True}
 
 
+@tool("search_memory",
+      "Semantic search across the ENTIRE dialog history (survives context compaction/reset). "
+      "Use when the user references the past ('помнишь', 'что я говорил про…', 'мы обсуждали') or "
+      "when after compaction you need details no longer in context. Do NOT call on every message — "
+      "only when memory is actually needed. query: what to find (natural language). "
+      "role: optional filter 'user'/'assistant'. limit: max results (default 5).",
+      {"query": str, "limit": int, "role": str})
+async def search_memory(args):
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"content": [{"type": "text", "text": "query is required"}], "is_error": True}
+    try:
+        limit = min(max(int(args.get("limit") or 5), 1), 20)
+    except (TypeError, ValueError):
+        limit = 5
+    role = args.get("role") or None
+    try:
+        import rag
+        loop = asyncio.get_running_loop()
+        rows = await rag.run(loop, "search", chat_id, query, limit, role)
+    except Exception as e:
+        logger.error(f"search_memory failed, fallback to LIKE: {e}", exc_info=True)
+        from message_log import get_db
+        rows = [dict(r) for r in get_db().search(chat_id, query, limit)]
+    if not rows:
+        return {"content": [{"type": "text", "text": "No matches in history"}]}
+    lines = [f"[{r['timestamp']} | {r['role']}] {r['content']}" for r in rows]
+    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
 @tool("send_video", "Send a video to the user in Telegram (with player/preview)", {"path": str, "caption": str})
 async def send_video(args):
     path = args["path"]
@@ -473,5 +506,5 @@ kesha_server = create_sdk_mcp_server(
     tools=[set_debounce, toggle_debug, get_bot_status, restart_bot,
            send_photo, send_file, send_video, send_audio, send_voice, react,
            create_reminder, list_reminders, cancel_reminder, update_reminder,
-           run_on_laptop],
+           search_memory, run_on_laptop],
 )

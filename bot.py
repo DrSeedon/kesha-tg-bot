@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ from kesha_tools import kesha_server, set_bot_ref, set_current_chat
 import reminders as _reminders
 import compact as _compact
 import inbox_server as _inbox
+import rag as _rag
 
 import telegram_io as _tio
 import media as _media
@@ -123,6 +125,7 @@ def _acquire_singleton_lock():
 
 
 _singleton_lock_fp = None
+_rag_executor: Optional[ThreadPoolExecutor] = None
 
 
 async def main():
@@ -160,6 +163,32 @@ async def main():
     _media.cleanup_media()
     _media.cleanup_logs()
     asyncio.create_task(_media.daily_cleanup_loop())
+
+    # RAG semantic memory — single dedicated thread owns sqlite-vec conn + embedder
+    global _rag_executor
+    _rag_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag")
+    _rag.set_executor(_rag_executor)
+    loop = asyncio.get_running_loop()
+    rag_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _rag_worker():
+        while True:
+            mid, cid, role, content = await rag_queue.get()
+            try:
+                await _rag.run(loop, "index_message", mid, cid, role, content)
+            except Exception as e:
+                logger.error(f"RAG index failed (id={mid}): {e}")
+            finally:
+                rag_queue.task_done()
+    asyncio.create_task(_rag_worker())
+
+    from message_log import get_db as _msg_db
+
+    def _enqueue_index(mid, cid, role, c):
+        loop.call_soon_threadsafe(rag_queue.put_nowait, (mid, cid, role, c))
+    _msg_db().set_on_message(_enqueue_index)
+    asyncio.ensure_future(_rag.run(loop, "backfill"))
+
     await _handlers.set_commands(bot)
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL}")
     logger.info(f"Allowed: {ALLOWED or 'all'}")
@@ -195,6 +224,8 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await registry.shutdown()
+        if _rag_executor:
+            _rag_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":
