@@ -16,14 +16,15 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# MiniLM: стабильно работает на VPS 2.9GB RAM (~220MB). mpnet и e5-large OOM'или.
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-MODEL_FILE = None
+# e5-small int8 ONNX: quality 0.87-0.92 vs MiniLM 0.56-0.67, same DIM 384.
+MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_HF = "Xenova/multilingual-e5-small"
+MODEL_FILE = "onnx/model_quantized.onnx"
 DIM = 384
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
 # v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
 
 # Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
@@ -129,7 +130,22 @@ class RagMemory:
 
     def _embed(self, texts: list[str], is_query: bool) -> list[list[float]]:
         if self._embedder is None:
+            import onnxruntime as _ort
+            _orig_sess = _ort.InferenceSession.__init__
+            def _patched_init(self_sess, *a, **k):
+                so = k.get("sess_options") or _ort.SessionOptions()
+                so.enable_cpu_mem_arena = False
+                so.enable_mem_pattern = False
+                k["sess_options"] = so
+                _orig_sess(self_sess, *a, **k)
+            _ort.InferenceSession.__init__ = _patched_init
             from fastembed import TextEmbedding
+            from fastembed.common.model_description import PoolingType, ModelSource
+            if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+                TextEmbedding.add_custom_model(
+                    model=MODEL_NAME, pooling=PoolingType.MEAN, normalization=True,
+                    sources=ModelSource(hf=MODEL_HF), dim=DIM, model_file=MODEL_FILE,
+                )
             self._embedder = TextEmbedding(model_name=MODEL_NAME)
             logger.info(f"RAG embedder loaded: {MODEL_NAME}")
         # E5 models need "query: "/"passage: " prefix, mpnet/MiniLM don't
