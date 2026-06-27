@@ -1,15 +1,23 @@
 # Changelog
 
-## v2.3.1 — 2026-06-27
+## v2.3.2 — 2026-06-27
 
-### Changed (RAG качество 3/5 → реальные кейсы найдены — #rag-memory-v2)
-- 🎯 **Модель MiniLM → multilingual-e5-large int8** (`keisuke-miyako/multilingual-e5-large-onnx-int8`, 561MB, dim 384→1024). MiniLM проваливал абстрактные русские запросы (AI/настройки 1.5/5). Измерено на реальных кейсах юзера: "ссора с девушкой"→"Катя заебала..." E5 0.80 vs MiniLM 0.43; "настройки AI"→"подкрутил промпт" E5 0.81 vs MiniLM 0.28. Оба провальных кейса теперь RANK-1.
-- ✂️ **Chunking длинных сообщений** (`_chunk`, `rag.py`) — content >1200 символов → куски ~800 с overlap 200 (голосовые на 500 слов больше не размывают семантику в 1 вектор). `chunk_id = parent_message_id*1000+idx`, новая колонка `parent_message_id`, дедуп по parent в поиске. Cap `[:999]` + `_split_oversized` (токены >CHUNK_SIZE) — защита от PK-collision и обхода лимита.
-- 🔤 **FTS5 prefix-expansion** (`_expand_query`) — `"ссора Катей"` → `'"ссора"* OR "Катей"*'`. FTS5 без стемминга русского ("Катей"≠"Катя" давало 0 хитов = мёртвая лексическая половина гибрида). Prefix ловит суффиксальные словоформы.
-- **Техническая суть**: `SCHEMA_VERSION 1→2` (dim+схема несовместимы → дроп+ребилд индекса из messages.db). `add_custom_model` в `_embed` (e5-large нет нативно в FastEmbed), `fastembed>=0.8.0`.
+### Changed (RAG качество 2.2/5 → 4.3/5 — три итерации)
+- 🎯 **Модель: MiniLM → e5-small int8** (`Xenova/multilingual-e5-small`, ONNX int8, 118MB, dim 384). Качество поиска на русском +95%: cosine 0.87-0.92 vs MiniLM 0.56-0.67. Провальные кейсы (ссора с Катей, настройки AI) теперь RANK-1.
+- 🔧 **OOM fix: `batch_size=16`** — FastEmbed грузил все сообщения одним вызовом → onnxruntime arena раздувалась до 1.5GB. Батчами по 16 = RAM пополам.
+- 🔧 **OOM fix: `enable_cpu_mem_arena=False`** — monkey-patch onnxruntime, отключает pre-allocated memory pool. Ещё -400MB RSS.
+- ✂️ **Chunking длинных сообщений** — content >1200 символов → куски ~800 с overlap 200. Голосовые больше не размывают семантику.
+- 🔤 **FTS5 prefix-expansion** — `"ссора Катей"` → `'"ссора"* OR "Катей"*'`. Русские словоформы без стемминга.
+- **Хронология OOM**: e5-large (561MB) → OOM, mpnet-base (400MB) → OOM, MiniLM откат → стабильно, batch_size+arena-off → e5-small int8 влез. VPS 2.9GB RAM, 1.4GB available, swap 0.
 
 ### Reasoning
-- Корень 3/5: MiniLM-L12 (distilled, 384) не различал абстрактные русские запросы (score релевантного ≈ мусору). E5-large — топ non-instruct ruMTEB. Анизотропия E5 (cosine 0.75-0.85) не мешает — RRF юзает ранги, не raw score.
+- e5-small обучался на MIRACL (retrieval, 16 языков включая русский). MiniLM — на paraphrase (пересказы). Для поиска по истории чата retrieval-модель принципиально лучше.
+- Три OOM-фикса (batch, arena, int8) позволили использовать более качественную модель на том же железе.
+
+## v2.3.1 — 2026-06-27 (SUPERSEDED by v2.3.2)
+
+### Note
+- e5-large OOM'ил VPS (2.9GB RAM), mpnet-base тоже. Chunking и FTS5 prefix сохранены в v2.3.2.
 - Codex 2 раунда: поймал PK-collision при 1000+ чанках (backfill loop) + fastembed floor — пофикшено, APPROVED.
 
 ### Known tradeoff
