@@ -1,4 +1,4 @@
-"""RAG semantic memory — FastEmbed (multilingual-e5-large int8) + sqlite-vec hybrid search.
+"""RAG semantic memory — FastEmbed (multilingual-e5-base) + sqlite-vec hybrid search.
 
 ВСЕ методы RagMemory вызываются ТОЛЬКО из единого rag_executor (ThreadPoolExecutor
 max_workers=1). Коннект sqlite и embedder привязаны к этому потоку — не дёргать из
@@ -16,15 +16,14 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# e5-large int8 ONNX (561MB, dim 1024) — лучшее качество русского на абстрактных запросах.
-# MiniLM (v1) проваливал абстрактное (AI/настройки 1.5/5). add_custom_model в _embed (нет нативно в FastEmbed).
-MODEL_NAME = "keisuke-miyako/multilingual-e5-large-onnx-int8"
-MODEL_FILE = "model_quantized.onnx"
-DIM = 1024
+# e5-base (нативно в FastEmbed, ~280MB, dim 768). e5-large OOM'ил VPS (2.9GB RAM).
+MODEL_NAME = "intfloat/multilingual-e5-base"
+MODEL_FILE = None
+DIM = 768
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
 # v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
 
 # Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
@@ -131,13 +130,6 @@ class RagMemory:
     def _embed(self, texts: list[str], is_query: bool) -> list[list[float]]:
         if self._embedder is None:
             from fastembed import TextEmbedding
-            from fastembed.common.model_description import PoolingType, ModelSource
-
-            if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
-                TextEmbedding.add_custom_model(
-                    model=MODEL_NAME, pooling=PoolingType.MEAN, normalization=True,
-                    sources=ModelSource(hf=MODEL_NAME), dim=DIM, model_file=MODEL_FILE,
-                )
             self._embedder = TextEmbedding(model_name=MODEL_NAME)
             logger.info(f"RAG embedder loaded: {MODEL_NAME}")
         prefix = "query: " if is_query else "passage: "
