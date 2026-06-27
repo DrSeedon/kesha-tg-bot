@@ -16,14 +16,14 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# mpnet-base: лучше MiniLM, ~400MB, dim 768. e5-large OOM'ил VPS (2.9GB RAM).
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+# MiniLM: стабильно работает на VPS 2.9GB RAM (~220MB). mpnet и e5-large OOM'или.
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_FILE = None
-DIM = 768
+DIM = 384
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
 # v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
 
 # Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
