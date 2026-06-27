@@ -117,6 +117,36 @@ HTTPS_PROXY=http://127.0.0.1:10809 claude
 ssh deploy@72.56.235.40 "sudo -n systemctl status kesha-bot-vps --no-pager | head -8"
 ```
 
+## Session notes (2026-06-27)
+
+### RAG Memory — полная хронология
+- v2.3.0: MiniLM + sqlite-vec + FTS5 hybrid → качество 2.2/5
+- v2.3.1: e5-large int8 (561MB) → OOM на VPS 2.9GB → mpnet тоже OOM → откат на MiniLM
+- v2.3.2: e5-small int8 (Xenova/multilingual-e5-small, 118MB, ONNX) + batch_size=16 + arena-off → качество 4.3/5, RAM стабильный
+- **Root cause OOM**: FastEmbed грузил все docs одним вызовом → onnxruntime arena раздувалась. Fix: batch_size=16 + enable_cpu_mem_arena=False
+- **VPS RAM budget**: 2.9GB total, Кеша ~966MB (бот+CLI+5 MCP+embedder), 1.4GB available, swap 0
+- Кеша сам отключал RAG на VPS (закомментировал import rag в bot.py) когда OOM убил VPN — потом восстановили через `git checkout -- bot.py`
+
+### Reverse SSH Tunnel
+- Ноут → VPS (tunnel@72.56.235.40) → порт 2222 на localhost
+- Ключи: `~/.ssh/tunnel_vps` (ноут→VPS), `/home/kesha/.ssh/tunnel_laptop` (VPS→ноут)
+- systemd unit: `ssh-tunnel-vps.service` на ноуте (enabled, Restart=always)
+- `run_on_laptop` MCP tool с whitelist команд (kill, pkill, sudo reboot, sudo systemctl restart orchestra)
+- Безопасность: ключи НЕ в git, tunnel юзер restricted (no shell), порт 2222 только localhost
+
+### Proxy / VPN на VPS
+- VPS в РФ (Timeweb Moscow 72.56.235.40) — Telegram API и Anthropic API блокируются
+- Прокси: Xray → Ёжик VPN (`http://127.0.0.1:10809`)
+- `TG_PROXY` env var → aiogram `AiohttpSession(proxy=...)` + aiohttp-socks
+- `HTTPS_PROXY` env var → Claude SDK
+- `NO_PROXY=localhost,127.0.0.1` — api.telegram.org НЕ добавлять (нужен прокси)
+- ТСПУ (РКН) периодически блокирует трафик к VPS — это не наша проблема
+
+### Workers alive
+- `rag-research` (opus 4.8, ctx:33%) — RAG research/benchmark, idle
+- `kesha-p0-fix` (opus 4.6, ctx:15%) — P0/P1 bugfixes + reverse tunnel + message_log, idle
+- `code-review` (opus 4.6, ctx:6%) — old code review, idle
+
 ## TODO
 
 См. [TODO.md](TODO.md)
