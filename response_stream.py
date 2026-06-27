@@ -7,19 +7,18 @@ import time
 from typing import Optional
 
 from aiogram import types
-from aiogram.methods import SendMessageDraft
+from aiogram.exceptions import TelegramRetryAfter
 
 import config as _config
 from config import MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
 from telegram_io import (
-    _next_draft_id,
     _send_safe,
     split_msg,
     typing_loop,
 )
 from tool_status import ToolStatusTracker
 
-STREAM_DRAFT_INTERVAL = 0.3
+STREAM_EDIT_INTERVAL = 1.0  # TG edit limit ~20/min → 1s safe minimum
 
 _bot = None
 _registry = None
@@ -71,11 +70,10 @@ async def _ask_inner(message, prompt, cid, typer):
 
     parts: list[str] = []
     has_deltas = False
-    draft_id = _next_draft_id()
-    last_draft_time = 0.0
-    last_draft_text = ""
-    draft_has_text = False
-    flood_cooldown_until = 0.0
+    current_msg_id: Optional[int] = None  # ID of the live message being edited
+    last_edit_time = 0.0
+    last_edit_text = ""
+    edit_flood_until = 0.0
     finalized: list[int] = []
 
     status: Optional[ToolStatusTracker] = None
@@ -85,87 +83,123 @@ async def _ask_inner(message, prompt, cid, typer):
             return await message.answer(text, **kwargs)
         return await _bot.send_message(cid, text, **kwargs)
 
-    async def _draft_update(final: bool = False):
-        nonlocal last_draft_time, last_draft_text, flood_cooldown_until, draft_has_text
-        text = "".join(parts)[:TG_MSG_LIMIT]
+    async def _edit_update():
+        nonlocal current_msg_id, last_edit_time, last_edit_text, edit_flood_until
+        text = "".join(parts)
         if not text:
             return
         now = time.time()
-        if not final:
-            if now < flood_cooldown_until:
-                return
-            if (now - last_draft_time) < STREAM_DRAFT_INTERVAL:
-                return
-            if text == last_draft_text:
-                return
-        parse_mode = "Markdown" if final else None
+
+        # First chunk — send immediately without throttle
+        if current_msg_id is None:
+            try:
+                m = await _answer(text[:TG_MSG_LIMIT], parse_mode=None)
+                if m:
+                    current_msg_id = m.message_id
+                    last_edit_text = text
+                    last_edit_time = now
+            except Exception as e:
+                logger.debug(f"Edit stream: initial send failed: {e}")
+            return
+
+        # Subsequent edits — apply throttle and flood control
+        if now < edit_flood_until:
+            return
+        if (now - last_edit_time) < STREAM_EDIT_INTERVAL:
+            return
+        if text == last_edit_text:
+            return
+
         try:
-            await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text, parse_mode=parse_mode))
-            draft_has_text = True
-            last_draft_text = text
+            await _bot.edit_message_text(
+                text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg_id, parse_mode=None
+            )
+            last_edit_text = text
+            last_edit_time = now
         except Exception as e:
-            err_str = str(e)
-            if final and ("can't parse entities" in err_str or "parse" in err_str.lower()):
-                try:
-                    await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=text, parse_mode=None))
-                    draft_has_text = True
-                    last_draft_text = text
-                except Exception as e2:
-                    logger.debug(f"Draft final plain fallback failed: {e2}")
-            elif "Flood control" in err_str or "retry after" in err_str.lower():
+            err = str(e)
+            if "Flood control" in err or "retry after" in err.lower():
                 import re
-                m = re.search(r'retry after (\d+)', err_str, re.IGNORECASE)
+                m = re.search(r'retry after (\d+)', err, re.IGNORECASE)
                 wait_sec = int(m.group(1)) if m else 30
-                flood_cooldown_until = now + wait_sec + 1
-                logger.info(f"Draft flood control, pausing updates for {wait_sec}s")
-            elif "message is not modified" in err_str:
-                last_draft_text = text
+                edit_flood_until = now + wait_sec + 1
+                logger.info(f"Edit flood control, pausing updates for {wait_sec}s")
+            elif "message is not modified" in err:
+                last_edit_text = text
+                last_edit_time = now
             else:
-                logger.debug(f"Draft update error: {e}")
-        last_draft_time = now
+                logger.debug(f"Edit update error: {e}")
 
     async def _finalize_text_block():
-        nonlocal parts, has_deltas, draft_has_text, draft_id, last_draft_time, last_draft_text
+        nonlocal parts, has_deltas, current_msg_id, last_edit_time, last_edit_text
         raw = "".join(parts)
         if not raw:
             return
         await _stop_typer(typer)
-        if draft_has_text:
-            with contextlib.suppress(Exception):
-                await _bot(SendMessageDraft(chat_id=cid, draft_id=draft_id, text=""))
-            draft_has_text = False
+
         try:
             converted_text, entities = _md_convert(raw)
             chunks = _split_entities(converted_text, entities, TG_MSG_LIMIT)
         except Exception as e:
             logger.warning(f"telegramify_markdown convert failed: {e}, sending plain")
             chunks = [(p, []) for p in split_msg(raw)]
-        from aiogram.exceptions import TelegramRetryAfter
-        for chunk_text, chunk_ents in chunks:
+
+        for i, (chunk_text, chunk_ents) in enumerate(chunks):
             if not chunk_text:
                 continue
             ent_dicts = [e.to_dict() for e in chunk_ents] if chunk_ents else None
-            for attempt in range(3):
-                try:
-                    m = await _answer(chunk_text, parse_mode=None, entities=ent_dicts)
-                    if m:
-                        finalized.append(m.message_id)
-                    break
-                except TelegramRetryAfter as e:
-                    logger.warning(f"Flood control, retry after {e.retry_after}s (attempt {attempt+1})")
-                    await asyncio.sleep(e.retry_after + 1)
-                except Exception as e:
-                    logger.error(f"_finalize_text_block error: {e}")
+
+            if i == 0 and current_msg_id is not None:
+                # Final edit of the live message
+                for attempt in range(3):
                     try:
-                        m = await _answer(chunk_text, parse_mode=None)
+                        await _bot.edit_message_text(
+                            chunk_text, chat_id=cid, message_id=current_msg_id,
+                            parse_mode=None, entities=ent_dicts
+                        )
+                        finalized.append(current_msg_id)
+                        break
+                    except TelegramRetryAfter as e:
+                        logger.warning(f"Flood control (finalize edit), retry after {e.retry_after}s")
+                        await asyncio.sleep(e.retry_after + 1)
+                    except Exception as e:
+                        err = str(e)
+                        if "message is not modified" in err:
+                            finalized.append(current_msg_id)
+                        else:
+                            logger.error(f"_finalize edit error: {e}")
+                            # Fallback: send as new message
+                            try:
+                                m = await _answer(chunk_text, parse_mode=None, entities=ent_dicts)
+                                if m:
+                                    finalized.append(m.message_id)
+                            except Exception:
+                                pass
+                        break
+            else:
+                # Overflow chunks (>4096) or first chunk when no live message exists
+                for attempt in range(3):
+                    try:
+                        m = await _answer(chunk_text, parse_mode=None, entities=ent_dicts)
                         if m:
                             finalized.append(m.message_id)
-                    except Exception:
-                        pass
-                    break
-        draft_id = _next_draft_id()
-        last_draft_time = 0.0
-        last_draft_text = ""
+                        break
+                    except TelegramRetryAfter as e:
+                        logger.warning(f"Flood control (finalize send), retry after {e.retry_after}s (attempt {attempt+1})")
+                        await asyncio.sleep(e.retry_after + 1)
+                    except Exception as e:
+                        logger.error(f"_finalize_text_block error: {e}")
+                        try:
+                            m = await _answer(chunk_text, parse_mode=None)
+                            if m:
+                                finalized.append(m.message_id)
+                        except Exception:
+                            pass
+                        break
+
+        current_msg_id = None
+        last_edit_time = 0.0
+        last_edit_text = ""
         parts = []
         has_deltas = False
 
@@ -233,12 +267,12 @@ async def _ask_inner(message, prompt, cid, typer):
                         await _finalize_status()
                     has_deltas = True
                     parts.append(chunk["content"])
-                    await _draft_update()
+                    await _edit_update()
                 elif ct == "text" and not has_deltas:
                     if status is not None:
                         await _finalize_status()
                     parts.append(chunk["content"])
-                    await _draft_update()
+                    await _edit_update()
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
@@ -269,6 +303,8 @@ async def _ask_inner(message, prompt, cid, typer):
                                     await _send_safe(message, _t_cfg(message, "reconnecting", n=retries))
                                 parts.clear()
                                 has_deltas = False
+                                current_msg_id = None  # EC-6: reset live message on reconnect
+                                last_edit_text = ""
                                 if status:
                                     if status.tools:
                                         await status.finalize()
@@ -290,6 +326,8 @@ async def _ask_inner(message, prompt, cid, typer):
             retries += 1
             if retries <= MAX_RETRIES:
                 _get_session(cid).reconnect()
+                current_msg_id = None
+                last_edit_text = ""
                 if message is not None:
                     await _send_safe(message, _t_cfg(message, "error_retry", n=retries))
                 logger.info(f"Chat {cid}: error retry, continuing (retries={retries})")
@@ -299,7 +337,7 @@ async def _ask_inner(message, prompt, cid, typer):
                 break
 
     text = "".join(parts)
-    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}, draft_hanging={draft_has_text}")
+    logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}")
     if text:
         try:
             from message_log import get_db as _get_msg_db

@@ -151,10 +151,3 @@ async def _send_safe(message: types.Message, text: str):
     return None
 
 
-_draft_counter = 0
-
-
-def _next_draft_id() -> int:
-    global _draft_counter
-    _draft_counter += 1
-    return _draft_counter
