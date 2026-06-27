@@ -136,7 +136,7 @@ class RagMemory:
         if "e5" in MODEL_NAME:
             prefix = "query: " if is_query else "passage: "
             texts = [prefix + t for t in texts]
-        return [list(map(float, v)) for v in self._embedder.embed(texts)]
+        return [list(map(float, v)) for v in self._embedder.embed(texts, batch_size=16)]
 
     def _is_indexed(self, message_id: int) -> bool:
         return self.conn.execute(
