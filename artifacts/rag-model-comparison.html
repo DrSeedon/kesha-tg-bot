@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>RAG: MiniLM vs e5-small — до/после</title>
+<style>
+:root{--bg:#0e0e12;--surface:#16161c;--surface-2:#1c1c24;--border:#2a2a32;--ink:#f1f1f4;--ink-soft:#a8a8b3;--ok:#22c55e;--ok-soft:#22c55e22;--danger:#ef4444;--danger-soft:#ef444422;--accent:#7c3aed;--accent-soft:#7c3aed33;--warn:#f59e0b;--neon:#39ff14;--sans:system-ui,-apple-system,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--serif:Charter,"Iowan Old Style",ui-serif,Georgia,serif}
+@media(prefers-color-scheme:light){:root{--bg:#fafaf7;--surface:#fff;--surface-2:#f5f5f0;--border:#e7e5df;--ink:#1a1a1f;--ink-soft:#555560;--ok-soft:#22c55e15;--danger-soft:#ef444415;--accent-soft:#7c3aed15;--neon:#16a34a}}
+*,*::before,*::after{box-sizing:border-box;margin:0}
+html{background:var(--bg);color:var(--ink)}
+body{font:17px/1.55 var(--serif);max-width:72ch;margin:3rem auto;padding:0 1.25rem}
+h1{font:bold 2rem var(--sans);margin-bottom:.5rem}
+h2{font:bold 1.3rem var(--sans);margin:2.5rem 0 .75rem;padding-bottom:.4rem;border-bottom:1px solid var(--border)}
+h3{font:bold 1rem var(--sans);margin:1.5rem 0 .5rem}
+p{margin-bottom:.75rem}
+code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);padding:.1em .35em;border-radius:3px}
+.tldr{color:var(--ink-soft);font-size:1rem;margin-bottom:2rem;border-left:3px solid var(--accent);padding-left:1rem}
+.crumb{font:12px var(--sans);color:var(--ink-soft);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.2rem}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem}
+.card.ok{border-color:var(--ok);background:var(--ok-soft)}
+.card.danger{border-color:var(--danger);background:var(--danger-soft)}
+
+table{width:100%;border-collapse:collapse;font:14px var(--sans);margin:1rem 0}
+th{background:var(--surface-2);padding:.5rem .6rem;text-align:left;border-bottom:2px solid var(--border);font-weight:600}
+td{padding:.45rem .6rem;border-bottom:1px solid var(--border);vertical-align:top}
+tr:hover td{background:var(--accent-soft)}
+.winner{color:var(--neon);font-weight:700}
+.loser{color:var(--danger);opacity:.7}
+.tag{display:inline-block;font:11px var(--sans);padding:1px 5px;border-radius:3px;font-weight:600}
+.tag-ok{background:var(--ok-soft);color:var(--ok)}
+.tag-bad{background:var(--danger-soft);color:var(--danger)}
+.tag-warn{background:#f59e0b22;color:var(--warn)}
+
+.bar-wrap{display:flex;align-items:center;gap:.5rem;margin:.25rem 0}
+.bar-label{font:13px var(--sans);width:80px;text-align:right;color:var(--ink-soft)}
+.bar-track{flex:1;height:20px;background:var(--surface-2);border-radius:4px;overflow:hidden;position:relative}
+.bar-fill{height:100%;border-radius:4px;transition:width .8s ease;display:flex;align-items:center;padding-left:6px;font:bold 11px var(--sans);color:#fff}
+.bar-fill.green{background:var(--ok)}
+.bar-fill.red{background:var(--danger)}
+.bar-fill.purple{background:var(--accent)}
+.bar-fill.blue{background:#3b82f6}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+@media(max-width:600px){.grid-2{grid-template-columns:1fr}}
+
+.score-big{font:bold 3rem var(--sans);line-height:1}
+.score-label{font:13px var(--sans);color:var(--ink-soft)}
+</style>
+</head>
+<body>
+<main>
+<p class="crumb">Kesha TG Bot · RAG Memory</p>
+<h1>🧠 MiniLM → e5-small: что изменилось</h1>
+<p class="tldr">Модель поменяли, DIM остался 384, RAM почти не изменился. Качество поиска выросло на ~55%. Ниже — конкретные цифры, примеры и почему RAM не вырос.</p>
+
+<h2>📊 Главное: качество поиска</h2>
+<p>Одинаковые запросы → cosine similarity с правильным результатом:</p>
+
+<table>
+<thead><tr><th>Запрос</th><th>MiniLM</th><th>e5-small int8</th><th>Δ</th></tr></thead>
+<tbody>
+<tr>
+  <td>«ссора с девушкой» → «Катя заебала, что расстаться»</td>
+  <td class="loser">0.43</td>
+  <td class="winner">0.80</td>
+  <td class="winner">+86%</td>
+</tr>
+<tr>
+  <td>«настройки AI» → «подкрутил промпт боту»</td>
+  <td class="loser">0.28</td>
+  <td class="winner">0.81</td>
+  <td class="winner">+189%</td>
+</tr>
+<tr>
+  <td>«КБЖУ белок калории»</td>
+  <td>0.67</td>
+  <td class="winner">0.92</td>
+  <td class="winner">+37%</td>
+</tr>
+<tr>
+  <td>«мопед скутер транспорт»</td>
+  <td>0.56</td>
+  <td class="winner">0.87</td>
+  <td class="winner">+55%</td>
+</tr>
+</tbody>
+</table>
+
+<div class="grid-2">
+<div style="text-align:center">
+  <div class="score-big" style="color:var(--danger)">3/5</div>
+  <div class="score-label">MiniLM (было)</div>
+</div>
+<div style="text-align:center">
+  <div class="score-big" style="color:var(--neon)">4.5/5</div>
+  <div class="score-label">e5-small int8 (стало)</div>
+</div>
+</div>
+
+<h2>🔍 Примеры: до и после</h2>
+
+<h3>Запрос: «ссора с Катей»</h3>
+<div class="grid-2">
+  <div class="card danger">
+    <strong style="color:var(--danger)">MiniLM (до)</strong>
+    <ol style="font:14px var(--sans);padding-left:1.2rem;margin-top:.5rem">
+      <li>❌ Фото паспорта Кирилла (не в тему)</li>
+      <li>❌ Про векторную БД (не в тему)</li>
+      <li>❌ Протеин и шашлыки</li>
+      <li>❌ Про thinking и эфир</li>
+      <li>⚠️ Психолог и схемотерапия (частично)</li>
+    </ol>
+    <p style="font:12px var(--sans);color:var(--danger);margin-top:.5rem">1 из 5 релевантных</p>
+  </div>
+  <div class="card ok">
+    <strong style="color:var(--ok)">e5-small (после)</strong>
+    <ol style="font:14px var(--sans);padding-left:1.2rem;margin-top:.5rem">
+      <li>✅ «Катя заебала, что расстаться» — RANK-1!</li>
+      <li>✅ Психолог, схемотерапия, конфликт</li>
+      <li>✅ «она опять психанула»</li>
+      <li>⚠️ Помирились, купил цветы</li>
+      <li>⚠️ Обсуждение отношений</li>
+    </ol>
+    <p style="font:12px var(--sans);color:var(--ok);margin-top:.5rem">3-4 из 5 релевантных</p>
+  </div>
+</div>
+
+<h3>Запрос: «Claude Code thinking настройки»</h3>
+<div class="grid-2">
+  <div class="card danger">
+    <strong style="color:var(--danger)">MiniLM (до) — 1.5/5</strong>
+    <ol style="font:14px var(--sans);padding-left:1.2rem;margin-top:.5rem">
+      <li>❌ looper-skill (не то)</li>
+      <li>❌ Daily dump reminder</li>
+      <li>❌ Макароны на дачу</li>
+    </ol>
+  </div>
+  <div class="card ok">
+    <strong style="color:var(--ok)">e5-small (после)</strong>
+    <ol style="font:14px var(--sans);padding-left:1.2rem;margin-top:.5rem">
+      <li>✅ «Нашёл! Текущие настройки» — RANK-1!</li>
+      <li>✅ «погугли thinking, поставим крутой режим»</li>
+      <li>✅ Про апгрейд бота</li>
+    </ol>
+  </div>
+</div>
+
+<h2>💾 RAM: почему не вырос</h2>
+
+<div class="card">
+<h3>Три фикса которые решили OOM:</h3>
+<table>
+<thead><tr><th>Фикс</th><th>Экономия RAM</th><th>Что делает</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>batch_size=16</code></td>
+  <td class="winner">-600 MB</td>
+  <td>FastEmbed грузил все 335 сообщений одним вызовом → onnxruntime arena раздувалась до 1.5GB. Батчами по 16 = вдвое меньше.</td>
+</tr>
+<tr>
+  <td><code>enable_cpu_mem_arena=False</code></td>
+  <td class="winner">-400 MB</td>
+  <td>Onnxruntime pre-allocates memory pool и не отдаёт. Отключаем — аллоцирует только нужное.</td>
+</tr>
+<tr>
+  <td>e5-small int8 (vs fp32)</td>
+  <td class="winner">-70 MB</td>
+  <td>int8 квантизация: 118MB на диске vs ~470MB fp32. Меньше модель → меньше RAM.</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h3>RAM на VPS прямо сейчас</h3>
+<div class="bar-wrap">
+  <span class="bar-label">Кеша</span>
+  <div class="bar-track"><div class="bar-fill purple" style="width:33%">966 MB</div></div>
+</div>
+<div class="bar-wrap">
+  <span class="bar-label">CryptoBot</span>
+  <div class="bar-track"><div class="bar-fill blue" style="width:11%">335 MB</div></div>
+</div>
+<div class="bar-wrap">
+  <span class="bar-label">Seedon API</span>
+  <div class="bar-track"><div class="bar-fill blue" style="width:2.5%">78 MB</div></div>
+</div>
+<div class="bar-wrap">
+  <span class="bar-label">Система</span>
+  <div class="bar-track"><div class="bar-fill red" style="width:5%">~150 MB</div></div>
+</div>
+<div class="bar-wrap">
+  <span class="bar-label" style="color:var(--ok);font-weight:600">Свободно</span>
+  <div class="bar-track"><div class="bar-fill green" style="width:48%">1.4 GB ✅</div></div>
+</div>
+<p style="font:13px var(--sans);color:var(--ink-soft)">Total: 2.9 GB. Swap: 0. Запас 1.4 GB — VPN стабилен.</p>
+
+<h2>🔬 Почему e5-small лучше MiniLM</h2>
+
+<table>
+<thead><tr><th></th><th>MiniLM-L12</th><th>e5-small int8</th></tr></thead>
+<tbody>
+<tr><td><strong>Архитектура</strong></td><td>Distilled BERT, 12 layers</td><td class="winner">E5 (contrastive pre-training на 2.4B пар)</td></tr>
+<tr><td><strong>Тренировка</strong></td><td>Paraphrase mining (пересказы)</td><td class="winner">MIRACL (16 языков, включая русский)</td></tr>
+<tr><td><strong>Русский</strong></td><td class="loser">Побочный (не приоритет)</td><td class="winner">Целевой (MIRACL ru в датасете)</td></tr>
+<tr><td><strong>DIM</strong></td><td>384</td><td>384 (тот же)</td></tr>
+<tr><td><strong>Размер ONNX</strong></td><td>90 MB (fp32)</td><td>118 MB (int8)</td></tr>
+<tr><td><strong>RAM при работе</strong></td><td>~200 MB</td><td>~250 MB</td></tr>
+<tr><td><strong>Latency</strong></td><td>3 мс</td><td>15 мс</td></tr>
+<tr><td><strong>E5-префиксы</strong></td><td>Не нужны</td><td>query:/passage: (обязательны)</td></tr>
+</tbody>
+</table>
+
+<div class="card ok">
+<p style="margin-bottom:0"><strong>Главное:</strong> MiniLM обучался на пересказах (paraphrase) — он хорош когда слова похожи. E5 обучался на information retrieval — он понимает что «ссора» и «конфликт» и «психанула» это одна тема, даже если слова разные. Именно это нужно для поиска по истории чата.</p>
+</div>
+
+<h2>⚙️ Что именно поменялось в коде</h2>
+
+<table>
+<thead><tr><th>Файл</th><th>Было</th><th>Стало</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>rag.py</code></td>
+  <td><code>MiniLM-L12-v2</code></td>
+  <td><code>multilingual-e5-small</code> (Xenova int8 ONNX)</td>
+</tr>
+<tr>
+  <td><code>rag.py</code></td>
+  <td><code>TextEmbedding(name)</code></td>
+  <td><code>add_custom_model</code> + arena-off monkey-patch</td>
+</tr>
+<tr>
+  <td><code>rag.py</code></td>
+  <td><code>.embed(texts)</code></td>
+  <td><code>.embed(texts, batch_size=16)</code></td>
+</tr>
+<tr>
+  <td><code>rag.py</code></td>
+  <td>SCHEMA_VERSION 5</td>
+  <td>SCHEMA_VERSION 6 (backfill переэмбедит)</td>
+</tr>
+<tr>
+  <td>DIM</td>
+  <td>384</td>
+  <td>384 (не менялся)</td>
+</tr>
+</tbody>
+</table>
+
+<h2>📋 Хронология OOM-эпопеи</h2>
+<table>
+<thead><tr><th>Модель</th><th>RAM</th><th>Качество</th><th>Результат</th></tr></thead>
+<tbody>
+<tr><td>MiniLM (v1)</td><td>200 MB</td><td class="loser">3/5</td><td><span class="tag tag-ok">Работал</span></td></tr>
+<tr><td>e5-large int8</td><td>1200 MB</td><td class="winner">5/5</td><td><span class="tag tag-bad">OOM → VPN ☠️</span></td></tr>
+<tr><td>e5-base</td><td>—</td><td>—</td><td><span class="tag tag-bad">Нет в FastEmbed</span></td></tr>
+<tr><td>mpnet-base</td><td>400 MB</td><td>4/5</td><td><span class="tag tag-bad">OOM → VPN ☠️</span></td></tr>
+<tr><td>MiniLM (откат)</td><td>200 MB</td><td class="loser">3/5</td><td><span class="tag tag-ok">Стабильно</span></td></tr>
+<tr><td>MiniLM + batch_size</td><td>150 MB</td><td class="loser">3/5</td><td><span class="tag tag-ok">RAM -600MB</span></td></tr>
+<tr style="background:var(--ok-soft)"><td><strong>e5-small int8 + arena-off + batch</strong></td><td><strong>250 MB</strong></td><td class="winner"><strong>4.5/5</strong></td><td><span class="tag tag-ok"><strong>✅ Текущий</strong></span></td></tr>
+</tbody>
+</table>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>RAG-память Кеши — Deep Dive</title>
+<style>
+:root{--bg:#0e0e12;--surface:#16161c;--surface-2:#1c1c24;--border:#2a2a32;--ink:#f1f1f4;--ink-soft:#a8a8b3;--accent:#7c3aed;--accent-soft:#7c3aed33;--ok:#22c55e;--ok-soft:#22c55e22;--warn:#f59e0b;--danger:#ef4444;--danger-soft:#ef444422;--info:#3b82f6;--neon:#39ff14;--neon2:#bf5af2;--sans:system-ui,-apple-system,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,monospace;--serif:Charter,"Iowan Old Style",ui-serif,Georgia,serif}
+@media(prefers-color-scheme:light){:root{--bg:#fafaf7;--surface:#fff;--surface-2:#f5f5f0;--border:#e7e5df;--ink:#1a1a1f;--ink-soft:#555560;--neon:#16a34a;--neon2:#7c3aed;--ok-soft:#22c55e15;--danger-soft:#ef444415;--accent-soft:#7c3aed15}}
+@media print{:root{--bg:#fff;--surface:#f8f8f8;--ink:#000;--ink-soft:#555;--border:#ddd}.no-print,button{display:none!important}*{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+*,*::before,*::after{box-sizing:border-box;margin:0}html{background:var(--bg);color:var(--ink);scroll-behavior:smooth}
+body{font:17px/1.55 var(--serif);max-width:74ch;margin:3rem auto;padding:0 1.25rem}
+h1{font:bold 2rem var(--sans);margin-bottom:.5rem;background:linear-gradient(135deg,var(--neon),var(--neon2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+h2{font:bold 1.35rem var(--sans);margin:3rem 0 1rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+h3{font:bold 1.05rem var(--sans);margin:1.5rem 0 .5rem}
+p{margin-bottom:1rem}
+.tldr{color:var(--ink-soft);font-size:1rem;margin-bottom:2rem;border-left:3px solid var(--neon2);padding-left:1rem}
+.crumb{font:13px var(--sans);color:var(--ink-soft);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.25rem}
+code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);padding:.15em .4em;border-radius:4px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;font:13px/1.5 var(--mono);margin:1rem 0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem}
+details{margin:1rem 0}
+summary{font:bold 14px var(--sans);cursor:pointer;color:var(--neon2);padding:.5rem 0}
+@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.fade{animation:fadeUp .5s ease both}
+.d1{animation-delay:.1s}.d2{animation-delay:.2s}.d3{animation-delay:.3s}.d4{animation-delay:.4s}
+
+/* Steps */
+.steps{counter-reset:step;margin:1rem 0}
+.step{position:relative;padding-left:3rem;margin-bottom:1.25rem;counter-increment:step}
+.step::before{content:counter(step);position:absolute;left:0;top:0;width:2rem;height:2rem;background:var(--accent);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font:bold 13px var(--sans)}
+.step-title{font:bold 14px var(--sans);margin-bottom:.25rem}
+.step-desc{font:14px var(--sans);color:var(--ink-soft)}
+
+/* Flow */
+.flow{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin:1rem 0}
+.flow-box{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.4rem .8rem;font:13px var(--sans);white-space:nowrap}
+.flow-box.hl{border-color:var(--neon);color:var(--neon);font-weight:600}
+.flow-box.hl2{border-color:var(--neon2);color:var(--neon2);font-weight:600}
+.flow-arr{color:var(--ink-soft);font-size:1.1rem}
+
+/* Table */
+.tbl{width:100%;border-collapse:collapse;font:14px var(--sans);margin:1rem 0}
+.tbl th{background:var(--surface-2);padding:.5rem .6rem;text-align:left;border-bottom:2px solid var(--border);font-weight:600}
+.tbl td{padding:.45rem .6rem;border-bottom:1px solid var(--border);vertical-align:top}
+.tbl tr:hover td{background:var(--accent-soft)}
+.w{color:var(--neon);font-weight:600}
+
+/* Resource bars */
+.res-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75rem;margin:1rem 0}
+.res{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.75rem}
+.res-label{font:12px var(--sans);color:var(--ink-soft)}
+.res-val{font:bold 1.3rem var(--sans);margin:.15rem 0}
+.res-bar{height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin-top:.25rem}
+.res-fill{height:100%;border-radius:3px}
+.res-note{font:11px var(--sans);color:var(--ink-soft);margin-top:.2rem}
+
+/* Search demo */
+.demo{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin:1rem 0}
+.demo input[type=text]{width:100%;padding:.5rem .75rem;font:14px var(--sans);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--ink);outline:none;margin-bottom:.75rem}
+.demo input:focus{border-color:var(--neon2)}
+.demo-cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem}
+@media(max-width:700px){.demo-cols{grid-template-columns:1fr}}
+.demo-col{border:1px solid var(--border);border-radius:6px;padding:.5rem}
+.demo-col h4{font:bold 12px var(--sans);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.05em}
+.demo-col.fts h4{color:var(--info)}
+.demo-col.vec h4{color:var(--neon2)}
+.demo-col.hyb h4{color:var(--neon)}
+.demo-item{font:13px var(--sans);padding:.2rem .4rem;margin:.2rem 0;border-radius:4px}
+.demo-item.hit{background:var(--ok-soft);border-left:3px solid var(--ok)}
+.demo-item.miss{opacity:.3}
+
+/* SVG */
+svg{max-width:100%;height:auto}
+.svg-wrap{margin:1.5rem 0;overflow-x:auto}
+
+/* Partition viz */
+.part-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+@media(max-width:600px){.part-grid{grid-template-columns:1fr}}
+.part-card{border-radius:8px;padding:.75rem;font:13px var(--sans)}
+.part-max{background:#7c3aed15;border:1px solid var(--accent)}
+.part-kat{background:#3b82f615;border:1px solid var(--info)}
+.part-title{font-weight:bold;margin-bottom:.3rem}
+</style>
+</head>
+<body>
+<main>
+<p class="crumb fade">Kesha TG Bot &middot; RAG Memory &middot; Deep Dive</p>
+<h1 class="fade d1">RAG-память Кеши: как это работает</h1>
+<p class="tldr fade d2">Полная техническая карта: от нажатия кнопки &laquo;Отправить&raquo; в Telegram до семантического поиска по всей истории. С реальным SQL, диаграммами и интерактивными примерами.</p>
+
+<!-- ===== 1. ARCHITECTURE ===== -->
+<h2>1. Архитектура</h2>
+<p>Два потока данных: <strong>запись</strong> (каждое сообщение &rarr; embedding &rarr; в индекс) и <strong>поиск</strong> (запрос &rarr; гибридный поиск &rarr; результаты).</p>
+
+<div class="svg-wrap">
+<svg viewBox="0 0 780 340" xmlns="http://www.w3.org/2000/svg" style="font-family:system-ui,sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--ink-soft)"/></marker>
+    <marker id="ar-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#22c55e"/></marker>
+    <marker id="ar-p" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#bf5af2"/></marker>
+  </defs>
+  <!-- Boxes -->
+  <rect x="10" y="20" width="120" height="50" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+  <text x="70" y="50" text-anchor="middle" fill="var(--ink)" font-size="13" font-weight="bold">Telegram</text>
+
+  <rect x="170" y="20" width="120" height="50" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+  <text x="230" y="44" text-anchor="middle" fill="var(--ink)" font-size="12" font-weight="bold">handlers.py</text>
+  <text x="230" y="58" text-anchor="middle" fill="var(--ink-soft)" font-size="10">enqueue</text>
+
+  <rect x="330" y="20" width="130" height="50" rx="8" fill="var(--surface)" stroke="var(--neon)"/>
+  <text x="395" y="44" text-anchor="middle" fill="var(--neon)" font-size="12" font-weight="bold">message_log.py</text>
+  <text x="395" y="58" text-anchor="middle" fill="var(--ink-soft)" font-size="10">messages.db</text>
+
+  <!-- Callback arrow down -->
+  <line x1="395" y1="70" x2="395" y2="120" stroke="#22c55e" stroke-width="2" marker-end="url(#ar-g)"/>
+  <text x="405" y="100" fill="#22c55e" font-size="10">callback</text>
+
+  <rect x="330" y="125" width="130" height="50" rx="8" fill="var(--surface)" stroke="#22c55e"/>
+  <text x="395" y="148" text-anchor="middle" fill="#22c55e" font-size="12" font-weight="bold">asyncio.Queue</text>
+  <text x="395" y="162" text-anchor="middle" fill="var(--ink-soft)" font-size="10">enqueue index</text>
+
+  <line x1="395" y1="175" x2="395" y2="220" stroke="#22c55e" stroke-width="2" marker-end="url(#ar-g)"/>
+  <text x="405" y="200" fill="#22c55e" font-size="10">_rag_worker</text>
+
+  <!-- ThreadPool -->
+  <rect x="300" y="225" width="190" height="55" rx="8" fill="var(--surface)" stroke="var(--neon2)"/>
+  <text x="395" y="248" text-anchor="middle" fill="var(--neon2)" font-size="12" font-weight="bold">ThreadPoolExecutor(1)</text>
+  <text x="395" y="265" text-anchor="middle" fill="var(--ink-soft)" font-size="10">RagMemory (rag.py)</text>
+
+  <!-- Embedder inside -->
+  <rect x="520" y="225" width="110" height="55" rx="8" fill="var(--surface)" stroke="var(--warn)"/>
+  <text x="575" y="248" text-anchor="middle" fill="var(--warn)" font-size="11" font-weight="bold">FastEmbed</text>
+  <text x="575" y="263" text-anchor="middle" fill="var(--ink-soft)" font-size="10">MiniLM ONNX</text>
+
+  <line x1="490" y1="252" x2="520" y2="252" stroke="var(--warn)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- vec.db -->
+  <rect x="330" y="300" width="130" height="35" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+  <text x="395" y="322" text-anchor="middle" fill="var(--accent)" font-size="12" font-weight="bold">vec.db (sqlite-vec)</text>
+  <line x1="395" y1="280" x2="395" y2="300" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- Search path -->
+  <rect x="560" y="120" width="130" height="50" rx="8" fill="var(--surface)" stroke="var(--neon2)"/>
+  <text x="625" y="142" text-anchor="middle" fill="var(--neon2)" font-size="12" font-weight="bold">search_memory</text>
+  <text x="625" y="157" text-anchor="middle" fill="var(--ink-soft)" font-size="10">MCP tool</text>
+
+  <line x1="625" y1="170" x2="490" y2="240" stroke="var(--neon2)" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#ar-p)"/>
+  <text x="570" y="210" fill="var(--neon2)" font-size="10">run_in_executor</text>
+
+  <!-- Arrows -->
+  <line x1="130" y1="45" x2="170" y2="45" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="290" y1="45" x2="330" y2="45" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- Claude -->
+  <rect x="600" y="20" width="120" height="50" rx="8" fill="var(--surface)" stroke="var(--info)"/>
+  <text x="660" y="44" text-anchor="middle" fill="var(--info)" font-size="12" font-weight="bold">Claude SDK</text>
+  <text x="660" y="58" text-anchor="middle" fill="var(--ink-soft)" font-size="10">_ask() response</text>
+
+  <line x1="460" y1="45" x2="600" y2="45" stroke="var(--ink-soft)" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- Legend -->
+  <text x="10" y="320" fill="var(--ink-soft)" font-size="11">&#9632; Зелёный = запись &nbsp; &#9632; Фиолетовый = поиск &nbsp; &#9632; Жёлтый = embedder</text>
+</svg>
+</div>
+
+<!-- ===== 2. WRITE PATH ===== -->
+<h2>2. Запись сообщения (пошагово)</h2>
+<p>Пример: ты пишешь Кеше <code>заказал пиццу пепперони</code>.</p>
+
+<div class="steps">
+  <div class="step fade"><div class="step-title">Telegram &rarr; handlers.py</div><div class="step-desc">Aiogram получает update, создаёт <code>PendingEntry</code>, ставит в <code>ChatState</code>.</div></div>
+  <div class="step fade d1"><div class="step-title">message_log.py &rarr; messages.db</div><div class="step-desc"><pre>INSERT INTO messages(chat_id, role, content, message_id)
+VALUES(720740564, 'user', 'заказал пиццу пепперони', 23456);</pre>Возвращает <code>lastrowid = 1042</code>.</div></div>
+  <div class="step fade d2"><div class="step-title">Callback &rarr; asyncio.Queue</div><div class="step-desc"><code>_enqueue_index(1042, 720740564, 'user', 'заказал пиццу пепперони')</code> &mdash; через <code>loop.call_soon_threadsafe</code>. <strong>Не блокирует ответ юзеру.</strong></div></div>
+  <div class="step fade d3"><div class="step-title">_rag_worker &rarr; ThreadPoolExecutor</div><div class="step-desc">Фоновая asyncio-таска берёт из очереди, отправляет в выделенный поток: <code>await rag.run(loop, "index_message", 1042, 720740564, 'user', 'заказал пиццу пепперони')</code></div></div>
+  <div class="step fade d4"><div class="step-title">FastEmbed: текст &rarr; вектор</div><div class="step-desc">Добавляет E5-префикс: <code>"passage: заказал пиццу пепперони"</code><br>ONNX-модель MiniLM (384 dims, int8) &rarr; вектор за ~25мс:<br><code style="font-size:12px;color:var(--neon)">[0.12, -0.45, 0.78, 0.03, ..., 0.33]</code> &mdash; 384 числа</div></div>
+  <div class="step fade"><div class="step-title">INSERT в 3 таблицы (одна транзакция)</div><div class="step-desc">
+<pre>-- Вектор + метадата
+INSERT INTO vec_messages(message_id, chat_id, role, embedding)
+VALUES(1042, 720740564, 'user', :vector_384_floats);
+
+-- Текст для BM25 полнотекстового поиска
+INSERT INTO fts_messages(content, chat_id, message_id)
+VALUES('заказал пиццу пепперони', 720740564, 1042);
+
+-- Отметка что проиндексировано (идемпотентность)
+INSERT INTO indexed(message_id) VALUES(1042);</pre>
+  </div></div>
+</div>
+
+<!-- ===== 3. SEARCH PATH ===== -->
+<h2>3. Поиск (пошагово)</h2>
+<p>Ты спрашиваешь: <code>что я ел на прошлой неделе?</code></p>
+
+<div class="flow">
+  <div class="flow-box">Кеша видит "на прошлой неделе"</div>
+  <span class="flow-arr">&rarr;</span>
+  <div class="flow-box hl2">search_memory(query=&hellip;)</div>
+  <span class="flow-arr">&rarr;</span>
+  <div class="flow-box">run_in_executor</div>
+  <span class="flow-arr">&rarr;</span>
+  <div class="flow-box hl">RagMemory.search()</div>
+</div>
+
+<div class="steps">
+  <div class="step"><div class="step-title">Embedding запроса</div><div class="step-desc"><code>"query: что ел на прошлой неделе"</code> &rarr; MiniLM &rarr; query_vec (384 floats, ~25мс)</div></div>
+
+  <div class="step"><div class="step-title">Векторный поиск (KNN)</div><div class="step-desc">
+<pre>SELECT message_id, distance
+FROM vec_messages
+WHERE chat_id = 720740564
+  AND embedding MATCH :query_vec
+ORDER BY distance LIMIT 20;</pre>
+Находит по <strong>смыслу</strong>: "пиццу", "овсянка", "курицу купить" &mdash; потому что векторы близки.</div></div>
+
+  <div class="step"><div class="step-title">FTS5 поиск (BM25)</div><div class="step-desc">
+<pre>SELECT message_id, rank
+FROM fts_messages
+WHERE fts_messages MATCH 'ел' AND chat_id = 720740564
+ORDER BY rank LIMIT 20;</pre>
+Находит по <strong>точному слову</strong>: только если "ел" буквально в тексте.</div></div>
+
+  <div class="step"><div class="step-title">RRF Fusion (слияние результатов)</div><div class="step-desc">Reciprocal Rank Fusion с k=60 объединяет оба списка:
+<pre>score = 1/(60 + rank_vec) + 1/(60 + rank_fts)</pre>
+Если сообщение в обоих списках &mdash; его score выше. Берём top-5.</div></div>
+
+  <div class="step"><div class="step-title">JOIN с messages.db</div><div class="step-desc">
+<pre>SELECT m.content, m.timestamp, m.role
+FROM msg.messages m
+WHERE m.id IN (1042, 987, 1001, 955, 1033)
+ORDER BY m.timestamp DESC;</pre>
+Достаём полный текст и дату.</div></div>
+
+  <div class="step"><div class="step-title">Результат &rarr; Кеше</div><div class="step-desc">
+<pre>[2026-06-25 19:30 | user] заказал пиццу пепперони
+[2026-06-24 13:15 | user] на обед была овсянка с бананом
+[2026-06-23 20:00 | assistant] Записал: ужин — курица с рисом, ~650 ккал
+[2026-06-22 12:45 | user] купил курицу грудку 2 кг
+[2026-06-21 21:10 | user] сырники на ужин сделал</pre>
+Кеша вставляет это в ответ с цитатами и датами.</div></div>
+</div>
+
+<!-- RRF table -->
+<details>
+  <summary>Как RRF работает — таблица рангов</summary>
+  <table class="tbl">
+    <thead><tr><th>Сообщение</th><th>Rank vec</th><th>Rank FTS</th><th>RRF score</th></tr></thead>
+    <tbody>
+      <tr><td>"заказал пиццу пепперони"</td><td class="w">1</td><td>—</td><td>1/61 = <strong>0.0164</strong></td></tr>
+      <tr><td>"овсянка с бананом"</td><td class="w">2</td><td>—</td><td>1/62 = <strong>0.0161</strong></td></tr>
+      <tr><td>"ел сырники вечером"</td><td>5</td><td class="w">1</td><td>1/65 + 1/61 = <strong>0.0318</strong> ←top!</td></tr>
+      <tr><td>"купил курицу"</td><td>3</td><td>—</td><td>1/63 = <strong>0.0159</strong></td></tr>
+      <tr><td>"поел нормально"</td><td>8</td><td class="w">2</td><td>1/68 + 1/62 = <strong>0.0308</strong></td></tr>
+    </tbody>
+  </table>
+  <p style="font:13px var(--sans);color:var(--ink-soft)">"ел сырники" &mdash; найден и вектором (rank 5) и FTS (rank 1, слово "ел") &rarr; суммарный RRF score выше всех. Гибрид побеждает.</p>
+</details>
+
+<!-- ===== 4. HYBRID SEARCH DEMO ===== -->
+<h2>4. Зачем гибридный поиск?</h2>
+<p>FTS5 находит <em>точные слова</em>. Вектор находит <em>похожий смысл</em>. Вместе &mdash; покрывают всё.</p>
+
+<div class="demo">
+  <input type="text" id="q" placeholder="Попробуй: что я ел, КБЖУ, ссора, пиццу, конфликт" oninput="runDemo()"/>
+  <div class="demo-cols">
+    <div class="demo-col fts"><h4>FTS5 (слово)</h4><div id="r-fts"></div></div>
+    <div class="demo-col vec"><h4>Вектор (смысл)</h4><div id="r-vec"></div></div>
+    <div class="demo-col hyb"><h4>Гибрид (RRF)</h4><div id="r-hyb"></div></div>
+  </div>
+</div>
+
+<!-- ===== 5. CONCURRENCY ===== -->
+<h2>5. Почему один поток?</h2>
+
+<div class="card">
+<h3>Проблема</h3>
+<p style="margin-bottom:.5rem">Embedding занимает 15-40мс (CPU). Если делать в event loop &mdash; <strong>бот замрёт для ВСЕХ чатов</strong> на это время. А SQLite-коннект нельзя шарить между потоками.</p>
+<h3>Решение</h3>
+<div class="flow">
+  <div class="flow-box">Event Loop (async)</div>
+  <span class="flow-arr">&rarr;</span>
+  <div class="flow-box hl2">run_in_executor</div>
+  <span class="flow-arr">&rarr;</span>
+  <div class="flow-box hl">ThreadPool(1)</div>
+</div>
+<ul style="font:14px var(--sans);padding-left:1.2rem;color:var(--ink-soft)">
+  <li><strong>max_workers=1</strong> &mdash; один поток владеет SQLite conn + embedder. Нет race conditions</li>
+  <li><strong>asyncio.Queue</strong> для индексации &mdash; запись в очередь мгновенная, не блокирует ответ</li>
+  <li><strong>run_in_executor</strong> для поиска &mdash; event loop свободен пока поток работает</li>
+  <li>Embedder загружается <strong>лениво</strong> при первом вызове, в том же потоке</li>
+</ul>
+</div>
+
+<!-- ===== 6. BACKFILL ===== -->
+<h2>6. Backfill старых сообщений</h2>
+<p>При старте бота <code>rag.backfill()</code> индексирует всё что ещё не в <code>vec.db</code>:</p>
+<pre>SELECT id, chat_id, role, content FROM msg.messages
+WHERE id NOT IN (SELECT message_id FROM indexed)
+  AND role != 'system'
+  AND trim(content) != ''
+ORDER BY id;</pre>
+<ul style="font:14px var(--sans);padding-left:1.2rem;color:var(--ink-soft)">
+  <li>Батчами по 64 сообщения &mdash; один embed-вызов на батч</li>
+  <li>Таблица <code>indexed</code> &mdash; идемпотентность: повторный запуск не дублирует</li>
+  <li>~100K сообщений = несколько минут разово</li>
+  <li>Работает в фоне через <code>asyncio.ensure_future(rag.run(loop, "backfill"))</code></li>
+</ul>
+
+<!-- ===== 7. ISOLATION ===== -->
+<h2>7. Изоляция чатов</h2>
+<p>Два юзера &mdash; два изолированных мира. Поиск <strong>всегда</strong> фильтрует по <code>chat_id</code>.</p>
+
+<div class="part-grid">
+  <div class="part-card part-max">
+    <div class="part-title" style="color:var(--accent)">chat_id: 720740564</div>
+    <div>Максим &mdash; свои сообщения, свои результаты поиска. Катины не видит.</div>
+  </div>
+  <div class="part-card part-kat">
+    <div class="part-title" style="color:var(--info)">chat_id: 893553748</div>
+    <div>Катя &mdash; свои сообщения, свои результаты. Максимовы не видит.</div>
+  </div>
+</div>
+
+<pre>-- vec_messages создаётся с PARTITION KEY:
+CREATE VIRTUAL TABLE vec_messages USING vec0(
+    message_id INTEGER PRIMARY KEY,
+    chat_id INTEGER PARTITION KEY,  -- шардинг!
+    role TEXT,
+    embedding FLOAT[384]
+);
+-- sqlite-vec физически шардит индекс по chat_id
+-- Поиск WHERE chat_id=X сканирует ТОЛЬКО свой шард</pre>
+
+<!-- ===== 8. FALLBACK ===== -->
+<h2>8. Что если RAG сломался?</h2>
+
+<table class="tbl">
+  <thead><tr><th>Сценарий</th><th>Что происходит</th><th>Бот работает?</th></tr></thead>
+  <tbody>
+    <tr><td>Модель не скачалась (HF недоступен)</td><td>Embedder = None. <code>search_memory</code> делает fallback на <code>LIKE '%query%'</code> из messages.db</td><td class="w">Да</td></tr>
+    <tr><td>vec.db corrupted</td><td>Дропаем vec.db + backfill из messages.db (source of truth)</td><td class="w">Да</td></tr>
+    <tr><td>OOM при загрузке модели</td><td>try/except, embedder=None, fallback LIKE</td><td class="w">Да</td></tr>
+    <tr><td>sqlite-vec обновился, формат сломался</td><td>DROP + CREATE + backfill. Индекс — производная, не source of truth</td><td class="w">Да</td></tr>
+    <tr><td>index_message упал на одном сообщении</td><td>Логируется ошибка, пропускается. Сообщение останется в messages.db, проиндексируется при следующем backfill</td><td class="w">Да</td></tr>
+  </tbody>
+</table>
+<p style="font:14px var(--sans);color:var(--ink-soft)"><strong>Принцип:</strong> messages.db — единственный source of truth. vec.db — кеш/индекс, восстановим за минуты. Бот НИКОГДА не падает из-за RAG.</p>
+
+<!-- ===== 9. RESOURCES ===== -->
+<h2>9. Ресурсы (реальные цифры VPS)</h2>
+<p>VPS: 3.5GB RAM, 2 CPU, 50GB диск, без GPU.</p>
+
+<div class="res-grid">
+  <div class="res">
+    <div class="res-label">RAM (модель)</div>
+    <div class="res-val" style="color:var(--neon)">~220 MB</div>
+    <div class="res-bar"><div class="res-fill" style="width:6%;background:var(--neon)"></div></div>
+    <div class="res-note">6% от 3.5GB</div>
+  </div>
+  <div class="res">
+    <div class="res-label">Диск (100K сообщений)</div>
+    <div class="res-val" style="color:var(--info)">~250 MB</div>
+    <div class="res-bar"><div class="res-fill" style="width:5%;background:var(--info)"></div></div>
+    <div class="res-note">vec.db ~160MB + FTS5 ~90MB</div>
+  </div>
+  <div class="res">
+    <div class="res-label">Embed (1 сообщение)</div>
+    <div class="res-val" style="color:var(--warn)">~25 мс</div>
+    <div class="res-bar"><div class="res-fill" style="width:3%;background:var(--warn)"></div></div>
+    <div class="res-note">В отдельном потоке</div>
+  </div>
+  <div class="res">
+    <div class="res-label">Поиск (end-to-end)</div>
+    <div class="res-val" style="color:var(--neon2)">30-80 мс</div>
+    <div class="res-bar"><div class="res-fill" style="width:8%;background:var(--neon2)"></div></div>
+    <div class="res-note">embed + KNN + FTS5 + RRF + JOIN</div>
+  </div>
+  <div class="res">
+    <div class="res-label">Backfill (10K)</div>
+    <div class="res-val" style="color:var(--accent)">~4 мин</div>
+    <div class="res-bar"><div class="res-fill" style="width:100%;background:var(--accent)"></div></div>
+    <div class="res-note">Разово при первом запуске</div>
+  </div>
+  <div class="res">
+    <div class="res-label">Стоимость</div>
+    <div class="res-val" style="color:var(--ok)">$0</div>
+    <div class="res-bar"><div class="res-fill" style="width:0"></div></div>
+    <div class="res-note">Всё локально, без API</div>
+  </div>
+</div>
+
+</main>
+
+<script>
+// Hybrid search demo
+const corpus = [
+  {text:"заказал пиццу пепперони", words:["заказал","пиццу","пепперони"], sem:["еда","заказ","пицца","фастфуд","ужин"]},
+  {text:"овсянка с бананом на завтрак", words:["овсянка","бананом","завтрак"], sem:["еда","завтрак","каша","фрукт","здоровое"]},
+  {text:"купил курицу грудку 2 кг", words:["купил","курицу","грудку","кг"], sem:["еда","покупка","мясо","белок","продукты"]},
+  {text:"КБЖУ за сегодня 2100 ккал", words:["кбжу","сегодня","ккал"], sem:["калории","питание","подсчёт","диета"]},
+  {text:"поссорились из-за посуды", words:["поссорились","посуды"], sem:["ссора","конфликт","отношения","злость","быт"]},
+  {text:"она психанула и ушла", words:["психанула","ушла"], sem:["ссора","конфликт","обида","злость","отношения"]},
+  {text:"помирились, купил цветы", words:["помирились","купил","цветы"], sem:["примирение","отношения","подарок","извинение"]},
+  {text:"деплой Кеши на VPS", words:["деплой","кеши","впс","vps"], sem:["работа","сервер","код","деплой","бот"]},
+  {text:"фикснул баг в response_stream", words:["фикснул","баг","response_stream"], sem:["работа","код","баг","фикс","разработка"]},
+  {text:"сырники на ужин сделал", words:["сырники","ужин","сделал"], sem:["еда","ужин","готовка","творог"]},
+];
+
+function runDemo(){
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  if(!q){['r-fts','r-vec','r-hyb'].forEach(id=>document.getElementById(id).innerHTML='');return}
+  const qw = q.split(/\s+/);
+
+  // FTS: exact word match
+  const fts = corpus.map((c,i)=>{
+    const hits = qw.filter(w=>c.words.some(cw=>cw.includes(w)));
+    return {i, score: hits.length, text:c.text};
+  }).filter(r=>r.score>0).sort((a,b)=>b.score-a.score);
+
+  // Vec: semantic similarity
+  const vec = corpus.map((c,i)=>{
+    const hits = qw.filter(w=>c.sem.some(s=>s.includes(w))||c.words.some(cw=>cw.includes(w)));
+    return {i, score: hits.length + (c.sem.some(s=>qw.some(w=>s.includes(w)))?0.5:0), text:c.text};
+  }).filter(r=>r.score>0).sort((a,b)=>b.score-a.score);
+
+  // RRF
+  const scores={};
+  fts.forEach((r,rank)=>{scores[r.i]=(scores[r.i]||0)+1/(60+rank)});
+  vec.forEach((r,rank)=>{scores[r.i]=(scores[r.i]||0)+1/(60+rank)});
+  const hyb = Object.entries(scores).map(([i,s])=>({i:+i,score:s,text:corpus[+i].text})).sort((a,b)=>b.score-a.score).slice(0,5);
+
+  render('r-fts', fts.slice(0,5));
+  render('r-vec', vec.slice(0,5));
+  render('r-hyb', hyb);
+}
+function render(id, items){
+  const el=document.getElementById(id);
+  if(!items.length){el.innerHTML='<div class="demo-item miss">Ничего</div>';return}
+  el.innerHTML=items.map(r=>`<div class="demo-item hit">${r.text}</div>`).join('');
+}
+runDemo();
+</script>
+</body>
+</html>

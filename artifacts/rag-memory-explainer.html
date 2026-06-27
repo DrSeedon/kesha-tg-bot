@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RAG-память Кеши — как это работает</title>
+  <style>
+    :root {
+      --bg: #0e0e12;
+      --surface: #16161c;
+      --surface-2: #1c1c24;
+      --border: #2a2a32;
+      --ink: #f1f1f4;
+      --ink-soft: #a8a8b3;
+      --accent: #7c3aed;
+      --accent-soft: #7c3aed33;
+      --ok: #22c55e;
+      --ok-soft: #22c55e22;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --danger-soft: #ef444422;
+      --info: #3b82f6;
+      --neon-green: #39ff14;
+      --neon-purple: #bf5af2;
+      --serif: Charter, "Iowan Old Style", ui-serif, Georgia, serif;
+      --sans: system-ui, -apple-system, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fafaf7; --surface: #ffffff; --surface-2: #f5f5f0;
+        --border: #e7e5df; --ink: #1a1a1f; --ink-soft: #555560;
+        --neon-green: #16a34a; --neon-purple: #7c3aed;
+        --ok-soft: #22c55e15; --danger-soft: #ef444415; --accent-soft: #7c3aed15;
+      }
+    }
+    @media print {
+      :root { --bg:#fff;--surface:#f8f8f8;--ink:#000;--ink-soft:#555;--border:#ddd; }
+      .no-print,button{display:none!important}
+      *{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0}
+    html{background:var(--bg);color:var(--ink);scroll-behavior:smooth}
+    body{font:17px/1.55 var(--serif);max-width:72ch;margin:3rem auto;padding:0 1.25rem}
+
+    h1{font:bold 2.2rem var(--sans);margin-bottom:.5rem;background:linear-gradient(135deg,var(--neon-green),var(--neon-purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    h2{font:bold 1.4rem var(--sans);margin:3rem 0 1rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+    h3{font:bold 1.1rem var(--sans);margin:1.5rem 0 .5rem}
+    p{margin-bottom:1rem}
+    .tldr{color:var(--ink-soft);font-size:1.05rem;margin-bottom:2rem;border-left:3px solid var(--neon-purple);padding-left:1rem}
+    .crumb{font:13px var(--sans);color:var(--ink-soft);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.25rem}
+    code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:.15em .4em;border-radius:4px}
+
+    /* Animations */
+    @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    @keyframes flowRight{from{transform:translateX(-10px);opacity:0}to{transform:translateX(0);opacity:1}}
+    .fade-up{animation:fadeUp .6s ease both}
+    .delay-1{animation-delay:.15s}.delay-2{animation-delay:.3s}.delay-3{animation-delay:.45s}.delay-4{animation-delay:.6s}
+
+    /* Cards */
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin-bottom:1rem}
+    .card.danger{border-color:var(--danger);background:var(--danger-soft)}
+    .card.ok{border-color:var(--ok);background:var(--ok-soft)}
+
+    /* Flow diagram */
+    .flow{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:1.5rem 0}
+    .flow-step{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.6rem 1rem;font:14px var(--sans);animation:flowRight .5s ease both;white-space:nowrap}
+    .flow-step.highlight{border-color:var(--neon-green);color:var(--neon-green);font-weight:600}
+    .flow-arrow{color:var(--ink-soft);font-size:1.2rem;animation:pulse 2s infinite}
+
+    /* Scatter plot */
+    .scatter-wrap{position:relative;width:100%;height:340px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:1rem 0}
+    .dot{position:absolute;width:10px;height:10px;border-radius:50%;cursor:pointer;transition:all .3s;font-size:0}
+    .dot:hover{transform:scale(2.5);z-index:10;font-size:11px;width:auto;height:auto;padding:4px 8px;border-radius:6px;background:var(--surface-2)!important;border:1px solid var(--neon-purple);color:var(--ink)}
+    .dot.cluster-food{background:var(--neon-green)}
+    .dot.cluster-fight{background:var(--danger)}
+    .dot.cluster-work{background:var(--info)}
+    .dot.cluster-misc{background:var(--ink-soft)}
+    .scatter-legend{display:flex;gap:1rem;margin-top:.5rem;font:13px var(--sans);color:var(--ink-soft);flex-wrap:wrap}
+    .scatter-legend span::before{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+    .legend-food::before{background:var(--neon-green)!important}
+    .legend-fight::before{background:var(--danger)!important}
+    .legend-work::before{background:var(--info)!important}
+
+    /* Search demo */
+    .search-demo{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem;margin:1rem 0}
+    .search-input{width:100%;padding:.6rem 1rem;font:15px var(--sans);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--ink);margin-bottom:1rem;outline:none}
+    .search-input:focus{border-color:var(--neon-purple)}
+    .search-results{display:grid;gap:.5rem}
+    .search-result{padding:.5rem .75rem;border-radius:6px;font:14px var(--sans);display:flex;justify-content:space-between;align-items:center;transition:all .3s}
+    .search-result.found{background:var(--ok-soft);border:1px solid var(--ok)}
+    .search-result.missed{background:var(--surface-2);border:1px solid var(--border);opacity:.4}
+    .search-result .score{font:12px var(--mono);color:var(--ink-soft)}
+    .search-tabs{display:flex;gap:0;margin-bottom:1rem;border-radius:6px;overflow:hidden;border:1px solid var(--border)}
+    .search-tab{flex:1;padding:.5rem;text-align:center;font:13px/1 var(--sans);font-weight:600;cursor:pointer;background:var(--surface-2);border:none;color:var(--ink-soft);transition:all .2s}
+    .search-tab.active{background:var(--accent);color:#fff}
+
+    /* Comparison table */
+    .cmp-table{width:100%;border-collapse:collapse;font:14px var(--sans);margin:1rem 0}
+    .cmp-table th{background:var(--surface-2);padding:.6rem .75rem;text-align:left;border-bottom:2px solid var(--border);font-weight:600;position:sticky;top:0}
+    .cmp-table td{padding:.5rem .75rem;border-bottom:1px solid var(--border);vertical-align:top}
+    .cmp-table tr:hover td{background:var(--accent-soft)}
+    .cmp-table .winner{color:var(--neon-green);font-weight:600}
+    .cmp-table .tag{display:inline-block;font:11px var(--sans);padding:2px 6px;border-radius:3px;font-weight:600}
+    .tag-yes{background:var(--ok-soft);color:var(--ok)}
+    .tag-no{background:var(--danger-soft);color:var(--danger)}
+    .tag-partial{background:#f59e0b22;color:var(--warn)}
+
+    /* Resource bars */
+    .resource-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0}
+    .resource-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem}
+    .resource-label{font:13px var(--sans);color:var(--ink-soft);margin-bottom:.25rem}
+    .resource-value{font:bold 1.5rem var(--sans);margin-bottom:.5rem}
+    .resource-bar{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden}
+    .resource-fill{height:100%;border-radius:4px;transition:width 1s ease}
+    .resource-note{font:12px var(--sans);color:var(--ink-soft);margin-top:.4rem}
+
+    /* Stack cards */
+    .stack-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0}
+    .stack-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem;transition:border-color .3s}
+    .stack-card:hover{border-color:var(--neon-purple)}
+    .stack-icon{font-size:2rem;margin-bottom:.5rem}
+    .stack-name{font:bold 1rem var(--sans);margin-bottom:.25rem}
+    .stack-desc{font:14px var(--sans);color:var(--ink-soft)}
+
+    /* Before/After */
+    .ba-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+    @media(max-width:600px){.ba-grid,.search-tabs{grid-template-columns:1fr;flex-direction:column}}
+    .ba-card{border-radius:10px;padding:1rem}
+    .ba-before{background:var(--danger-soft);border:1px solid var(--danger)}
+    .ba-after{background:var(--ok-soft);border:1px solid var(--ok)}
+    .ba-title{font:bold 14px var(--sans);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.05em}
+    .ba-before .ba-title{color:var(--danger)}
+    .ba-after .ba-title{color:var(--ok)}
+    .ba-list{list-style:none;padding:0;font:14px var(--sans)}
+    .ba-list li{padding:.25rem 0;padding-left:1.2rem;position:relative}
+    .ba-list li::before{position:absolute;left:0}
+    .ba-before .ba-list li::before{content:'✗';color:var(--danger)}
+    .ba-after .ba-list li::before{content:'✓';color:var(--ok)}
+
+    .msg-bubble{background:var(--surface-2);border-radius:12px;padding:.6rem 1rem;font:14px var(--sans);margin-bottom:.5rem;max-width:85%;position:relative}
+    .msg-bubble.user{margin-left:auto;background:var(--accent-soft);border:1px solid var(--accent)}
+    .msg-bubble.bot{margin-right:auto;border:1px solid var(--border)}
+    .msg-bubble .time{font:11px var(--mono);color:var(--ink-soft);margin-top:.25rem}
+    .msg-bubble.faded{opacity:.3}
+  </style>
+</head>
+<body>
+  <main>
+    <p class="crumb fade-up">Kesha TG Bot · Architecture</p>
+    <h1 class="fade-up delay-1">🧠 RAG-память Кеши</h1>
+    <p class="tldr fade-up delay-2">Кеша запоминает ВСЮ историю диалогов и находит нужное по смыслу — даже после сжатия контекста. Вместо «забыл после компакта» — «нашёл в 247 сообщений назад, вот цитата».</p>
+
+    <!-- 1. PROBLEM -->
+    <h2>😤 Проблема: контекст теряется</h2>
+    <p>Сейчас Кеша помнит только <strong>текущую сессию</strong>. Когда контекст заполняется на 95% — происходит <em>compact</em>: всё сжимается в краткое саммари. Детали исчезают навсегда.</p>
+
+    <div class="ba-grid fade-up">
+      <div class="ba-card ba-before">
+        <div class="ba-title">Сейчас (без RAG)</div>
+        <ul class="ba-list">
+          <li>Compact → детали теряются</li>
+          <li>«Что я ел в среду?» → «хз, не записал»</li>
+          <li>«Когда мы ссорились?» → «в саммари этого нет»</li>
+          <li>Каждая сессия с нуля</li>
+          <li>Логи есть, но только превью</li>
+        </ul>
+      </div>
+      <div class="ba-card ba-after">
+        <div class="ba-title">С RAG-памятью</div>
+        <ul class="ba-list">
+          <li>Compact не страшен — память в БД</li>
+          <li>«Что я ел?» → цитата с датой</li>
+          <li>«Когда ссорились?» → точные сообщения</li>
+          <li>Помнит ВСЮ историю навсегда</li>
+          <li>Поиск по смыслу, не по словам</li>
+        </ul>
+      </div>
+    </div>
+
+    <p>Пример — спрашиваешь Кешу после compact:</p>
+    <div style="max-width:400px;margin:1rem auto">
+      <div class="msg-bubble user">Когда я последний раз ругался с Катей?</div>
+      <div class="msg-bubble bot faded">🤷 Контекст сжат, деталей нет... Попробуй спросить конкретнее.</div>
+      <div style="text-align:center;font:bold 13px var(--sans);color:var(--danger);margin:.5rem 0">↑ БЕЗ RAG</div>
+      <div class="msg-bubble bot" style="opacity:1;border-color:var(--ok)">14 июня ты написал: «бля опять началось, она психанула из-за посуды». А 21 июня: «помирились, купил цветы».</div>
+      <div style="text-align:center;font:bold 13px var(--sans);color:var(--ok);margin:.5rem 0">↑ С RAG</div>
+    </div>
+
+    <!-- 2. HOW IT WORKS -->
+    <h2>⚡ Как работает RAG-память</h2>
+    <p>Каждое сообщение проходит через 4 шага:</p>
+
+    <div class="flow fade-up">
+      <div class="flow-step" style="animation-delay:.1s">💬 Сообщение</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step" style="animation-delay:.2s">🔢 Embedding</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step" style="animation-delay:.3s">💾 В базу</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step highlight" style="animation-delay:.4s">🔍 Поиск по смыслу</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step" style="animation-delay:.5s">💡 Ответ с цитатами</div>
+    </div>
+
+    <div class="card fade-up delay-1">
+      <h3>Что такое Embedding?</h3>
+      <p>Это «числовой отпечаток смысла». Модель читает текст и превращает его в массив из 384 чисел. <strong>Похожие по смыслу тексты получают похожие числа</strong> — даже если слова разные.</p>
+      <p style="font-family:var(--mono);font-size:13px;color:var(--ink-soft);margin-bottom:0">
+        "поссорились из-за посуды" → [0.12, -0.45, 0.78, ..., 0.33]<br>
+        "конфликт на кухне" → [0.11, -0.43, 0.76, ..., 0.31] ← <span style="color:var(--neon-green)">похожие!</span><br>
+        "купил новый ноутбук" → [-0.67, 0.22, -0.11, ..., 0.89] ← <span style="color:var(--danger)">далеко</span>
+      </p>
+    </div>
+
+    <!-- 3. SCATTER PLOT -->
+    <h2>🗺️ Как тексты живут в пространстве смыслов</h2>
+    <p>Наведи на точки — каждая это сообщение. Похожие по смыслу стоят рядом:</p>
+
+    <div class="scatter-wrap" id="scatter">
+      <!-- dots injected by JS -->
+    </div>
+    <div class="scatter-legend">
+      <span class="legend-food">🍕 Еда</span>
+      <span class="legend-fight">😡 Ссоры</span>
+      <span class="legend-work">💻 Работа</span>
+    </div>
+
+    <!-- 4. SEARCH COMPARISON -->
+    <h2>🔍 grep vs RAG — почувствуй разницу</h2>
+    <p>Одинаковый запрос, два типа поиска. RAG находит по <em>смыслу</em>, grep — только по точному слову:</p>
+
+    <div class="search-demo fade-up">
+      <div class="search-input" style="cursor:default;opacity:.7">Запрос: «ссора с Катей»</div>
+      <div class="search-tabs">
+        <button class="search-tab active" onclick="switchSearch('rag')">🧠 RAG (по смыслу)</button>
+        <button class="search-tab" onclick="switchSearch('grep')">📝 grep (по слову)</button>
+      </div>
+      <div class="search-results" id="search-results"></div>
+    </div>
+
+    <!-- 5. STACK -->
+    <h2>🏗️ Выбранный стек</h2>
+    <p>Три компонента — минимум зависимостей, всё локально, $0:</p>
+
+    <div class="stack-grid fade-up">
+      <div class="stack-card">
+        <div class="stack-icon">🗄️</div>
+        <div class="stack-name">sqlite-vec</div>
+        <div class="stack-desc">Расширение SQLite для векторов. Тот же файл что messages.db — ноль новых серверов. <code>pip install</code> и готово.</div>
+      </div>
+      <div class="stack-card">
+        <div class="stack-icon">🧠</div>
+        <div class="stack-name">mE5-small</div>
+        <div class="stack-desc">Модель для embedding. 120MB RAM, понимает русский, работает на CPU за 15-40мс. Через FastEmbed (без PyTorch).</div>
+      </div>
+      <div class="stack-card">
+        <div class="stack-icon">🔧</div>
+        <div class="stack-name">MCP tool</div>
+        <div class="stack-desc"><code>search_memory</code> — Кеша сам решает когда искать. Не тратит контекст на каждое «привет».</div>
+      </div>
+    </div>
+
+    <details style="margin:1rem 0">
+      <summary style="font:bold 14px var(--sans);cursor:pointer;color:var(--neon-purple)">Почему именно эти? (подробнее)</summary>
+      <div style="padding:1rem 0;font:14px var(--sans);color:var(--ink-soft)">
+        <p><strong>sqlite-vec вместо ChromaDB</strong> — ChromaDB тащит PyTorch (~2GB), держит всё в RAM, отдельный процесс. sqlite-vec — расширение нашего SQLite, один файл, ноль RAM overhead. На 100K сообщений brute-force скан за 10-40мс.</p>
+        <p><strong>mE5-small вместо mE5-large</strong> — large жрёт 2.2GB RAM и 100-250мс на embedding. Small — 120MB и 15-40мс. На коротких чат-сообщениях разница в качестве минимальна.</p>
+        <p><strong>MCP tool вместо auto-inject</strong> — auto-inject ищет и вставляет контекст на КАЖДОМ сообщении. На «ок», «да», «привет» — бессмысленный расход CPU и контекста. Tool = Кеша сам решает.</p>
+      </div>
+    </details>
+
+    <!-- 6. RESOURCES -->
+    <h2>📊 Сколько жрёт ресурсов</h2>
+    <p>На нашем VPS (3.5GB RAM, 2 CPU, без GPU):</p>
+
+    <div class="resource-grid fade-up">
+      <div class="resource-card">
+        <div class="resource-label">RAM (модель в памяти)</div>
+        <div class="resource-value" style="color:var(--neon-green)">~150 MB</div>
+        <div class="resource-bar"><div class="resource-fill" style="width:4%;background:var(--neon-green)"></div></div>
+        <div class="resource-note">4% от 3.5GB — незаметно</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-label">Диск (индекс 100K сообщений)</div>
+        <div class="resource-value" style="color:var(--info)">~250 MB</div>
+        <div class="resource-bar"><div class="resource-fill" style="width:5%;background:var(--info)"></div></div>
+        <div class="resource-note">0.5% от 50GB свободных</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-label">Поиск (end-to-end)</div>
+        <div class="resource-value" style="color:var(--neon-purple)">30-80 мс</div>
+        <div class="resource-bar"><div class="resource-fill" style="width:8%;background:var(--neon-purple)"></div></div>
+        <div class="resource-note">Незаметно для юзера</div>
+      </div>
+      <div class="resource-card">
+        <div class="resource-label">Стоимость</div>
+        <div class="resource-value" style="color:var(--ok)">$0</div>
+        <div class="resource-bar"><div class="resource-fill" style="width:0%;background:var(--ok)"></div></div>
+        <div class="resource-note">Всё локально, без API</div>
+      </div>
+    </div>
+
+    <!-- 7. COMPARISON TABLE -->
+    <h2>⚖️ Сравнение аналогов</h2>
+
+    <div style="overflow-x:auto">
+    <table class="cmp-table fade-up">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="winner">sqlite-vec ✅</th>
+          <th>ChromaDB</th>
+          <th>LanceDB</th>
+          <th>zvec</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Тип</strong></td>
+          <td>SQLite extension</td>
+          <td>In-memory + persist</td>
+          <td>Disk (Arrow/mmap)</td>
+          <td>Disk ANN (Rust)</td>
+        </tr>
+        <tr>
+          <td><strong>Зависимости</strong></td>
+          <td class="winner">~0 (pip wheel)</td>
+          <td>onnx/torch (~2GB)</td>
+          <td>pyarrow + Rust</td>
+          <td>C++ bindings</td>
+        </tr>
+        <tr>
+          <td><strong>RAM</strong></td>
+          <td class="winner">Минимум</td>
+          <td>Весь датасет</td>
+          <td>mmap, ок</td>
+          <td>Низкий</td>
+        </tr>
+        <tr>
+          <td><strong>Один файл</strong></td>
+          <td><span class="tag tag-yes">Да</span></td>
+          <td><span class="tag tag-no">Каталог</span></td>
+          <td><span class="tag tag-no">Каталог</span></td>
+          <td><span class="tag tag-no">Каталог</span></td>
+        </tr>
+        <tr>
+          <td><strong>Гибрид FTS+vec</strong></td>
+          <td><span class="tag tag-yes">Нативно</span></td>
+          <td><span class="tag tag-partial">Частично</span></td>
+          <td><span class="tag tag-yes">Да</span></td>
+          <td><span class="tag tag-yes">Да</span></td>
+        </tr>
+        <tr>
+          <td><strong>ANN индекс</strong></td>
+          <td><span class="tag tag-no">Brute-force</span></td>
+          <td><span class="tag tag-yes">HNSW</span></td>
+          <td><span class="tag tag-yes">IVF-PQ</span></td>
+          <td><span class="tag tag-yes">Disk ANN</span></td>
+        </tr>
+        <tr>
+          <td><strong>Нужен для 100K?</strong></td>
+          <td class="winner">10-40мс без ANN</td>
+          <td>Оверкилл</td>
+          <td>Оверкилл</td>
+          <td>Оверкилл</td>
+        </tr>
+        <tr>
+          <td><strong>Наш стек</strong></td>
+          <td class="winner">SQLite WAL ✓</td>
+          <td>Отдельный</td>
+          <td>Отдельный</td>
+          <td>Отдельный</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="card ok" style="margin-top:1.5rem">
+      <h3 style="color:var(--ok)">💡 Вывод</h3>
+      <p style="margin-bottom:0">ANN-индекс (ChromaDB/LanceDB/zvec) нужен от <strong>миллионов</strong> векторов. У нас 100K максимум — brute-force sqlite-vec справляется за 10-40мс. Зачем тащить отдельный сервер ради того что SQLite делает из коробки?</p>
+    </div>
+
+  </main>
+
+  <script>
+    // Scatter plot data — simulated 2D projection of embeddings
+    const messages = [
+      {x:15,y:25,text:"что я ел на завтрак",cluster:"food"},
+      {x:18,y:30,text:"овсянка с бананом",cluster:"food"},
+      {x:12,y:22,text:"заказал пиццу",cluster:"food"},
+      {x:20,y:28,text:"надо купить курицу",cluster:"food"},
+      {x:16,y:35,text:"КБЖУ за сегодня",cluster:"food"},
+      {x:14,y:20,text:"сырники на ужин",cluster:"food"},
+      {x:70,y:60,text:"она опять психанула",cluster:"fight"},
+      {x:75,y:55,text:"поссорились из-за посуды",cluster:"fight"},
+      {x:72,y:65,text:"бля конфликт на ровном месте",cluster:"fight"},
+      {x:68,y:58,text:"помирились купил цветы",cluster:"fight"},
+      {x:78,y:62,text:"обиделась и ушла",cluster:"fight"},
+      {x:45,y:75,text:"пушнул код на VPS",cluster:"work"},
+      {x:50,y:80,text:"деплой Кеши на прод",cluster:"work"},
+      {x:48,y:70,text:"фикснул баг в response_stream",cluster:"work"},
+      {x:42,y:78,text:"ревью кода через Codex",cluster:"work"},
+      {x:55,y:82,text:"обновил зависимости",cluster:"work"},
+      {x:52,y:73,text:"настроил SSH туннель",cluster:"work"},
+      {x:35,y:45,text:"привет",cluster:"misc"},
+      {x:80,y:25,text:"спокойной ночи",cluster:"misc"},
+      {x:60,y:40,text:"ок",cluster:"misc"},
+    ];
+
+    const scatter = document.getElementById('scatter');
+    const sw = scatter.offsetWidth, sh = scatter.offsetHeight;
+    messages.forEach(m => {
+      const dot = document.createElement('div');
+      dot.className = `dot cluster-${m.cluster}`;
+      dot.style.left = (m.x / 100 * (sw - 20) + 5) + 'px';
+      dot.style.top = (m.y / 100 * (sh - 20) + 5) + 'px';
+      dot.textContent = m.text;
+      dot.title = m.text;
+      scatter.appendChild(dot);
+    });
+
+    // Search demo
+    const searchData = {
+      rag: [
+        {text:'"поссорились из-за посуды" — 14 июня',found:true,score:'0.92'},
+        {text:'"бля конфликт на ровном месте" — 14 июня',found:true,score:'0.88'},
+        {text:'"она опять психанула" — 21 июня',found:true,score:'0.85'},
+        {text:'"обиделась и ушла" — 21 июня',found:true,score:'0.82'},
+        {text:'"помирились купил цветы" — 22 июня',found:true,score:'0.79'},
+      ],
+      grep: [
+        {text:'"поссорились из-за посуды" — 14 июня',found:false,score:'нет слова "ссора"'},
+        {text:'"бля конфликт на ровном месте" — 14 июня',found:false,score:'нет слова "ссора"'},
+        {text:'"она опять психанула" — 21 июня',found:false,score:'нет слова "ссора"'},
+        {text:'"обиделась и ушла" — 21 июня',found:false,score:'нет слова "ссора"'},
+        {text:'Ничего не найдено 🤷',found:false,score:'grep "ссора" = 0 результатов'},
+      ]
+    };
+
+    function switchSearch(mode) {
+      document.querySelectorAll('.search-tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      const container = document.getElementById('search-results');
+      container.innerHTML = '';
+      searchData[mode].forEach((r, i) => {
+        const div = document.createElement('div');
+        div.className = `search-result ${r.found ? 'found' : 'missed'}`;
+        div.style.animationDelay = (i * 0.1) + 's';
+        div.innerHTML = `<span>${r.found ? '✓' : '✗'} ${r.text}</span><span class="score">${r.score}</span>`;
+        container.appendChild(div);
+      });
+    }
+    switchSearch('rag');
+  </script>
+</body>
+</html>
