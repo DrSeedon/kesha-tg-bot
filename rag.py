@@ -16,14 +16,14 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# e5-base (нативно в FastEmbed, ~280MB, dim 768). e5-large OOM'ил VPS (2.9GB RAM).
-MODEL_NAME = "intfloat/multilingual-e5-base"
+# mpnet-base: лучше MiniLM, ~400MB, dim 768. e5-large OOM'ил VPS (2.9GB RAM).
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 MODEL_FILE = None
 DIM = 768
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
 # v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
 
 # Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
@@ -132,9 +132,11 @@ class RagMemory:
             from fastembed import TextEmbedding
             self._embedder = TextEmbedding(model_name=MODEL_NAME)
             logger.info(f"RAG embedder loaded: {MODEL_NAME}")
-        prefix = "query: " if is_query else "passage: "
-        prefixed = [prefix + t for t in texts]
-        return [list(map(float, v)) for v in self._embedder.embed(prefixed)]
+        # E5 models need "query: "/"passage: " prefix, mpnet/MiniLM don't
+        if "e5" in MODEL_NAME:
+            prefix = "query: " if is_query else "passage: "
+            texts = [prefix + t for t in texts]
+        return [list(map(float, v)) for v in self._embedder.embed(texts)]
 
     def _is_indexed(self, message_id: int) -> bool:
         return self.conn.execute(
