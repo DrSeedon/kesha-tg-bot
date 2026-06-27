@@ -16,7 +16,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **config.py** | ~200 | Env, logging, STRINGS, t(), ALLOWED_MODELS |
 | **chat_state.py** | ~620 | ChatPhase state machine, PendingEntry, ChatState, ChatRegistry |
 | **handlers.py** | ~540 | Все @dp.message handlers, set_commands() |
-| **response_stream.py** | ~240 | _ask() — streaming, drafts, ToolStatusTracker, retries |
+| **response_stream.py** | ~270 | _ask() — streaming via send+edit_message_text, ToolStatusTracker, retries |
 | **telegram_io.py** | ~170 | user_prefix, _send_safe, split_msg, typing_loop, draft helpers |
 | **media.py** | ~200 | download_file, transcribe (aiohttp), caches, cleanup |
 | **claude_session.py** | ~300 | ClaudeSDKClient wrapper (file-only session persistence), inject, interrupt, can_use_tool |

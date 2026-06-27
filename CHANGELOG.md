@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.4.0 — 2026-06-27
+
+### Changed
+- 🔄 **Стриминг: SendMessageDraft → edit_message_text** — Draft-стриминг блокировал ввод юзера пока бот печатает. Заменён на классический send+edit. Первый чанк отправляется мгновенно, последующие — edit каждые 1.0s (было 0.3s с drafts). Трейдофф осознанный: чуть реже обновление, зато юзер может печатать параллельно.
+- Файлы: `response_stream.py` (+102/-73), `telegram_io.py` (-7 строк: удалён `_next_draft_id`)
+- `ToolStatusTracker` не затронут — уже использовал edit_message_text
+
+### Removed
+- `SendMessageDraft` import и вся draft-логика (`_draft_update`, `draft_id`, `draft_has_text`)
+- `_next_draft_id()` из `telegram_io.py`
+
+### Fixed
+- EC-6: сброс `current_msg_id` при reconnect/retry во всех трёх retry paths (stall, error chunk, outer exception) — без этого бот пытался бы редактировать сообщение от предыдущей попытки
+
 ## v2.3.2 — 2026-06-27
 
 ### Changed (RAG качество 2.2/5 → 4.3/5 — три итерации)

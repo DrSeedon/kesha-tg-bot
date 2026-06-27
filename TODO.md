@@ -6,7 +6,6 @@
 - [ ] **Мост Кеша↔Orchestra** (запрос Александра, НЕ срочно, ждёт Максима) — дать боту дёргать Orchestra-агентов: спавн воркеров, отправка сообщений, статусы. Через REST API `http://147.45.101.84:8888` (Bearer INTERNAL_TOKEN) + SSH-туннель/whitelist по IP. Реализация: MCP-тулы orchestra_spawn/send/status в kesha_tools.py
 - [ ] **RAG auto-inject** (опц.) — авто-подмешивать top-K из истории в контекст перед ответом. Сейчас tool-based (search_memory, e5-small int8, 4.3/5 качество). Решить после наблюдения
 - [ ] **RAG: лучшая модель при апгрейде VPS** — e5-large (5/5) OOM'ит 2.9GB VPS. При апгрейде RAM до 4GB+ или переносе на NL VPS (11GB) — переключить MODEL_NAME на e5-large
-- [ ] **Убрать стриминг (SendMessageDraft) → edit-message** — Draft-стриминг блокирует юзера от отправки новых сообщений пока бот печатает. Заменить на классический подход: send_message → edit_message по мере поступления чанков. Файл: `response_stream.py` (_draft_update, _finalize_text_block, SendMessageDraft). Воркер: stream-to-edit (research+plan)
 - [ ] **Inject batching** — при множественных inject'ах за <500ms склеивать в один query (сейчас 20 forwarded = 20 отдельных inject → Claude получает 20 прерываний)
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling
