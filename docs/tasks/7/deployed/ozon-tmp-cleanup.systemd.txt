@@ -1,0 +1,17 @@
+[Unit]
+Description=Clean stale Playwright temp dirs for ozon MCP
+
+[Service]
+Type=oneshot
+User=ozon
+ExecStart=/opt/ozon-mcp-server/clean-tmp.sh
+---TIMER---
+[Unit]
+Description=Daily cleanup of stale Playwright temp dirs
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
