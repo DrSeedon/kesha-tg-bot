@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.5.0 — 2026-07-03
+
+### Changed (RAG модель: e5-small int8 → bge-m3 int8 — переезд на Contabo 8GB)
+- 🎯 **Модель: e5-small int8 → bge-m3 int8** (`AlpEge/bge-m3-onnx-int8`, single-file `model_quantized.onnx`, dim 384→1024). Кеша переехала на Contabo (8GB RAM, ~6GB free) — старый Timeweb 2.9GB упирался в OOM и держал компромиссную e5-small. Теперь влезает топовая модель.
+- 📊 **Почему bge-m3, а не e5-large (прошлый фаворит):** бенчмарк на боевых 677 msgs. Метрика — cosine separation margin (насколько релевантное отрывается от мусора на абстрактных русских запросах): **bge-m3 +0.237 vs e5-large +0.063 vs e5-small +0.055 — в ~4x шире**. E5 страдает анизотропией (косинусы сжаты 0.75-0.85, даже мусор 0.78 → margin крошечный), bge-m3 растягивает 0.27-0.74 → надёжнее ранжирует худшие кейсы (еда/КБЖУ, психология — где были жалобы 1.5-2/5).
+- 🔧 **CLS-пулинг** (bge-m3), не MEAN (E5). `add_custom_model(pooling=PoolingType.CLS)` через новый `MODEL_POOLING="cls"`.
+- 🔧 **Без префиксов query:/passage:** — хрупкую ветку `if "e5" in MODEL_NAME` заменил на явный флаг `MODEL_PREFIX=False`. bge-m3 не требует E5-префиксов.
+- 🔧 **SCHEMA_VERSION 6→7** — дроп vec.db (dim 384≠1024) + backfill 685 msgs на bge-m3. `messages.db` НЕ тронут (только эмбеддинги пересчёт).
+
+### Reasoning
+- **single-file model_quantized.onnx ОБЯЗАТЕЛЬНО.** fp32-модели с внешним `model.onnx_data` (нативный e5-large, bge-m3 fp32) ПАДАЮТ в этом ORT: `External data path escapes model directory`. Работают только self-contained int8-репо.
+- **MODEL_NAME ≠ нативному имени FastEmbed.** Иначе guard `if MODEL_NAME not in supported_models` пропускает `add_custom_model` → FastEmbed берёт нативный fp32 → краш. Поэтому MODEL_NAME = кастомное имя репо.
+
+### Прод-замеры (Contabo, боевые 685 msgs, деплой 2026-07-03)
+- **RAM: бот RSS 1248MB** (было 665MB на e5-small; ожидали ~1.8GB). Available 6GB, swap 0 — OOM исключён.
+- **Latency поиска: 58-78ms** (search only; холодная загрузка модели 9s однократно). Незаметно для 2 юзеров.
+- **Качество: 5/5 контрольных запросов → релевантное на топ-1**, включая еда/КБЖУ и психологию (прежние провальные кейсы). backfill ~24 мин (VPS AVX2, много длинных голосовых → много чанков).
+- **messages.db цел** (685 до = 685 после), 0 errors/Conflict, single poller.
+
+### Файлы
+- `rag.py` (+16/−11), `tests/test_rag.py` (+34: тесты prefix-логики off/on)
+
 ## v2.4.0 — 2026-06-27
 
 ### Changed

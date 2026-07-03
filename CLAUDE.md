@@ -25,7 +25,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **kesha_tools.py** | ~400 | MCP tools: send_media, reminders, config, search_memory, run_on_laptop |
 | **reminders.py** | ~360 | SQLite reminders (plain/urgent_llm/lazy_llm) |
 | **message_log.py** | ~80 | SQLite full message logging (user+assistant), on_message callback for RAG |
-| **rag.py** | ~260 | RAG semantic memory: e5-small int8 + sqlite-vec + FTS5 hybrid search + chunking |
+| **rag.py** | ~260 | RAG semantic memory: bge-m3 int8 + sqlite-vec + FTS5 hybrid search + chunking |
 
 ### ChatState — центр per-chat state
 
@@ -64,7 +64,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - `set_debounce`, `toggle_debug`, `get_bot_status`, `restart_bot`
 - `send_photo`, `send_file`, `send_video`, `send_audio`, `send_voice`
 - `create_reminder`, `list_reminders`, `cancel_reminder`, `update_reminder`
-- `search_memory` — RAG семантический поиск по всей истории диалогов (e5-small int8 + sqlite-vec + FTS5 hybrid)
+- `search_memory` — RAG семантический поиск по всей истории диалогов (bge-m3 int8 + sqlite-vec + FTS5 hybrid)
 - `run_on_laptop` — SSH команды на ноуте через reverse tunnel (whitelist)
 - Context compaction is automatic (95% threshold) and via /compact command — no MCP tool
 - `react` — emoji reactions
@@ -124,9 +124,13 @@ ssh deploy@72.56.235.40 "sudo -n systemctl status kesha-bot-vps --no-pager | hea
 - v2.3.0: MiniLM + sqlite-vec + FTS5 hybrid → качество 2.2/5
 - v2.3.1: e5-large int8 (561MB) → OOM на VPS 2.9GB → mpnet тоже OOM → откат на MiniLM
 - v2.3.2: e5-small int8 (Xenova/multilingual-e5-small, 118MB, ONNX) + batch_size=16 + arena-off → качество 4.3/5, RAM стабильный
-- **Root cause OOM**: FastEmbed грузил все docs одним вызовом → onnxruntime arena раздувалась. Fix: batch_size=16 + enable_cpu_mem_arena=False
-- **VPS RAM budget**: 2.9GB total, Кеша ~966MB (бот+CLI+5 MCP+embedder), 1.4GB available, swap 0
-- Кеша сам отключал RAG на VPS (закомментировал import rag в bot.py) когда OOM убил VPN — потом восстановили через `git checkout -- bot.py`
+- **v2.5.0 (2026-07-03): e5-small → bge-m3 int8** (`AlpEge/bge-m3-onnx-int8`, single-file model_quantized.onnx, dim 1024, SCHEMA v7). Переезд на Contabo 8GB снял RAM-ограничение. Выбор по separation margin на боевых 677 msgs: bge-m3 +0.237 vs e5-large +0.063 vs e5-small +0.055 (4x шире). bge-m3 = CLS-пулинг, БЕЗ query:/passage: префиксов (флаг MODEL_PREFIX=False).
+- **Прод-замеры bge-m3 (Contabo)**: бот RSS 1248MB, latency поиска 58-78ms, 5/5 контрольных → топ-1 (включая еда/психология). backfill 685 msgs ~24 мин. messages.db цел.
+- **⚠️ Модель ОБЯЗАНА быть single-file `model_quantized.onnx`** — fp32 с external `model.onnx_data` падает в ORT (`External data path escapes model directory`). Так упали нативный e5-large и bge-m3 fp32.
+- **⚠️ MODEL_NAME ≠ нативному имени FastEmbed** — иначе `add_custom_model` пропускается → fp32 → краш. Ставим кастомное имя репо.
+- **Root cause OOM (историческое, Timeweb 2.9GB)**: FastEmbed грузил все docs одним вызовом → onnxruntime arena раздувалась. Fix: batch_size=16 + enable_cpu_mem_arena=False (оставлены, на 8GB не критичны но не мешают)
+- **VPS RAM budget (Contabo)**: 8GB total, бот с bge-m3 ~1248MB, ~6GB available, swap 0. Запас для будущего Ozon Playwright (~350MB) есть.
+- Кеша сам отключал RAG на старом VPS (закомментировал import rag в bot.py) когда OOM убил VPN — потом восстановили через `git checkout -- bot.py`
 
 ### Reverse SSH Tunnel
 - Ноут → VPS (tunnel@72.56.235.40) → порт 2222 на localhost
