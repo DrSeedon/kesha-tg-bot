@@ -218,3 +218,36 @@ Moscow), **green Ozon-Bank price is served** (`cardPrice`), **delivery date is a
 JSON (would need a separate brittle call), **search facets are present** (achievable, medium
 effort, category-dynamic). The 632-vs-708 gap is a non-critical variant/drift artifact, not a bug.
 No implementation — research only.
+
+---
+
+## Follow-up — is the account-green price a fixed % of the public price? (LIKELY, small sample)
+
+**Question:** can we estimate the logged-in Ozon-Account green price WITHOUT logging in, by
+multiplying the public price the MCP sees by a constant?
+
+**Measured (3 SKUs, Krasnoyarsk, live MCP):**
+| SKU | product | cardPrice (MCP, «С банками») | price (regular) | user green (account) | green/cardPrice | green/price |
+|---|---|---|---|---|---|---|
+| 247385222 | Masculan 20шт | 916 | 964 | 818 | 0.8930 | 0.8485 |
+| 1446334512 | Пелёнки 60x90 30шт | 708 | 745 | 632 | 0.8927 | 0.8483 |
+| 276393100 | My Puppy WC | 1672 | 1760 | 1494 | 0.8935 | 0.8489 |
+
+**green / cardPrice = 0.893 ± 0.0005** (spread 0.0009 across all three → **±0.1%**).
+green / price = 0.849 (spread 0.0005).
+
+**Finding:** the account-green price is a **near-constant ~89.3% of the public `cardPrice`**
+(≈ **10.7% below** «С банками»), stable to ±0.1% across 3 unrelated products/categories/price
+points (916/708/1672 ₽). So `estimatedAccountPrice ≈ cardPrice * 0.893` would land within a few
+rubles.
+
+**Confidence: LIKELY (not CONFIRMED).** Only 3 SKUs, all consumer goods, one moment in time. This
+looks like a global "10% Ozon-Account/Premium" discount tier rather than per-product, but 3 points
+can't rule out: category-specific rates, promo windows, per-seller Ozon-Account participation
+(some sellers may not offer the account discount → coefficient breaks), or rounding rules on
+Ozon's side. If used, present as **"≈ X ₽ с Ozon-аккаунтом (оценка)"**, never as the exact price,
+and widen the sample (10+ SKUs across categories) before trusting it as a constant.
+
+**Fixability:** trivial — multiply the MCP `cardPrice` by ~0.893 and label it an estimate. No login
+needed. But it's an APPROXIMATION with the caveats above; the exact account price still requires an
+authenticated session.
