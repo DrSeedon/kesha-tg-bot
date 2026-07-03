@@ -1,7 +1,7 @@
 # Migration Report — Kesha Bot: Timeweb → Contabo (#6)
 
 **Date:** 2026-07-03
-**Status:** ✅ Cutover complete, bot LIVE on Contabo. Awaiting user live-tests (Phase G) before Timeweb decommission (Phase H).
+**Status:** ✅ **MIGRATION COMPLETE.** Bot LIVE on Contabo, live-tests passed, Timeweb decommissioned (stop+disable, data kept as rollback).
 
 ## Result
 Bot migrated from Timeweb (72.56.235.40, Moscow, 2.9GB) to **Contabo (158.220.127.161, France, 8GB)**. Downtime ≈90s. **Zero data loss** — all DBs, RAG, session histories, reminders, secrets, MCP servers migrated and verified.
@@ -39,8 +39,18 @@ Contabo is in France → direct reach to Anthropic/Telegram/Deepgram APIs (verif
 ## Rollback (still available)
 Timeweb data untouched (only READ + checkpoint, no deletes). If Contabo fails: stop Contabo (pgrep gate) → start Timeweb → re-point tunnel. See plan.md ROLLBACK.
 
-## Remaining
-- User runs `sudo bash /tmp/repoint-tunnel.sh` (F5).
-- User confirms 7 Phase G live tests via Telegram.
-- Then Phase H: `systemctl stop + disable kesha-bot-vps` on Timeweb (NO data deletion).
-- Then update CLAUDE.md (new IP/paths/no-proxy troubleshooting) + `~/.claude/docs/vps-registry.md`.
+## Phase G — live verification (PASSED)
+User confirmed via Telegram dialogue: bot answers + streaming, session memory/context preserved, MCP servers connected, self-diagnosed via Bash (hostname/free/curl → confirmed Contabo, 7.8G RAM). F5 tunnel re-pointed (`tunnel@158.220.127.161` active) → `run_on_laptop` live.
+
+## Phase H — Timeweb decommission (DONE, no data deletion)
+- Timeweb `kesha-bot-vps`: `is-active=inactive`, `is-enabled=disabled` (won't restart after reboot).
+- pgrep gate: no `bot.py` process on Timeweb.
+- Contabo: `is-active`, **NO Conflict** (single poller confirmed), no errors, up since 08:14:52 CEST.
+- Timeweb data left INTACT as rollback: messages.db 1.15M, vec.db 5.0M, reminders.db, `~/.claude/projects/-opt-cog-second-brain` 242M.
+
+## Docs updated
+- Project `CLAUDE.md`: new IP `158.220.127.161`, no-proxy troubleshooting, Timeweb decommissioned note, Xray-don't-touch warning.
+- `~/.claude/docs/vps-registry.md`: Contabo now hosts Kesha; Timeweb entry struck through.
+
+## Migration complete ✅
+Zero data loss. Downtime ≈90s. Proxy stack removed. Bot healthy on Contabo (8GB, France, direct API). Rollback still available on Timeweb if ever needed.
