@@ -261,12 +261,12 @@ Approved: expose the estimated Ozon-Account price as a field, no login.
 - `src/parse.js`: `OUR_PRICE_FACTOR = 0.893`, `ourPrice(cardPrice) = Math.round(cardPrice * 0.893)`.
   Added `ourPrice` to BOTH search items and `parseDetails` (computed from the same public
   cardPrice the tool already returns as `price`).
-- `src/index.js`: tool descriptions updated to mention `ourPrice` (≈ price×0.893, approximate).
+- `src/index.js`: tool descriptions updated to mention `ourPrice` (≈ price×0.8949, approximate).
 - Tool output now: `price` (public «С банками»), `ourPrice` (≈ Ozon-Account estimate), `priceRegular`
   (details only), `oldPrice`.
 
-**Verified live:** `details(1446334512)` → `price=708, ourPrice=632` (708×0.893=632.2→632) = exact
+**Verified live:** `details(1446334512)` → `price=708, ourPrice=632` (708×0.8949=632.2→632) = exact
 match to the user's green price. Search carries `ourPrice` too. Offline parser tests pass.
 
-**Caveat shipped in the description:** it is an APPROXIMATION (×0.893), not the exact account price
+**Caveat shipped in the description:** it is an APPROXIMATION (×0.8949), not the exact account price
 (see LIKELY-confidence caveats above: 3-SKU sample, may break on category/promo/seller variation).

@@ -49,7 +49,7 @@
 >     description:
 >       "Search products on the Ozon marketplace (ozon.ru). Returns a list of products with name, " +
 >       "price (public 'С банками', RUB numeric), ourPrice (≈ price with an Ozon-Account, estimated " +
->       "as price×0.893 — approximate, not exact), old price, discount, rating, review count, brand, " +
+>       "as price×0.8949 — approximate, not exact), old price, discount, rating, review count, brand, " +
 >       "image and a clean product URL. Use this to find products and compare prices, then hand the URLs to the user.",
 >     inputSchema: {
 >       query: z.string().min(1).describe('Search query, e.g. "iphone 15", "плед 150х200", "носки мужские"'),
@@ -72,7 +72,7 @@
 >     title: "Get Ozon product details",
 >     description:
 >       "Get full details for one Ozon product: name, price (public 'С банками'), ourPrice (≈ price " +
->       "with an Ozon-Account, estimated as price×0.893 — approximate, not exact), priceRegular, " +
+>       "with an Ozon-Account, estimated as price×0.8949 — approximate, not exact), priceRegular, " +
 >       "oldPrice, availability, product rating, seller (name + rating), images, key characteristics, " +
 >       "and the product description (text and/or banner image URLs). Accepts an SKU, a full product URL, or a slug.",
 >     inputSchema: {

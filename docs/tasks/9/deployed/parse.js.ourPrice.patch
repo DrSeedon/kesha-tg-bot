@@ -4,9 +4,9 @@
 > // Kept side-effect-free so it can be unit-tested against saved samples.
 > 
 > // The Ozon-Account ("наша") price is not in the anonymous JSON — only a logged-in session gets it.
-> // Measured across SKUs it is a near-constant 0.893 of the public "С банками" (cardPrice), ±0.1%.
+> // Measured across SKUs it is a near-constant 0.8949 of the public "С банками" (cardPrice), ±0.1%.
 > // So estimate it as an APPROXIMATION (never the exact price). See docs/tasks/9/research.md.
-> const OUR_PRICE_FACTOR = 0.893;
+> const OUR_PRICE_FACTOR = 0.8949;
 > const ourPrice = (cardPrice) => (cardPrice ? Math.round(cardPrice * OUR_PRICE_FACTOR) : null);
 > 
 > /**
