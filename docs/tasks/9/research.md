@@ -176,6 +176,42 @@ Facts gathered from raw JSON before stopping:
 from JSON, tool returns the correct `cardPrice`). Most likely a **variant/color sub-SKU or price
 drift** — but user deemed the ~76₽ gap immaterial and stopped the investigation. No fix warranted.
 
+### Deep re-investigation (user reopened) — ROOT CAUSE: anonymous MCP vs logged-in user (CONFIRMED)
+
+The user reopened to understand the 632(user) vs 708(MCP) gap. Full raw-JSON dive settles it.
+
+**Ruled out, with evidence:**
+- **Region** — MCP: `city=Красноярск, areaId=31498, lat=56.01479, pickup=Красноярск, ул.Республики
+  49П`. Same areaId as the user. Not the cause.
+- **Wrong price field** — dumped EVERY price in the response. Only `cardPrice=708 ₽`, `price=745 ₽`,
+  `originalPrice=1 999 ₽` (webPrice). No other price widget carries a number. `632` and `702` appear
+  **0 times as a price** (`632 ₽`:0, `702 ₽`:0; the 4 raw "632" hits are id substrings like
+  `909632`). The tool reads the correct field.
+- **Variant** — siblings priced 555/648/815/1179; none is 632. Base SKU = active бронза/30/600x900.
+- **Price drift** — 708 is STABLE across 3 pulls (708, 708, [transient fetch glitch]). Not drift.
+- **Banks modal** — `/modal/pdpListOfBanks` returns EMPTY anonymously (no per-bank prices without login).
+
+**The cause — the JSON literally shows a THIRD price tier that only fills for a logged-in account:**
+- `webSale` widget tracks **three** price tiers in `cellTrackingInfo.uis`:
+  `clickDefault` (regular 745), **`ozonCard`** (С банками 708), **`premiumSubscribe`** (a lower tier).
+- `webPrice.params` carries `withOzonAccount: "/modal/withOzonAccount"` +
+  `withoutOzonAccount: "/modal/withoutOzonAccount"` — the account-linked price is behind a modal,
+  NOT rendered as a number in the anonymous response.
+- Markers count: `premium`:6, `Premium`:1, `withOzonAccount`:5, `subscribe`:5 — all present, but
+  **no account price value** materializes anonymously.
+
+**→ ROOT CAUSE: the MCP browses ANONYMOUSLY (no Ozon login). The user's 632 ₽ is the
+Ozon-Account / Premium-subscribe price, computed only for an authenticated session with the
+`premiumSubscribe` tier. Anonymous sessions (the MCP) see the public "С банками" (Ozon Card) price
+= 708 ₽.** The 76₽ gap = the account/premium discount the MCP can't see without logging in.
+Confidence: CONFIRMED (632 provably absent from anon JSON + the exact premiumSubscribe/withOzonAccount
+tier markers present but value-less anonymously + region/variant/field/drift all ruled out).
+
+**Fixability:** to return 632 the MCP would need to **log into the user's Ozon account** (store
+auth cookies, keep them fresh, handle 2FA/expiry). Big scope + security/ToS surface + auth cookies
+in `storageState` = sensitive. Not recommended for a read-only price bot. The public 708 "С банками"
+price is the correct anonymous answer; the ~76₽ account discount is inherent to not being logged in.
+
 ## Final research verdict
 Ozon MCP works as intended: **region=Krasnoyarsk is real** (not placebo — 5 fields + price flip vs
 Moscow), **green Ozon-Bank price is served** (`cardPrice`), **delivery date is absent** from the PDP
