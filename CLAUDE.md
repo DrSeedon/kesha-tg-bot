@@ -68,7 +68,24 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - `run_on_laptop` — SSH команды на ноуте через reverse tunnel (whitelist)
 - Context compaction is automatic (95% threshold) and via /compact command — no MCP tool
 - `react` — emoji reactions
-- `react` — emoji reactions
+
+## Ozon MCP (внешний, на московском сервере)
+
+Кеша ходит на Ozon (поиск товаров/цены/отзывы) через отдельный MCP `ozon` — 6-й сервер в `.mcp.json`.
+
+**Почему отдельный сервер:** Ozon (антибот Variti) ХАРДБЛОЧИТ французский IP Contabo (`fab_nmk` + «выключите VPN»). Поэтому Ozon MCP крутится на **российском** сервере `72.56.235.40` (Москва, Timeweb) — RU IP Ozon пускает (проходит `fab_chlg` challenge). Прокси не нужен: сервер сам и есть RU-выход.
+
+**Архитектура:**
+```
+Кеша (Contabo) → .mcp.json "ozon" = bare `ssh -T ozon@72.56.235.40`
+   → forced-command wrapper → node /opt/ozon-mcp-server/src/index.js (репа eduard256/ozon-mcp-server)
+   → 1 long-lived headless Chromium проходит Variti, тянет composer-api JSON
+```
+- **Тулы:** `ozon_search` (поиск: sku/name/price/oldPrice/discount/rating/reviews/brand/url/image), `ozon_product_details` (карточка: price/priceRegular/oldPrice/available/seller/characteristics/description/images), `ozon_product_reviews` (author/score/comment/pros/cons/date/hasPhotos).
+- **Регион = КРАСНОЯРСК** форсится через `krsk-state.json` (куки, captured 1 раз кликом карты). `browser.js` грузит storageState (абс. путь) + **fail-closed** self-check: если регион ≠ Красноярск → tool возвращает `isError`, НЕ московские цены. Refresh куки (365d TTL): `node /opt/ozon-mcp-server/capture-region.mjs headless` на москве.
+- **RAM-защита прода** (там же seedon.ru + CryptoBot, 3GB): юзер `ozon` в `user-1002.slice` c `MemoryMax=800M, MemorySwapMax=0` (systemd drop-in). Пик реального запроса ~306MB. OOM бьёт ТОЛЬКО ozon-слайс (проверено kill-test'ом), прод не страдает. Idle-close браузера через 10 мин.
+- **Доступ:** ключ kesha@Contabo в `/home/ozon/.ssh/authorized_keys` с forced-command (`no-pty`, без shell). `index.js` при EOF/обрыве SSH чистит Chromium (нет сирот).
+- **Ограничения:** нет истории цен; отзывы обрезаются (лимит 1–30); первый вызов ~13с (антибот), дальше 0.3–1с; данные из внутреннего composer-api (может смениться).
 
 ## PROCESS RULES
 

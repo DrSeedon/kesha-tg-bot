@@ -22,6 +22,26 @@
 ### Файлы
 - `rag.py` (+16/−11), `tests/test_rag.py` (+34: тесты prefix-логики off/on)
 
+### Added
+- 🛒 **Ozon MCP (6-й MCP-сервер `ozon`)** — Кеша умеет искать товары на Ozon, читать карточки и отзывы. Три тула: `ozon_search`, `ozon_product_details`, `ozon_product_reviews`. Готовая репа `eduard256/ozon-mcp-server` (Node + Playwright, 1 long-lived headless Chromium проходит антибот Variti, тянет composer-api JSON).
+- 🇷🇺 **Красноярский регион** — цены/наличие красноярские (не московские). Форсится через `krsk-state.json` (куки региона, captured 1 раз автоматизацией карты «Способ доставки»).
+
+### Reasoning — почему Ozon MCP на ОТДЕЛЬНОМ (московском) сервере, а не на Contabo
+- Ozon (антибот Variti) **хардблочит французский IP Contabo** — проверено живьём: `incident fab_nmk` + страница «Похоже, нет соединения. Выключите VPN». Реальный headless Chromium (даже headful+xvfb) НЕ проходит — это гео/IP-блок, не фингерпринт.
+- Московский IP `72.56.235.40` (Timeweb) Ozon ПУСКАЕТ (`fab_chlg` challenge, проходится). Поэтому Ozon MCP крутится на москве, Кеша (Contabo) дёргает по **SSH-stdio** (`ssh -T ozon@72.56.235.40`, forced-command). Прокси не нужен — сервер сам RU-выход.
+- **Урок:** Variti ловит кривой stealth. Минимальный чистый контекст репы (UA+locale, без webdriver/plugins/timezone-патчей) проходит; мои stealth-пробы — нет.
+
+### Технические детали (для grep через месяц)
+- `src/browser.js` (+3 правки): грузит `krsk-state.json` через абсолютный путь (`import.meta.url`, не cwd — SSH стартует из /home/ozon); **fail-closed** region self-check — регион ≠ Красноярск → throw → tool `isError` (не отдаём московские цены молча).
+- `src/index.js` (+1 правка): `process.stdin.on("end"/"close", cleanup)` — при обрыве/EOF SSH чистит Chromium (иначе сироты копятся, `transport.onclose` не срабатывал во время in-flight запроса).
+- `.mcp.json` (Contabo `/opt/cog-second-brain`): добавлен `ozon` = bare `ssh -T ozon@72.56.235.40` (forced-command на ключе запускает wrapper). 5 старых серверов не тронуты.
+- **RAM-защита** (москва 3GB, там прод seedon.ru+CryptoBot): юзер `ozon` в `user-1002.slice` `MemoryMax=800M`. Kill-test (kernel OOM `CONSTRAINT_MEMCG`) — убивает только ozon-слайс, прод выживает. Пик запроса ~306MB. Idle-close 10 мин.
+
+### Known tradeoff
+- Красноярск через storageState-куки: TTL 365d, но если слетит — `isError` (не тихая деградация). Refresh: `node capture-region.mjs headless` на москве.
+- Первый вызов ~13с (антибот), дальше 0.3–1с. Нет истории цен. Отзывы обрезаются (1–30).
+- Ozon MCP жив пока жив московский сервер и `krsk-state.json` актуален. Данные из внутреннего composer-api (Ozon может сменить).
+
 ## v2.4.0 — 2026-06-27
 
 ### Changed
