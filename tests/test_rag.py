@@ -167,6 +167,40 @@ def test_expand_query_prefix():
     assert rag.RagMemory._expand_query("") is None
 
 
+def test_no_e5_prefix_when_disabled(monkeypatch):
+    """MODEL_PREFIX=False (bge-m3) → _embed НЕ добавляет query:/passage: к тексту."""
+    monkeypatch.setattr(rag, "MODEL_PREFIX", False)
+    seen = []
+
+    class FakeEmbedder:
+        def embed(self, texts, batch_size=16):
+            seen.extend(texts)
+            return [[0.0] * rag.DIM for _ in texts]
+
+    m = rag.RagMemory.__new__(rag.RagMemory)
+    m._embedder = FakeEmbedder()
+    m._embed(["привет"], is_query=True)
+    m._embed(["ответ"], is_query=False)
+    assert seen == ["привет", "ответ"], "bge-m3 не должен получать E5-префиксы"
+
+
+def test_e5_prefix_when_enabled(monkeypatch):
+    """MODEL_PREFIX=True (E5) → query:/passage: добавляются — регрессия prefix-логики."""
+    monkeypatch.setattr(rag, "MODEL_PREFIX", True)
+    seen = []
+
+    class FakeEmbedder:
+        def embed(self, texts, batch_size=16):
+            seen.extend(texts)
+            return [[0.0] * rag.DIM for _ in texts]
+
+    m = rag.RagMemory.__new__(rag.RagMemory)
+    m._embedder = FakeEmbedder()
+    m._embed(["привет"], is_query=True)
+    m._embed(["ответ"], is_query=False)
+    assert seen == ["query: привет", "passage: ответ"]
+
+
 def test_long_message_chunks_one_indexed(tmp_path):
     """Длинное сообщение → несколько vec-строк, но одна запись в indexed (idempotency по parent)."""
     class StubRag(rag.RagMemory):

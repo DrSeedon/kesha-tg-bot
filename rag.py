@@ -1,4 +1,4 @@
-"""RAG semantic memory — FastEmbed (multilingual-e5-base) + sqlite-vec hybrid search.
+"""RAG semantic memory — FastEmbed (bge-m3 int8 ONNX) + sqlite-vec hybrid search.
 
 ВСЕ методы RagMemory вызываются ТОЛЬКО из единого rag_executor (ThreadPoolExecutor
 max_workers=1). Коннект sqlite и embedder привязаны к этому потоку — не дёргать из
@@ -16,15 +16,19 @@ logger = logging.getLogger("kesha.rag")
 
 DB_PATH = Path("./storage/vec.db")
 MSG_DB_PATH = Path("./storage/messages.db")
-# e5-small int8 ONNX: quality 0.87-0.92 vs MiniLM 0.56-0.67, same DIM 384.
-MODEL_NAME = "intfloat/multilingual-e5-small"
-MODEL_HF = "Xenova/multilingual-e5-small"
-MODEL_FILE = "onnx/model_quantized.onnx"
-DIM = 384
+# bge-m3 int8 ONNX: separation margin +0.237 vs e5-small +0.055 (4x шире на абстрактных
+# русских запросах). Single-file model_quantized.onnx — fp32 с external onnx_data падает в ORT.
+# MODEL_NAME ≠ нативному имени FastEmbed, иначе add_custom_model пропустится → fp32 → краш.
+MODEL_NAME = "AlpEge/bge-m3-onnx-int8"
+MODEL_HF = "AlpEge/bge-m3-onnx-int8"
+MODEL_FILE = "model_quantized.onnx"
+DIM = 1024
+MODEL_PREFIX = False  # bge-m3: CLS-пулинг, без query:/passage: префиксов. E5-модели → True.
+MODEL_POOLING = "cls"  # bge-m3 = CLS. E5 = mean.
 RRF_K = 60
 # bump при ЛЮБОМ изменении схемы vec/fts → старые таблицы дропаются и ребилдятся из messages.db.
-# v2: dim 384→1024 + parent_message_id (chunking). индекс производный, дроп безопасен.
-SCHEMA_VERSION = 6
+# v7: e5-small→bge-m3, dim 384→1024. индекс производный, дроп безопасен. messages.db не трогается.
+SCHEMA_VERSION = 7
 POOL_MULT = 4  # candidate pool = limit * POOL_MULT перед RRF
 
 # Chunking длинных сообщений (голосовые на 500 слов размывают семантику в 1 вектор).
@@ -142,14 +146,15 @@ class RagMemory:
             from fastembed import TextEmbedding
             from fastembed.common.model_description import PoolingType, ModelSource
             if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+                pooling = PoolingType.CLS if MODEL_POOLING == "cls" else PoolingType.MEAN
                 TextEmbedding.add_custom_model(
-                    model=MODEL_NAME, pooling=PoolingType.MEAN, normalization=True,
+                    model=MODEL_NAME, pooling=pooling, normalization=True,
                     sources=ModelSource(hf=MODEL_HF), dim=DIM, model_file=MODEL_FILE,
                 )
             self._embedder = TextEmbedding(model_name=MODEL_NAME)
             logger.info(f"RAG embedder loaded: {MODEL_NAME}")
-        # E5 models need "query: "/"passage: " prefix, mpnet/MiniLM don't
-        if "e5" in MODEL_NAME:
+        # E5 models need "query: "/"passage: " prefix; bge-m3 doesn't. Explicit flag > name-sniffing.
+        if MODEL_PREFIX:
             prefix = "query: " if is_query else "passage: "
             texts = [prefix + t for t in texts]
         return [list(map(float, v)) for v in self._embedder.embed(texts, batch_size=16)]
