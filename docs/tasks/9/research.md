@@ -147,3 +147,38 @@ region-granularity behavior, not a bug.
 **No implementation done (research only).** If the orchestrator wants follow-ups: (a) delivery
 date = new brittle API call (medium-high), (b) search facets = medium (dynamic per category),
 (c) green price = already done, nothing to do.
+
+---
+
+## Addendum — price discrepancy 632 (user) vs 708 (MCP), SKU 1446334512
+
+**Investigated, then user closed it as non-critical ("копеечная разница, забить"). Recorded as-is.**
+
+Facts gathered from raw JSON before stopping:
+- **Region matches:** MCP shows `city=Красноярск, areaId=31498, lat=56.01479, pickup=Красноярск,
+  ул.Республики 49П`. User's region also Krasnoyarsk (ул.Северная 9). Same `areaId 31498`. Region
+  is NOT the cause (not a sub-region drift at the areaId level).
+- **632/702 are NOT in the JSON:** searched the full base-SKU composer response — `632` and `702`
+  have **0 real occurrences** (only substrings of unrelated ids like `909632`). The MCP genuinely
+  receives **`cardPrice=708 ₽`, `price=745 ₽`, `originalPrice=1 999 ₽`** in `webPrice`, and the tool
+  correctly returns the green `cardPrice=708`. So the tool is NOT reading the wrong field — 632
+  simply isn't in this response.
+- **This SKU has variants** (`webAspects`): Количество 30/60, Единиц 1/2, Размер 600x400/600x600/
+  **600x900**(active), Цвет белый/**бронза**(active). SKU 1446334512 canonically resolves to
+  30/1/600x900/**бронза → 708**. Sibling variants priced (Krasnoyarsk, measured):
+  `1446345037=555₽`, `2723696683=648₽`, `1762969854=815₽`, `4190328092=1179₽` — i.e. **price
+  varies by variant**.
+- User stated the variant is identical (same 600x900/30шт) → then the remaining candidates are a
+  **цвет sub-variant** (белый vs бронза — different SKU, different price) or **time/price drift**
+  between the user's view and the MCP call. Not conclusively pinned before the user closed it.
+
+**Verdict:** NOT a region bug (region matches, areaId identical), NOT a wrong-field bug (632 absent
+from JSON, tool returns the correct `cardPrice`). Most likely a **variant/color sub-SKU or price
+drift** — but user deemed the ~76₽ gap immaterial and stopped the investigation. No fix warranted.
+
+## Final research verdict
+Ozon MCP works as intended: **region=Krasnoyarsk is real** (not placebo — 5 fields + price flip vs
+Moscow), **green Ozon-Bank price is served** (`cardPrice`), **delivery date is absent** from the PDP
+JSON (would need a separate brittle call), **search facets are present** (achievable, medium
+effort, category-dynamic). The 632-vs-708 gap is a non-critical variant/drift artifact, not a bug.
+No implementation — research only.
