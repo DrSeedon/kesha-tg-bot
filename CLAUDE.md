@@ -77,6 +77,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - Локальный сервис (ноут): `kesha-bot` (disabled, не автостарт — failover убран)
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`
+- **codex_review из worktree воркера**: передавай АБСОЛЮТНЫЙ путь в `target` — скилл резолвит относительные пути от главного репо, не от worktree воркера. Иначе Codex читает не тот файл → ложный REJECT/APPROVE
 - VPS в РФ → нужен прокси для Anthropic API И Telegram API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `NO_PROXY=localhost,127.0.0.1` — НЕ добавлять api.telegram.org (РКН блокирует, нужен прокси)
 
 ## VPS TROUBLESHOOTING (шпаргалка)
