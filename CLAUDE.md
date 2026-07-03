@@ -72,49 +72,51 @@ IDLE → COLLECTING → PROCESSING → IDLE
 
 ## PROCESS RULES
 
-- **Прод = VPS** (single-node, no failover). Деплой: `deploy@72.56.235.40`, код в `/opt/kesha-bot`, CWD бота = `/opt/cog-second-brain`
-- Systemd сервис на VPS: `kesha-bot-vps`. Деплой: `ssh deploy@72.56.235.40 "sudo -u kesha git -C /opt/kesha-bot pull && sudo -n systemctl restart kesha-bot-vps"`
+- **Прод = Contabo VPS** (158.220.127.161, Франция, 8GB, single-node). Доступ: `ssh root@158.220.127.161`. Код в `/opt/kesha-bot`, CWD бота = `/opt/cog-second-brain`, бот-юзер `kesha` (uid 1001)
+- Systemd сервис: `kesha-bot-vps`. Деплой: `ssh root@158.220.127.161 "sudo -u kesha git -C /opt/kesha-bot pull && systemctl restart kesha-bot-vps"`
+- **БЕЗ ПРОКСИ**: Contabo во Франции (не РФ) → достаёт api.anthropic.com / api.telegram.org / api.deepgram.com напрямую. НЕТ `HTTPS_PROXY`/`TG_PROXY`/`NO_PROXY` в .env и unit. Не добавлять — Ёжик/Xray для исходящего не нужен
+- ⚠️ На Contabo уже крутится Xray Максима (порты 443/8443/4443 inbound VLESS) — НЕ трогать, к боту отношения не имеет
 - Локальный сервис (ноут): `kesha-bot` (disabled, не автостарт — failover убран)
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`
-- VPS в РФ → нужен прокси для Anthropic API И Telegram API (Xray → Ёжик VPN, `http://127.0.0.1:10809`). `NO_PROXY=localhost,127.0.0.1` — НЕ добавлять api.telegram.org (РКН блокирует, нужен прокси)
+- **Старый прод (Timeweb 72.56.235.40, Москва)** — выведен из эксплуатации при миграции (#6, 2026-07-03). Данные оставлены как rollback-бэкап, сервис `kesha-bot-vps` там stop+disable. Не деплоить туда
 
-## VPS TROUBLESHOOTING (шпаргалка)
+## VPS TROUBLESHOOTING (шпаргалка) — Contabo 158.220.127.161
 
 **Ребут бота:**
 ```bash
-ssh deploy@72.56.235.40 "sudo -n systemctl restart kesha-bot-vps"
+ssh root@158.220.127.161 "systemctl restart kesha-bot-vps"
 ```
 
 **Логи:**
 ```bash
-ssh deploy@72.56.235.40 "sudo -n journalctl -u kesha-bot-vps --no-pager -n 50"
+ssh root@158.220.127.161 "journalctl -u kesha-bot-vps --no-pager -n 50"
 ```
 
 **Деплой (git pull + restart):**
 ```bash
-ssh deploy@72.56.235.40 "sudo -u kesha git -C /opt/kesha-bot pull && sudo -n systemctl restart kesha-bot-vps"
+ssh root@158.220.127.161 "sudo -u kesha git -C /opt/kesha-bot pull && systemctl restart kesha-bot-vps"
 ```
 
-**401 / "Failed to authenticate" → токен протух:**
+**401 / "Failed to authenticate" → токен протух (БЕЗ прокси, Contabo достаёт напрямую):**
 ```bash
-ssh deploy@72.56.235.40
+ssh root@158.220.127.161
 sudo -u kesha -i
-HTTPS_PROXY=http://127.0.0.1:10809 claude auth login
+claude auth login
 # → открыть ссылку в браузере → авторизоваться → вставить код
 exit
-sudo -n systemctl restart kesha-bot-vps
+systemctl restart kesha-bot-vps
 ```
 
 **Claude CLI на VPS (ручной запуск):**
 ```bash
 sudo -u kesha -i
-HTTPS_PROXY=http://127.0.0.1:10809 claude
+claude
 ```
 
 **Статус сервиса:**
 ```bash
-ssh deploy@72.56.235.40 "sudo -n systemctl status kesha-bot-vps --no-pager | head -8"
+ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 ```
 
 ## Session notes (2026-06-27)
@@ -128,18 +130,16 @@ ssh deploy@72.56.235.40 "sudo -n systemctl status kesha-bot-vps --no-pager | hea
 - Кеша сам отключал RAG на VPS (закомментировал import rag в bot.py) когда OOM убил VPN — потом восстановили через `git checkout -- bot.py`
 
 ### Reverse SSH Tunnel
-- Ноут → VPS (tunnel@72.56.235.40) → порт 2222 на localhost
+- Ноут → VPS (tunnel@158.220.127.161, Contabo) → порт 2222 на localhost. (До миграции #6 был tunnel@72.56.235.40)
 - Ключи: `~/.ssh/tunnel_vps` (ноут→VPS), `/home/kesha/.ssh/tunnel_laptop` (VPS→ноут)
 - systemd unit: `ssh-tunnel-vps.service` на ноуте (enabled, Restart=always)
 - `run_on_laptop` MCP tool с whitelist команд (kill, pkill, sudo reboot, sudo systemctl restart orchestra)
 - Безопасность: ключи НЕ в git, tunnel юзер restricted (no shell), порт 2222 только localhost
 
 ### Proxy / VPN на VPS
-- VPS в РФ (Timeweb Moscow 72.56.235.40) — Telegram API и Anthropic API блокируются
-- Прокси: Xray → Ёжик VPN (`http://127.0.0.1:10809`)
-- `TG_PROXY` env var → aiogram `AiohttpSession(proxy=...)` + aiohttp-socks
-- `HTTPS_PROXY` env var → Claude SDK
-- `NO_PROXY=localhost,127.0.0.1` — api.telegram.org НЕ добавлять (нужен прокси)
+- **После миграции #6 (Contabo, Франция) — ПРОКСИ НЕ НУЖЕН.** Contabo достаёт api.anthropic.com / api.telegram.org / api.deepgram.com напрямую (проверено: HTTP 401/302/404, ~14ms). Прокси-обвязка выпилена из .env и systemd unit
+- `bot.py:43` `_tg_proxy = os.getenv("TG_PROXY") or os.getenv("HTTPS_PROXY") or None` → при unset = None = direct (код это переживает нативно)
+- **(Историческое, Timeweb в РФ)**: там был Xray → Ёжик VPN (`http://127.0.0.1:10809`), `TG_PROXY`→aiogram, `HTTPS_PROXY`→Claude SDK, `NO_PROXY=localhost,127.0.0.1`. Не воспроизводить на Contabo
 - ТСПУ (РКН) периодически блокирует трафик к VPS — это не наша проблема
 
 ### Workers alive
