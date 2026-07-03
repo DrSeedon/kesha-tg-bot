@@ -81,7 +81,8 @@ IDLE → COLLECTING → PROCESSING → IDLE
    → forced-command wrapper → node /opt/ozon-mcp-server/src/index.js (репа eduard256/ozon-mcp-server)
    → 1 long-lived headless Chromium проходит Variti, тянет composer-api JSON
 ```
-- **Тулы:** `ozon_search` (поиск: sku/name/price/oldPrice/discount/rating/reviews/brand/url/image), `ozon_product_details` (карточка: price/priceRegular/oldPrice/available/seller/characteristics/description/images), `ozon_product_reviews` (author/score/comment/pros/cons/date/hasPhotos).
+- **Тулы:** `ozon_search` (поиск: sku/name/price/**ourPrice**/oldPrice/discount/rating/reviews/brand/url/image), `ozon_product_details` (карточка: price/**ourPrice**/priceRegular/oldPrice/available/seller/characteristics/description/images), `ozon_product_reviews` (author/score/comment/pros/cons/date/hasPhotos).
+- **`ourPrice`** = оценка цены с Ozon-аккаунтом = `round(cardPrice × 0.893)` (без логина). ПРИБЛИЖЕНИЕ (замер 3 SKU, ±0.1%), не точная цена. `price` = публичная «С банками». Точная аккаунт-цена требует логина (не делаем). Причина: аноним MCP vs залогиненный `premiumSubscribe` tier.
 - **Регион = КРАСНОЯРСК** форсится через `krsk-state.json` (куки, captured 1 раз кликом карты). `browser.js` грузит storageState (абс. путь) + **fail-closed** self-check: если регион ≠ Красноярск → tool возвращает `isError`, НЕ московские цены. Refresh куки (365d TTL): `node /opt/ozon-mcp-server/capture-region.mjs headless` на москве.
 - **RAM-защита прода** (там же seedon.ru + CryptoBot, 3GB): юзер `ozon` в `user-1002.slice` c `MemoryMax=800M, MemorySwapMax=0` (systemd drop-in). Пик реального запроса ~306MB. OOM бьёт ТОЛЬКО ozon-слайс (проверено kill-test'ом), прод не страдает. Idle-close браузера через 10 мин.
 - **Доступ:** ключ kesha@Contabo в `/home/ozon/.ssh/authorized_keys` с forced-command (`no-pty`, без shell). `index.js` при EOF/обрыве SSH чистит Chromium (нет сирот).

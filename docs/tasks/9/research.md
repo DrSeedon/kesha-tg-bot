@@ -251,3 +251,22 @@ and widen the sample (10+ SKUs across categories) before trusting it as a consta
 **Fixability:** trivial — multiply the MCP `cardPrice` by ~0.893 and label it an estimate. No login
 needed. But it's an APPROXIMATION with the caveats above; the exact account price still requires an
 authenticated session.
+
+---
+
+## Implementation — `ourPrice` field (deployed to Moscow)
+
+Approved: expose the estimated Ozon-Account price as a field, no login.
+
+- `src/parse.js`: `OUR_PRICE_FACTOR = 0.893`, `ourPrice(cardPrice) = Math.round(cardPrice * 0.893)`.
+  Added `ourPrice` to BOTH search items and `parseDetails` (computed from the same public
+  cardPrice the tool already returns as `price`).
+- `src/index.js`: tool descriptions updated to mention `ourPrice` (≈ price×0.893, approximate).
+- Tool output now: `price` (public «С банками»), `ourPrice` (≈ Ozon-Account estimate), `priceRegular`
+  (details only), `oldPrice`.
+
+**Verified live:** `details(1446334512)` → `price=708, ourPrice=632` (708×0.893=632.2→632) = exact
+match to the user's green price. Search carries `ourPrice` too. Offline parser tests pass.
+
+**Caveat shipped in the description:** it is an APPROXIMATION (×0.893), not the exact account price
+(see LIKELY-confidence caveats above: 3-SKU sample, may break on category/promo/seller variation).
