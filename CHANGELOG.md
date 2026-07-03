@@ -17,8 +17,12 @@
 - `.mcp.json` (Contabo `/opt/cog-second-brain`): добавлен `ozon` = bare `ssh -T ozon@72.56.235.40` (forced-command на ключе запускает wrapper). 5 старых серверов не тронуты.
 - **RAM-защита** (москва 3GB, там прод seedon.ru+CryptoBot): юзер `ozon` в `user-1002.slice` `MemoryMax=800M`. Kill-test (kernel OOM `CONSTRAINT_MEMCG`) — убивает только ozon-слайс, прод выживает. Пик запроса ~306MB. Idle-close 10 мин.
 
+### Added (cleanup, доработка #7)
+- 🧹 **Temp-cleanup Playwright** — браузер плодил `/tmp/playwright-artifacts-*` + `/tmp/playwright_chromiumdev_profile-*` на каждый запуск. Нормальный `browser.close()` их сам чистит (проверено: 5 запросов → /tmp не растёт), но SIGKILL/обрыв-SSH оставляли orphan'ов (накопилось 6 dirs/75 файлов от тестов). Фикс 3 слоя: `clean-tmp.sh` (сносит >60мин) в `ozon-mcp-wrapper.sh` при каждом старте MCP + `ozon-tmp-cleanup.timer` (systemd daily). Разовая уборка накопленного сделана. `.cache` 641MB = бинарники браузера (норм, не трогали).
+
 ### Known tradeoff
 - Красноярск через storageState-куки: TTL 365d, но если слетит — `isError` (не тихая деградация). Refresh: `node capture-region.mjs headless` на москве.
+- Избыточный `chromium-1223` (377M) в .cache — репа юзает только `chrome-headless-shell`, но снос рискован (Playwright version-check), оставлен.
 - Первый вызов ~13с (антибот), дальше 0.3–1с. Нет истории цен. Отзывы обрезаются (1–30).
 - Ozon MCP жив пока жив московский сервер и `krsk-state.json` актуален. Данные из внутреннего composer-api (Ozon может сменить).
 
