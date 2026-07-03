@@ -8,3 +8,6 @@ memory/
 logs/
 storage/
 .claude/
+krsk-state.json
+.credentials.json
+token.pickle
