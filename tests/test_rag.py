@@ -177,8 +177,8 @@ def test_no_e5_prefix_when_disabled(monkeypatch):
             seen.extend(texts)
             return [[0.0] * rag.DIM for _ in texts]
 
+    monkeypatch.setattr(rag, "_embedder", FakeEmbedder())  # shared singleton (task #10-opt)
     m = rag.RagMemory.__new__(rag.RagMemory)
-    m._embedder = FakeEmbedder()
     m._embed(["привет"], is_query=True)
     m._embed(["ответ"], is_query=False)
     assert seen == ["привет", "ответ"], "bge-m3 не должен получать E5-префиксы"
@@ -194,8 +194,8 @@ def test_e5_prefix_when_enabled(monkeypatch):
             seen.extend(texts)
             return [[0.0] * rag.DIM for _ in texts]
 
+    monkeypatch.setattr(rag, "_embedder", FakeEmbedder())  # shared singleton (task #10-opt)
     m = rag.RagMemory.__new__(rag.RagMemory)
-    m._embedder = FakeEmbedder()
     m._embed(["привет"], is_query=True)
     m._embed(["ответ"], is_query=False)
     assert seen == ["query: привет", "passage: ответ"]

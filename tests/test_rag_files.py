@@ -349,3 +349,52 @@ def test_apply_file_change_index_and_delete(mem, tmp_path):
 def test_apply_file_change_missing_file_noop(mem, tmp_path):
     # file vanished before executor ran → skip, no crash
     assert mem.apply_file_change(False, "gone.md", str(tmp_path / "gone.md")) == 0
+
+
+# ---------------------------------- concurrency: search RO conn vs write (task #10-opt)
+
+def test_readonly_conn_sees_writes_and_searches(tmp_path):
+    """RO-инстанс на той же WAL-БД видит записи write-инстанса без реконнекта и ищет —
+    доказательство что search не ждёт backfill (отдельный коннект, WAL concurrent read)."""
+    msg_db = tmp_path / "messages.db"
+    _make_messages_db(msg_db, [(100, "user", "seed")])
+    vec = tmp_path / "vec.db"
+    w = rag.RagMemory(path=vec, msg_db=msg_db)                 # write instance creates schema
+    w.index_file("health.md", RU_MD)
+    ro = rag.RagMemory(path=vec, msg_db=msg_db, readonly=True) # RO instance, separate conn
+    res = ro.search(100, "витамин D норма в крови", limit=5)
+    assert any(r["source"] == "file" and r["path"] == "health.md" for r in res)
+    # write MORE after RO opened → RO sees it without reconnect (WAL)
+    w.index_file("sleep.md", "# Сон\n\nГлубокий сон и фазы по 90 минут за ночь для восстановления.")
+    res2 = ro.search(100, "фазы сна восстановление", limit=5)
+    assert any(r.get("path") == "sleep.md" for r in res2)
+
+
+def test_readonly_conn_cannot_write(tmp_path):
+    """RO-коннект не должен писать — fail loud, защита от случайного index на read-потоке."""
+    msg_db = tmp_path / "messages.db"
+    _make_messages_db(msg_db, [(100, "user", "seed")])
+    vec = tmp_path / "vec.db"
+    rag.RagMemory(path=vec, msg_db=msg_db)  # create schema
+    ro = rag.RagMemory(path=vec, msg_db=msg_db, readonly=True)
+    with pytest.raises(sqlite3.OperationalError):
+        ro.index_file("x.md", RU_MD)
+
+
+def test_run_routes_search_to_read_executor(monkeypatch):
+    """run() маршрутизирует search → read-executor, index → write-executor."""
+    calls = []
+    monkeypatch.setattr(rag, "_executor", "WRITE")
+    monkeypatch.setattr(rag, "_read_executor", "READ")
+
+    async def fake_run_in_executor(ex, fn):
+        calls.append(ex)
+        return None
+
+    class FakeLoop:
+        run_in_executor = staticmethod(fake_run_in_executor)
+
+    import asyncio
+    asyncio.run(rag.run(FakeLoop(), "search", 1, "q"))
+    asyncio.run(rag.run(FakeLoop(), "index_message", 1, 1, "user", "x"))
+    assert calls == ["READ", "WRITE"]

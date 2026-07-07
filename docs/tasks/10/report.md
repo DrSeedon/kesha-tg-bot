@@ -55,3 +55,29 @@ search (file vs dialog, chunk-level, namespaced RRF, role filter, dialog regress
 ## TODO / follow-ups
 - Monitor retrieval pollution from ~1061 near-empty diary templates (skip-empty guard handles most).
 - watchfiles debounce uses defaults — tune if editor-save bursts cause redundant reindex (unlikely).
+
+---
+
+## Post-deploy optimization (#10-opt) — search no longer blocks on backfill
+
+**Problem:** search_memory hung 300s during backfill → reconnect. Single `rag_executor`
+(max_workers=1) serialized everything; backfill embed batches blocked search in the queue.
+
+**Profiled root cause:** embed = 82ms/chunk vs insert = 0.6ms/chunk (**138×**). Bottleneck is
+CPU-bound embedding, not SQLite.
+
+**Fix (all empirically verified before shipping):**
+- **Read/write executor split.** search → RO connection (`?mode=ro`) on its own thread; index/backfill
+  → RW connection. WAL gives lock-free concurrent reads (measured: 37 vec0 reads during active writes,
+  0 errors, 0.14ms). `run()` routes `search` → read executor, everything else → write executor.
+- **Shared module-level embedder singleton.** ONNX `InferenceSession.run()` is thread-safe (measured:
+  15+15 concurrent embeds, 0 errors) → both threads share ONE embedder, no +1.3GB RAM.
+- **batch_size 16→64.** Embed throughput 113→98ms/chunk (curve bottom; 128 regresses).
+
+**E2E proof:** search latency during heavy concurrent backfill = **37-41ms** (was ~300,000ms). ~7300×.
+
+**Files:** rag.py (RO conn, `_get_embedder` singleton, `get_rag_ro`, routed `run`, EMBED_BATCH),
+bot.py (`_rag_read_executor`). Tests: +3 (RO sees writes+searches, RO can't write, run routing).
+47 tests green (17 dialog + 30 file).
+
+**Deploy:** needs merge to main + prod pull + bot restart. No new dependency.

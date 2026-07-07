@@ -38,6 +38,7 @@ CHUNK_CHAR_LIMIT = 1200   # ~300 токенов — выше этого реже
 CHUNK_SIZE = 800          # ~200 токенов на кусок
 CHUNK_OVERLAP = 200       # ~50 токенов перекрытие
 CHUNK_STRIDE = 1000       # макс чанков на сообщение (chunk_id = parent*STRIDE + idx)
+EMBED_BATCH = 64          # замер: 64 = дно кривой (98ms/chunk vs 113 на 16 и 128)
 
 # Файловая индексация базы знаний (cog-second-brain). Только текст-проза: .md/.txt.
 # xml/csv/json/html = машинные данные/логи → мусор в retrieval (замер task #10).
@@ -211,23 +212,69 @@ def _chunk_file(path: str, content: str) -> list[str]:
     return out[:CHUNK_STRIDE - 1]
 
 
+_embedder = None
+_embedder_lock = None  # threading.Lock, lazy (не тащим threading в импорт если RAG выключен)
+
+
+def _get_embedder():
+    """Module-level singleton embedder, ОБЩИЙ для всех RagMemory-инстансов (write+read потоки).
+    ONNX InferenceSession thread-safe → один экземпляр обслуживает оба потока без +1.3GB RAM.
+    Загрузка под локом (двойная проверка) — гонка на первом обращении из двух потоков."""
+    global _embedder, _embedder_lock
+    if _embedder is not None:
+        return _embedder
+    if _embedder_lock is None:
+        import threading
+        _embedder_lock = threading.Lock()
+    with _embedder_lock:
+        if _embedder is not None:
+            return _embedder
+        import onnxruntime as _ort
+        _orig_sess = _ort.InferenceSession.__init__
+        def _patched_init(self_sess, *a, **k):
+            so = k.get("sess_options") or _ort.SessionOptions()
+            so.enable_cpu_mem_arena = False
+            so.enable_mem_pattern = False
+            k["sess_options"] = so
+            _orig_sess(self_sess, *a, **k)
+        _ort.InferenceSession.__init__ = _patched_init
+        from fastembed import TextEmbedding
+        from fastembed.common.model_description import PoolingType, ModelSource
+        if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+            pooling = PoolingType.CLS if MODEL_POOLING == "cls" else PoolingType.MEAN
+            TextEmbedding.add_custom_model(
+                model=MODEL_NAME, pooling=pooling, normalization=True,
+                sources=ModelSource(hf=MODEL_HF), dim=DIM, model_file=MODEL_FILE,
+            )
+        _embedder = TextEmbedding(model_name=MODEL_NAME)
+        logger.info(f"RAG embedder loaded (shared): {MODEL_NAME}")
+    return _embedder
+
+
 class RagMemory:
-    def __init__(self, path: Path = DB_PATH, msg_db: Path = MSG_DB_PATH):
+    def __init__(self, path: Path = DB_PATH, msg_db: Path = MSG_DB_PATH, readonly: bool = False):
         import sqlite3
 
+        self.readonly = readonly
         path.parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=True (default) — мы всегда в одном executor-потоке
-        # uri=True — нужно для ATTACH '...?mode=ro' (file: URI синтаксис)
-        self.conn = sqlite3.connect(str(path), isolation_level=None, uri=True)
+        # check_same_thread=True (default) — каждый instance живёт в одном executor-потоке.
+        # readonly: коннект в ?mode=ro к той же WAL-БД → конкурентное чтение во время записи
+        # (проверено: 37 vec0-читений во время инсертов, 0 ошибок, 0.14ms). Search не ждёт backfill.
+        if readonly:
+            self.conn = sqlite3.connect(f"file:{path}?mode=ro", isolation_level=None, uri=True)
+        else:
+            self.conn = sqlite3.connect(str(path), isolation_level=None, uri=True)
         self.conn.row_factory = sqlite3.Row
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        if not readonly:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")  # ro-читатель ждёт, не падает, на checkpoint
         # ATTACH messages.db read-only для джойна content/timestamp
         self.conn.execute(f"ATTACH DATABASE 'file:{msg_db}?mode=ro' AS msg")
-        self._create_schema()
-        self._embedder = None
+        if not readonly:
+            self._create_schema()
 
     def _create_schema(self) -> None:
         # схема изменилась (или alpha-формат sqlite-vec) → дроп + ребилд из messages.db.
@@ -292,31 +339,15 @@ class RagMemory:
         """)
 
     def _embed(self, texts: list[str], is_query: bool) -> list[list[float]]:
-        if self._embedder is None:
-            import onnxruntime as _ort
-            _orig_sess = _ort.InferenceSession.__init__
-            def _patched_init(self_sess, *a, **k):
-                so = k.get("sess_options") or _ort.SessionOptions()
-                so.enable_cpu_mem_arena = False
-                so.enable_mem_pattern = False
-                k["sess_options"] = so
-                _orig_sess(self_sess, *a, **k)
-            _ort.InferenceSession.__init__ = _patched_init
-            from fastembed import TextEmbedding
-            from fastembed.common.model_description import PoolingType, ModelSource
-            if MODEL_NAME not in {m["model"] for m in TextEmbedding.list_supported_models()}:
-                pooling = PoolingType.CLS if MODEL_POOLING == "cls" else PoolingType.MEAN
-                TextEmbedding.add_custom_model(
-                    model=MODEL_NAME, pooling=pooling, normalization=True,
-                    sources=ModelSource(hf=MODEL_HF), dim=DIM, model_file=MODEL_FILE,
-                )
-            self._embedder = TextEmbedding(model_name=MODEL_NAME)
-            logger.info(f"RAG embedder loaded: {MODEL_NAME}")
+        # embedder = module-level singleton, ОБЩИЙ для write- и read-инстансов.
+        # ONNX InferenceSession.run() thread-safe (проверено: 15+15 конкурентных embed, 0 ошибок)
+        # → read-поток (search) эмбедит запрос параллельно backfill'у, не ждёт очереди.
+        emb = _get_embedder()
         # E5 models need "query: "/"passage: " prefix; bge-m3 doesn't. Explicit flag > name-sniffing.
         if MODEL_PREFIX:
             prefix = "query: " if is_query else "passage: "
             texts = [prefix + t for t in texts]
-        return [list(map(float, v)) for v in self._embedder.embed(texts, batch_size=16)]
+        return [list(map(float, v)) for v in emb.embed(texts, batch_size=EMBED_BATCH)]
 
     def _is_indexed(self, message_id: int) -> bool:
         return self.conn.execute(
@@ -653,27 +684,46 @@ class RagMemory:
         return count
 
 
-_db: RagMemory | None = None
-_executor = None  # ThreadPoolExecutor(max_workers=1), set from bot.py
+# Два инстанса + два executor'а: write (index/backfill, RW conn) и read (search, RO conn).
+# WAL → read не блокируется write. search эмбедит запрос в СВОЁМ потоке параллельно backfill'у.
+_db: RagMemory | None = None        # write instance (RW conn)
+_db_ro: RagMemory | None = None     # read instance (RO conn)
+_executor = None                    # write ThreadPoolExecutor(max_workers=1)
+_read_executor = None               # read ThreadPoolExecutor(max_workers=1)
+_READ_METHODS = {"search"}          # идут в read-executor (RO conn, не ждут backfill)
 
 
-def set_executor(ex) -> None:
-    global _executor
+def set_executor(ex, read_ex=None) -> None:
+    global _executor, _read_executor
     _executor = ex
+    _read_executor = read_ex if read_ex is not None else ex  # fallback: один executor (тесты)
 
 
 def get_rag() -> RagMemory:
-    """Lazy singleton. ВЫЗЫВАТЬ ТОЛЬКО внутри executor-потока (первый вызов
-    создаёт коннект+embedder, которые привязываются к текущему потоку)."""
+    """Write-инстанс (RW conn). ВЫЗЫВАТЬ ТОЛЬКО внутри write-executor-потока."""
     global _db
     if _db is None:
         _db = RagMemory()
     return _db
 
 
+def get_rag_ro() -> RagMemory:
+    """Read-инстанс (RO conn к той же WAL-БД). ВЫЗЫВАТЬ ТОЛЬКО внутри read-executor-потока.
+    Отдельный коннект + общий embedder → search не ждёт backfill/index."""
+    global _db_ro
+    if _db_ro is None:
+        _db_ro = RagMemory(readonly=True)
+    return _db_ro
+
+
 async def run(loop, method: str, *args):
-    """Выполнить RagMemory.<method>(*args) в executor-потоке. get_rag() вызывается
-    ВНУТРИ executor — иначе коннект привяжется к loop-потоку (SQLite check_same_thread)."""
+    """Выполнить RagMemory.<method>(*args) в нужном executor-потоке. search → read-executor
+    (RO conn, конкурентно с backfill), остальное → write-executor. get_rag* вызывается ВНУТРИ
+    executor — иначе коннект привяжется к loop-потоку (SQLite check_same_thread)."""
+    if method in _READ_METHODS:
+        def _call_ro():
+            return getattr(get_rag_ro(), method)(*args)
+        return await loop.run_in_executor(_read_executor, _call_ro)
     def _call():
         return getattr(get_rag(), method)(*args)
     return await loop.run_in_executor(_executor, _call)

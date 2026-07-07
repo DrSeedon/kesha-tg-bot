@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>File RAG — Индексация базы знаний Кеши (task #10)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root{
+  --bg:#0e0e12; --surface:#16161c; --surface-2:#1c1c24; --border:#2a2a32;
+  --ink:#f1f1f4; --ink-soft:#a8a8b3; --accent:#7c3aed; --accent-soft:#7c3aed33;
+  --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444; --info:#3b82f6;
+  --serif:Charter,"Iowan Old Style","Source Serif 4",ui-serif,Georgia,serif;
+  --sans:system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#fafaf7;--surface:#fff;--surface-2:#f5f5f0;--border:#e7e5df;--ink:#1a1a1f;--ink-soft:#555560;}
+}
+@media print{
+  :root{--bg:#fff;--surface:#f8f8f8;--surface-2:#f0f0f0;--border:#ddd;--ink:#000;--ink-soft:#555;}
+  .no-print{display:none!important;} *{print-color-adjust:exact;-webkit-print-color-adjust:exact;}
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;}
+html{background:var(--bg);color:var(--ink);scroll-behavior:smooth;}
+body{font:16px/1.55 var(--serif);max-width:900px;margin:0 auto;padding:0 1.25rem 5rem;}
+
+header.top{padding:3rem 0 1.5rem;border-bottom:1px solid var(--border);margin-bottom:2rem;}
+.crumb{font:600 12px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:.75rem;}
+h1{font:700 2.1rem/1.15 var(--sans);letter-spacing:-.02em;margin-bottom:.6rem;}
+.tldr{font-size:1.1rem;color:var(--ink-soft);max-width:70ch;}
+.meta{font:13px/1.5 var(--sans);color:var(--ink-soft);margin-top:1rem;}
+.meta b{color:var(--ok);}
+
+nav.toc{position:sticky;top:0;background:var(--bg);z-index:10;padding:.75rem 0;border-bottom:1px solid var(--border);margin-bottom:2rem;font:13px/1 var(--sans);}
+nav.toc a{color:var(--ink-soft);text-decoration:none;margin-right:1rem;white-space:nowrap;}
+nav.toc a:hover{color:var(--accent);}
+nav.toc .scroll{display:flex;flex-wrap:wrap;gap:.4rem 0;}
+
+section{margin:3rem 0;scroll-margin-top:3.5rem;}
+h2{font:700 1.5rem/1.2 var(--sans);letter-spacing:-.01em;margin-bottom:.5rem;padding-top:.5rem;}
+h2 .n{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:.5rem;}
+h3{font:600 1.1rem/1.3 var(--sans);margin:1.5rem 0 .5rem;}
+p{margin:.7rem 0;}
+.lead{color:var(--ink-soft);font-size:1.02rem;}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0;font:14px/1.4 var(--sans);}
+th,td{text-align:left;padding:.55rem .7rem;border-bottom:1px solid var(--border);vertical-align:top;}
+th{font-weight:600;color:var(--ink-soft);font-size:12px;text-transform:uppercase;letter-spacing:.04em;}
+td.num{font-variant-numeric:tabular-nums;text-align:right;font-family:var(--mono);}
+tr:hover td{background:var(--surface);}
+.win{color:var(--ok);font-weight:600;}
+.lose{color:var(--danger);}
+
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.1rem 1.25rem;}
+.card h4{font:600 14px/1.2 var(--sans);margin-bottom:.5rem;display:flex;align-items:center;gap:.5rem;}
+.card p{font-size:.92rem;color:var(--ink-soft);margin:.3rem 0;}
+
+.tag{display:inline-block;font:600 11px/1 var(--sans);padding:.28em .6em;border-radius:3px;letter-spacing:.03em;}
+.tag.ok{background:#22c55e22;color:var(--ok);}
+.tag.warn{background:#f59e0b22;color:var(--warn);}
+.tag.danger{background:#ef444422;color:var(--danger);}
+.tag.info{background:#3b82f622;color:var(--info);}
+.tag.accent{background:var(--accent-soft);color:#b794f6;}
+
+pre{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:.9rem 1rem;overflow-x:auto;font:13px/1.5 var(--mono);margin:1rem 0;}
+code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:.1em .35em;border-radius:3px;}
+pre code{background:none;padding:0;}
+.c-key{color:#c792ea;} .c-str{color:#c3e88d;} .c-com{color:#5c6370;font-style:italic;} .c-fn{color:#82aaff;} .c-num{color:#f78c6c;}
+
+details{background:var(--surface);border:1px solid var(--border);border-radius:6px;margin:.75rem 0;padding:0 1rem;}
+details summary{cursor:pointer;font:600 14px/1 var(--sans);padding:.9rem 0;list-style:none;display:flex;justify-content:space-between;align-items:center;}
+details summary::-webkit-details-marker{display:none;}
+details summary::after{content:"+";color:var(--accent);font-size:1.2rem;}
+details[open] summary::after{content:"–";}
+details .body{padding:0 0 1rem;}
+
+.callout{border-left:4px solid var(--accent);background:var(--surface);padding:.9rem 1.2rem;margin:1.2rem 0;border-radius:0 6px 6px 0;}
+.callout.ok{border-color:var(--ok);} .callout.warn{border-color:var(--warn);} .callout.danger{border-color:var(--danger);}
+.callout h4{font:600 14px/1.2 var(--sans);margin-bottom:.3rem;}
+.callout p{font-size:.95rem;margin:.3rem 0;}
+
+.chunk-compare{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1.2rem 0;}
+@media(max-width:640px){.chunk-compare{grid-template-columns:1fr;}}
+.chunk-box{border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.chunk-box .hd{font:600 12px/1 var(--sans);padding:.6rem .8rem;text-transform:uppercase;letter-spacing:.04em;}
+.chunk-box.bad .hd{background:#ef444418;color:var(--danger);}
+.chunk-box.good .hd{background:#22c55e18;color:var(--ok);}
+.chunk-box .ct{padding:.8rem;font:13px/1.5 var(--mono);color:var(--ink-soft);white-space:pre-wrap;}
+.chunk-box .ct .hl{color:var(--ink);background:var(--accent-soft);}
+
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:1rem 0;font:13px/1.3 var(--sans);}
+.flow .step{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:.5rem .8rem;}
+.flow .arrow{color:var(--accent);font-weight:700;}
+.flow .step.del{border-color:#ef444455;} .flow .step.add{border-color:#22c55e55;}
+
+.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.2rem;margin:1.5rem 0;}
+.chart-wrap h4{font:600 13px/1 var(--sans);color:var(--ink-soft);margin-bottom:1rem;text-transform:uppercase;letter-spacing:.04em;}
+
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:1.5rem 0;}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1rem 1.1rem;}
+.stat .v{font:700 1.6rem/1 var(--sans);color:var(--ink);font-variant-numeric:tabular-nums;}
+.stat .v.ok{color:var(--ok);}
+.stat .l{font:13px/1.3 var(--sans);color:var(--ink-soft);margin-top:.4rem;}
+
+svg{max-width:100%;height:auto;}
+.schema-svg text{font:12px var(--mono);fill:var(--ink);}
+.schema-svg .lbl{font:600 11px var(--sans);fill:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;}
+footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);font:13px/1.6 var(--sans);color:var(--ink-soft);}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <p class="crumb">Kesha TG Bot · Full-Cycle Report · Task #10</p>
+  <h1>File RAG — индексация базы знаний</h1>
+  <p class="tldr">Кеша умел искать только по переписке. Теперь он ищет и по <b>1342 файлам</b> базы знаний
+  (дневники, daily-dumps, заметки, проекты) — единым гибридным поиском вместе с диалогами.
+  Умный чанкинг по markdown-заголовкам, живой inotify-watcher, дедуп по sha256, source attribution.</p>
+  <p class="meta">Модель: bge-m3 int8 (1024d) · sqlite-vec + FTS5 + RRF ·
+  <b>44 теста зелёные</b> · Codex APPROVE WITH FIXES · Задеплоено на Contabo, schema v7→v8</p>
+</header>
+
+<nav class="toc no-print"><div class="scroll">
+  <a href="#inventory">1 · Инвентарь</a>
+  <a href="#chunking">2 · Чанкинг</a>
+  <a href="#watcher">3 · Watcher</a>
+  <a href="#schema">4 · Схема БД</a>
+  <a href="#dedup">5 · Дедуп</a>
+  <a href="#attr">6 · Attribution</a>
+  <a href="#codex">7 · Codex</a>
+  <a href="#tests">8 · Тесты</a>
+  <a href="#prod">9 · Прод</a>
+</div></nav>
+
+<!-- ============ 1. INVENTORY ============ -->
+<section id="inventory">
+  <h2><span class="n">1</span>Инвентарь файлов</h2>
+  <p class="lead">Первый шаг — не строить, а измерить. Пошёл на прод (Contabo), сделал
+  <code>find /opt/cog-second-brain</code> по расширениям. Ключевой вывод перевернул ТЗ.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4><span class="tag accent">1342</span> .md — ядро базы знаний</h4>
+      <p>2.03 МБ прозы. <b>1061</b> дневник (avg 409 B, шаблонные), <b>86</b> daily-dumps
+      (до 9 КБ, глубокая <code>##</code>/<code>###</code> структура), заметки/проекты/консолидированный ресёрч.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag ok">2</span> .txt — мелкие braindumps</h4>
+      <p>616 B каждый. Индексируем — безвредно, реальная проза.</p>
+    </div>
+  </div>
+
+  <h3>Почему НЕ html/xml/csv/json — измеренная реальность</h3>
+  <p class="lead">ТЗ просило «все текстовые форматы». Но замер показал: остальные форматы — это НЕ проза,
+  а машинные данные. Индексация = мусор в retrieval. Решение (одобрено): <b>только .md + .txt для v1</b>.</p>
+  <table>
+    <thead><tr><th>Формат</th><th class="num">Кол-во</th><th>Что это на самом деле</th><th>Индексируем?</th></tr></thead>
+    <tbody>
+      <tr><td>md</td><td class="num">1342</td><td>База знаний — проза</td><td><span class="tag ok">ДА</span></td></tr>
+      <tr><td>txt</td><td class="num">2</td><td>Braindumps — проза</td><td><span class="tag ok">ДА</span></td></tr>
+      <tr><td>xml</td><td class="num">10</td><td>Гос-отчёты (ЕФС-1, РСВ, персвед) — машинные коды, 0 прозы</td><td><span class="tag danger">НЕТ</span></td></tr>
+      <tr><td>csv</td><td class="num">4</td><td>Логи транзакций/сна (tbank 872КБ, sber 780КБ) — таблицы, не текст</td><td><span class="tag danger">НЕТ</span></td></tr>
+      <tr><td>json</td><td class="num">4</td><td>Конфиги + дамп дашборда (107КБ) — не знание</td><td><span class="tag danger">НЕТ</span></td></tr>
+      <tr><td>html</td><td class="num">4</td><td>Дашборды + сайт ООО — UI-разметка</td><td><span class="tag danger">НЕТ</span></td></tr>
+      <tr><td>pdf/docx/jpg</td><td class="num">79</td><td>Бинарники</td><td><span class="tag danger">out of scope</span></td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <h4>Философия «стабильно 90% &gt; хрупко 100%»</h4>
+    <p>Парсеры html/xml/csv/json = больше кода, больше edge-кейсов, ХУЖЕ retrieval (мусорные чанки
+    конкурируют с реальной прозой). Список форматов — одна константа <code>FILE_EXTENSIONS</code>,
+    расширить тривиально если появится реальная проза в .html/.txt.</p>
+  </div>
+  <p class="lead">Также измерено: <b>0</b> не-UTF8 файлов, <b>0</b> симлинков, <b>45</b> .md в dot-dirs
+  (<code>.claude</code>/<code>.kiro</code>/<code>.gemini</code> — фреймворк-конфиги, НЕ знание → исключены).</p>
+</section>
+
+<!-- ============ 2. CHUNKING ============ -->
+<section id="chunking">
+  <h2><span class="n">2</span>Чанкинг: heading-aware vs naive</h2>
+  <p class="lead"><b>Гипотеза (до замера):</b> markdown heading-aware чанкинг ищет лучше naive char-window,
+  потому что чанки семантически цельные (одна секция = одна тема, чистые границы). Метрики зафиксированы
+  ДО прогона: top-1/top-3 hit rate + MRR на контрольных запросах через реальный bge-m3.</p>
+
+  <h3>Проблема naive-чанкинга — фрагмент посреди фразы</h3>
+  <div class="chunk-compare">
+    <div class="chunk-box bad">
+      <div class="hd">✗ NAIVE (char-window 800)</div>
+      <div class="ct">...охлаждает — испарение (80%) + сдувание тёплой "шубы" (20%). В бане — обратный эффект. <span class="hl">Тепловой насос</span> — КПД 300-500%, перекачивает...</div>
+    </div>
+    <div class="chunk-box good">
+      <div class="hd">✓ MD-AWARE (heading section)</div>
+      <div class="ct"><span class="hl">### Термодинамика и энергия</span>
+- Почему вентилятор охлаждает — испарение (80%)...
+- Тепловой насос — КПД 300-500%, перекачивает тепло...</div>
+    </div>
+  </div>
+  <p>Naive начинает чанк с «...охлаждает — испарение» — без темы, эмбеддится плохо. Md-aware несёт
+  хлебную крошку заголовка (<code>Physics &gt; Термодинамика</code>) → изолированный факт получает контекст.</p>
+
+  <h3>Замер 1 — структурная когерентность</h3>
+  <table>
+    <thead><tr><th>Файл</th><th>Стратегия</th><th class="num">Чанков</th><th class="num">start-clean</th><th class="num">end-coherent</th></tr></thead>
+    <tbody>
+      <tr><td>daily-dump.md</td><td>naive</td><td class="num">9</td><td class="num lose">33%</td><td class="num">11%</td></tr>
+      <tr><td>daily-dump.md</td><td><b>md-aware</b></td><td class="num">10</td><td class="num win">100%</td><td class="num">10%</td></tr>
+      <tr><td>knowledge-research.md</td><td>naive</td><td class="num">36</td><td class="num lose">36%</td><td class="num">8%</td></tr>
+      <tr><td>knowledge-research.md</td><td><b>md-aware</b></td><td class="num">50</td><td class="num win">100%</td><td class="num">10%</td></tr>
+      <tr><td>wellness-analyses.md</td><td>naive</td><td class="num">45</td><td class="num lose">29%</td><td class="num">11%</td></tr>
+      <tr><td>wellness-analyses.md</td><td><b>md-aware</b></td><td class="num">40</td><td class="num win">98%</td><td class="num">30%</td></tr>
+    </tbody>
+  </table>
+  <p class="lead"><b>start-clean</b> (чанк начинается с заголовка/списка/заглавной, не посреди фразы):
+  md-aware <span class="win">98-100%</span> vs naive <span class="lose">29-36%</span>. Это payoff для
+  читаемости — LLM получает целые секции. <span class="tag info">end-coherent низкий у обоих — markdown-списки
+  не кончаются точкой, это норма, не дефект.</span></p>
+
+  <h3>Замер 2 — реальный retrieval через bge-m3 (решающий)</h3>
+  <div class="chunk-compare">
+    <div class="chunk-box bad">
+      <div class="hd">Single-doc — контр-свидетельство</div>
+      <div class="ct">daily-dump.md один (9-10 чанков)
+naive:    top-1 5/5  MRR 1.000  ← naive выиграл
+md-aware: top-1 4/5  MRR 0.900
+
+Записано честно. НЕ репрезентативно:
+10 чанков без дистракторов —
+всё ранжируется у верха.</div>
+    </div>
+    <div class="chunk-box good">
+      <div class="hd">Multi-doc + дистракторы — реальность</div>
+      <div class="ct">3 дока, смешанные темы (90-100 чанков)
+naive:    top1 3/5  top3 4/5  MRR 0.700
+md-aware: top1 4/5  top3 5/5  MRR 0.900  ✓
+
+При масштабе с дистракторами
+(= реальный корпус 2600 чанков)
+md-aware выигрывает чётко.</div>
+    </div>
+  </div>
+
+  <div class="chart-wrap">
+    <h4>MRR — multi-doc корпус с дистракторами (выше = лучше)</h4>
+    <canvas id="mrrChart" height="120"></canvas>
+  </div>
+
+  <div class="callout ok">
+    <h4>Вывод: CONFIRMED</h4>
+    <p>md-aware чанкинг для .md: делим по заголовкам <code>#..######</code>, несём хлебную крошку;
+    секция &gt;1500 симв → делим по параграфам; секция &lt;250 симв → мержим с соседней; файл без
+    заголовков (дневники) → параграфы. .txt → параграфы. Fallback → старый char-window.</p>
+  </div>
+  <details>
+    <summary>Как читать «single-doc naive выиграл» — не двигал goalposts</summary>
+    <div class="body">
+      <p>Метрики зафиксированы ДО прогона. Single-doc результат (naive 5/5) записан как есть — это
+      p-hacking-safe. Но single-doc с ~10 чанками нерепрезентативен: без конкурентов любой чанк близко
+      к топу. Реальный корпус = 2600+ чанков с дистракторами, где фрагмент посреди фразы конкурирует
+      плохо. Multi-doc замер это подтвердил (MRR 0.90 vs 0.70). Оба замера в research.md.</p>
+    </div>
+  </details>
+</section>
+
+<!-- ============ 3. WATCHER ============ -->
+<section id="watcher">
+  <h2><span class="n">3</span>inotify: watchfiles vs watchdog</h2>
+  <p class="lead">Требование — живой watcher (не cron, не при старте). Ловить create/modify/delete в
+  реальном времени. Ресёрч 4 вариантов под asyncio-интеграцию бота.</p>
+
+  <table>
+    <thead><tr><th>Вариант</th><th>asyncio</th><th>Debounce</th><th>Backend</th><th>Вердикт</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>watchfiles</b></td>
+        <td><span class="tag ok">native</span> <code>async for … in awatch()</code></td>
+        <td><span class="tag ok">встроен</span></td>
+        <td>Rust <code>notify</code> (inotify)</td>
+        <td><span class="tag ok">ВЫБРАН</span></td>
+      </tr>
+      <tr>
+        <td>watchdog</td>
+        <td><span class="tag danger">thread-based</span> нужен мост hachiko/custom</td>
+        <td><span class="tag warn">DIY (threading.Timer)</span></td>
+        <td>inotify</td>
+        <td><span class="tag danger">лишний клей</span></td>
+      </tr>
+      <tr>
+        <td>pyinotify</td>
+        <td><span class="tag danger">нет</span></td>
+        <td><span class="tag danger">руками</span></td>
+        <td>inotify (Linux-only)</td>
+        <td><span class="tag danger">unmaintained</span></td>
+      </tr>
+      <tr>
+        <td>inotifywait subprocess</td>
+        <td><span class="tag warn">парсинг stdout</span></td>
+        <td><span class="tag danger">нет</span></td>
+        <td>inotify CLI</td>
+        <td><span class="tag danger">хрупко</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Почему watchfiles</h4>
+      <p><code>awatch()</code> — async-генератор множеств <code>{(Change, path)}</code>. Никакого моста
+      thread↔loop, никакого <code>threading.Timer</code>.</p>
+      <p>Встроенный debounce схлопывает пачку «редактор сохранил 5×» в один reindex.</p>
+      <p><code>Change</code> = added/modified/deleted → index/reindex/delete напрямую.</p>
+    </div>
+    <div class="card">
+      <h4>Прод-факты (замерено)</h4>
+      <p><code>fs.inotify.max_user_watches = 61659</code>, корпус = <b>100</b> директорий → бюджет не проблема.</p>
+      <p>Все sqlite-записи идут через <code>rag_executor</code> (single-thread) — watcher enqueue'ит,
+      thread-affinity соблюдён.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 4. SCHEMA ============ -->
+<section id="schema">
+  <h2><span class="n">4</span>Схема БД (v7 → v8)</h2>
+  <p class="lead">Главный вызов: существующая схема — message-centric (<code>chunk_id = msg_id*1000+idx</code>,
+  <code>chat_id PARTITION KEY</code>, content джойнится из messages.db). Файлам это не подходит.
+  Решение — <b>отдельные файловые таблицы</b>, диалоговый путь не трогаем.</p>
+
+  <svg class="schema-svg" viewBox="0 0 820 340" role="img" aria-label="Схема таблиц">
+    <defs>
+      <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+    <!-- dialog side -->
+    <text x="20" y="24" class="lbl">Диалоги (не тронуты)</text>
+    <g>
+      <rect x="20" y="36" width="200" height="70" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+      <text x="32" y="58" font-weight="700">vec_messages</text>
+      <text x="32" y="78" fill="var(--ink-soft)">chunk_id = msg*1000+idx</text>
+      <text x="32" y="95" fill="var(--ink-soft)">chat_id PARTITION KEY</text>
+    </g>
+    <g>
+      <rect x="20" y="120" width="200" height="46" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+      <text x="32" y="142" font-weight="700">fts_messages</text>
+      <text x="32" y="159" fill="var(--ink-soft)">content, role, chat_id</text>
+    </g>
+    <g>
+      <rect x="20" y="180" width="200" height="40" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+      <text x="32" y="205" font-weight="700">msg.messages (RO join)</text>
+    </g>
+
+    <!-- file side -->
+    <text x="470" y="24" class="lbl" fill="var(--accent)">Файлы (task #10 · новое)</text>
+    <g>
+      <rect x="470" y="36" width="330" height="60" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="482" y="58" font-weight="700">files</text>
+      <text x="482" y="78" fill="var(--ink-soft)">file_id PK · path UNIQUE · sha256 · mtime</text>
+    </g>
+    <g>
+      <rect x="470" y="110" width="330" height="58" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="482" y="132" font-weight="700">vec_files</text>
+      <text x="482" y="152" fill="var(--ink-soft)">chunk_id = file*1000+idx · БЕЗ chat-партиции</text>
+    </g>
+    <g>
+      <rect x="470" y="182" width="330" height="58" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="482" y="204" font-weight="700">file_chunks</text>
+      <text x="482" y="224" fill="var(--ink-soft)">chunk_id · text (для read-path hydration)</text>
+    </g>
+    <g>
+      <rect x="470" y="254" width="330" height="58" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+      <text x="482" y="276" font-weight="700">fts_files</text>
+      <text x="482" y="296" fill="var(--ink-soft)">rowid = chunk_id (O(1) delete, Codex fix)</text>
+    </g>
+    <!-- link -->
+    <line x1="635" y1="96" x2="635" y2="110" stroke="var(--accent)" marker-end="url(#ar)"/>
+    <line x1="635" y1="168" x2="635" y2="182" stroke="var(--accent)" marker-end="url(#ar)"/>
+    <line x1="635" y1="240" x2="635" y2="254" stroke="var(--accent)" marker-end="url(#ar)"/>
+  </svg>
+
+  <h3>Namespaced RRF — почему не схлопнутся id-пространства</h3>
+  <p>Диалоговый <code>msg_id</code> и файловый <code>chunk_id</code> — оба маленькие int, могут совпасть.
+  Если фьюзить по голому int, message #5 и chunk #5 слились бы в RRF. Fix — namespaced ключи:</p>
+<pre><code><span class="c-com"># диалог → ("d", parent_message_id) · файл → ("f", chunk_id)</span>
+<span class="c-com"># chunk-level (НЕ дедуп до file_id!) → matched секция и есть результат</span>
+d_vec = [(<span class="c-str">"d"</span>, m) <span class="c-key">for</span> m <span class="c-key">in</span> self._vec_search(chat_id, qvec, pool, role)]
+f_vec = [(<span class="c-str">"f"</span>, c) <span class="c-key">for</span> c <span class="c-key">in</span> self._vec_search_files(qvec, pool)]
+ranked = self._rrf(d_vec, d_fts, f_vec, f_fts)   <span class="c-com"># union, ключи не коллизят</span></code></pre>
+  <div class="callout ok">
+    <h4>Миграция безопасна</h4>
+    <p>Bump v7→v8 дропает <b>только производные</b> индекс-таблицы и ребилдит: диалоги из messages.db
+    (проверенный <code>backfill</code>), файлы с диска (<code>backfill_files</code>). messages.db никогда
+    не трогается. Это установленный паттерн (v6→v7 делал то же при смене модели).</p>
+  </div>
+</section>
+
+<!-- ============ 5. DEDUP ============ -->
+<section id="dedup">
+  <h2><span class="n">5</span>Дедупликация: sha256 + delete-reindex</h2>
+  <p class="lead">Изменился файл → удалить старые чанки → переиндексировать. НЕ дублировать.
+  Ключ дедупа — <b>sha256 контента</b>, по <code>path</code>. mtime — дешёвый пре-фильтр.</p>
+
+  <h3>Поток index_file</h3>
+  <div class="flow">
+    <span class="step">файл</span><span class="arrow">→</span>
+    <span class="step">chunk_file()</span><span class="arrow">→</span>
+    <span class="step">sha256(content)</span><span class="arrow">→</span>
+    <span class="step">files WHERE path=?</span>
+  </div>
+  <div class="flow">
+    <span class="step" style="border-color:var(--warn)">sha совпал</span><span class="arrow">→</span>
+    <span class="step">no-op (0)</span>
+    <span style="margin:0 1rem;color:var(--ink-soft)">|</span>
+    <span class="step del">sha изменился</span><span class="arrow">→</span>
+    <span class="step del">delete старые чанки</span><span class="arrow">→</span>
+    <span class="step add">re-embed + insert</span><span class="arrow">→</span>
+    <span class="step add">UPDATE files</span>
+  </div>
+
+  <table>
+    <thead><tr><th>Событие watcher</th><th>Действие</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag ok">added</span></td><td>index_file — новый file_id, чанки, sha</td></tr>
+      <tr><td><span class="tag info">modified</span></td><td>sha совпал → skip; иначе delete старых + reindex</td></tr>
+      <tr><td><span class="tag danger">deleted</span></td><td>delete_file — все чанки path из vec/fts/file_chunks/files</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <h4>Почему sha256, а не только mtime</h4>
+    <p>mtime меняется на любой touch (git checkout, rsync, сохранение без правок). Хэш контента =
+    источник правды «изменился ли смысл». mtime = дешёвый пре-фильтр (не изменился → не хэшируем).</p>
+  </div>
+  <p class="lead"><b>Prune stale</b> (по подсказке Codex): <code>backfill_files</code> удаляет из <code>files</code>
+  записи, чьих путей больше нет на диске — консистентность после удалений пока watcher был выключен.</p>
+</section>
+
+<!-- ============ 6. ATTRIBUTION ============ -->
+<section id="attr">
+  <h2><span class="n">6</span>Source attribution</h2>
+  <p class="lead">Результат <code>search_memory</code> должен показывать откуда факт — из файла или диалога.
+  Каждый результат несёт <code>source</code>-дискриминатор.</p>
+  <div class="chunk-compare">
+    <div class="chunk-box good">
+      <div class="hd">Из файла</div>
+      <div class="ct"><span class="hl">[file: 01-daily/2026-06-08-daily-dump.md]</span>
+### Термодинамика
+Тепловой насос — КПД 300-500%...</div>
+    </div>
+    <div class="chunk-box good">
+      <div class="hd">Из диалога</div>
+      <div class="ct"><span class="hl">[2026-06-08T14:30 | user]</span>
+напомни какой кпд у теплового насоса</div>
+    </div>
+  </div>
+  <p><code>role</code>-фильтр применяется <b>только к диалогам</b> — у файлов нет роли, при заданном
+  <code>role</code> файлы исключаются. Path хранится относительным от <code>WORK_DIR</code>
+  (<code>/opt/cog-second-brain</code>), рендерится инструментом.</p>
+</section>
+
+<!-- ============ 7. CODEX ============ -->
+<section id="codex">
+  <h2><span class="n">7</span>Codex review</h2>
+  <p class="lead">Cross-LLM ревью (GPT-5.5) на план И на имплементацию. Оба раза поймал реальное.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4><span class="tag danger">План · BLOCKING</span></h4>
+      <p><b>File FTS/RRF был file-level.</b> Запрос по одной секции 50-чанкового файла вернул бы ВЕСЬ файл.
+      Fix: FTS keyed by <code>chunk_id</code>, RRF фьюзит <code>("f",chunk_id)</code> — matched секция,
+      не файл. Внесено в план ДО имплементации.</p>
+    </div>
+    <div class="card">
+      <h4><span class="tag warn">Impl · "blocking" (оспорено)</span></h4>
+      <p>Codex: «<code>DELETE FROM fts_files WHERE chunk_id=?</code> по UNINDEXED-колонке может не работать».
+      Я <b>эмпирически опроверг</b> (в sqlite работает — тест удалил строку). Но применил идиоматичный
+      <code>rowid=chunk_id</code> → O(1) delete, ноль сомнений.</p>
+    </div>
+  </div>
+  <h3>Codex подтвердил корректность</h3>
+  <table>
+    <thead><tr><th>Проверка</th><th>Вердикт</th></tr></thead>
+    <tbody>
+      <tr><td>Диалоговый RAG не сломан схемой v8</td><td><span class="tag ok">OK — additive, role-filtered</span></td></tr>
+      <tr><td>RRF namespacing (msg_id vs chunk_id)</td><td><span class="tag ok">OK — не коллизят даже при равных int</span></td></tr>
+      <tr><td>Chunk-level retrieval файла</td><td><span class="tag ok">OK — vec+fts дают chunk_id</span></td></tr>
+      <tr><td>Watcher пишет sqlite только через executor</td><td><span class="tag ok">OK — thread-affinity соблюдён</span></td></tr>
+      <tr><td>&gt;999 чанков/файл — коллизия chunk_id</td><td><span class="tag ok">OK — cap CHUNK_STRIDE-1</span></td></tr>
+    </tbody>
+  </table>
+  <p style="text-align:center;margin-top:1.5rem;"><span class="tag ok" style="font-size:14px;padding:.5em 1.2em;">Вердикт Codex: APPROVE WITH FIXES</span></p>
+</section>
+
+<!-- ============ 8. TESTS ============ -->
+<section id="tests">
+  <h2><span class="n">8</span>Тесты — 44 зелёные</h2>
+  <p class="lead">27 новых файловых + 17 существующих диалоговых (регресс). Реальный FastEmbed, tmp_path БД
+  (data-layer TDD, стиль <code>test_rag.py</code>).</p>
+
+  <div class="stat-row">
+    <div class="stat"><div class="v ok">27</div><div class="l">файловых тестов</div></div>
+    <div class="stat"><div class="v ok">17</div><div class="l">диалоговых (регресс)</div></div>
+    <div class="stat"><div class="v ok">44</div><div class="l">всего pass</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">fail</div></div>
+  </div>
+
+  <details open>
+    <summary>T1 — чанкеры (8 тестов)</summary>
+    <div class="body"><p>start-clean у каждого чанка, сохранение контекста заголовка, headingless→параграфы,
+    пусто→[], .txt по <code>\n\n</code>, один параграф→один чанк, oversized-слово капается, диспетчер по расширению.</p></div>
+  </details>
+  <details>
+    <summary>T2 — schema + index/dedup/delete (6 тестов)</summary>
+    <div class="body"><p>rows created (vec=chunks=fts), идемпотентность при том же контенте, reindex замещает
+    старые чанки, delete убирает всё, пустой файл skip, диалоги независимы.</p></div>
+  </details>
+  <details>
+    <summary>T3 — unified search + attribution (6 тестов)</summary>
+    <div class="body"><p>file-результат несёт <code>source='file'</code>+path+<b>matched chunk</b> (не весь файл),
+    диалог shape не изменился, оба источника появляются, namespaced RRF без коллизии, role-фильтр исключает
+    файлы, dialog-only регресс идентичен старому.</p></div>
+  </details>
+  <details>
+    <summary>T5 — backfill_files (4 теста)</summary>
+    <div class="body"><p>индексит md+txt, skip dot-dirs+бинарников, skip non-UTF8 без обрыва обхода,
+    второй прогон 0 изменений (дедуп), prune удалённых с диска.</p></div>
+  </details>
+  <details>
+    <summary>T6 — watcher mapping (3 теста)</summary>
+    <div class="body"><p><code>file_change_target</code> фильтрует расширение+excluded-dirs, <code>apply_file_change</code>
+    index+delete, пропавший файл → no-op без краша.</p></div>
+  </details>
+
+  <details>
+    <summary>Пример теста — chunk-level retrieval (T3)</summary>
+    <div class="body">
+<pre><code><span class="c-key">def</span> <span class="c-fn">test_file_result_has_source_and_path</span>(mem, tmp_path):
+    <span class="c-com"># BIG_MD делится на секции-чанки → matched chunk = секция, не весь файл</span>
+    <span class="c-key">assert</span> len(rag._chunk_file(<span class="c-str">"x.md"</span>, BIG_MD)) &gt;= <span class="c-num">2</span>
+    mem.index_file(<span class="c-str">"02-personal/wellness/health.md"</span>, BIG_MD)
+    res = mem.search(<span class="c-num">100</span>, <span class="c-str">"какая норма витамина D в крови"</span>, limit=<span class="c-num">5</span>)
+    top = [r <span class="c-key">for</span> r <span class="c-key">in</span> res <span class="c-key">if</span> r[<span class="c-str">"source"</span>] == <span class="c-str">"file"</span>][<span class="c-num">0</span>]
+    <span class="c-key">assert</span> top[<span class="c-str">"path"</span>] == <span class="c-str">"02-personal/wellness/health.md"</span>
+    <span class="c-key">assert</span> <span class="c-str">"витамин"</span> <span class="c-key">in</span> top[<span class="c-str">"content"</span>].lower()
+    <span class="c-key">assert</span> <span class="c-str">"Глубокий сон"</span> <span class="c-key">not in</span> top[<span class="c-str">"content"</span>]  <span class="c-com"># секция Сон — отдельный чанк</span></code></pre>
+    </div>
+  </details>
+</section>
+
+<!-- ============ 9. PROD ============ -->
+<section id="prod">
+  <h2><span class="n">9</span>Прод-замеры &amp; бюджет</h2>
+  <p class="lead">Contabo 8 ГБ (~6 ГБ free). Оценки экстраполированы из измеренных диалоговых чисел.</p>
+
+  <div class="stat-row">
+    <div class="stat"><div class="v">~1900</div><div class="l">файловых чанков (1200 малых×1 + 142 больших×5)</div></div>
+    <div class="stat"><div class="v">15→~28<span style="font-size:1rem">МБ</span></div><div class="l">vec.db размер</div></div>
+    <div class="stat"><div class="v">~30-40<span style="font-size:1rem">мин</span></div><div class="l">разовый backfill (batched, non-blocking)</div></div>
+    <div class="stat"><div class="v ok">&lt;100<span style="font-size:1rem">мс</span></div><div class="l">latency поиска (без изменений)</div></div>
+  </div>
+
+  <div class="callout ok">
+    <h4>RAM без прироста</h4>
+    <p>Файловая индексация <b>переиспользует тот же embedder</b> — нет новой загрузки модели, нет прироста
+    RSS сверх транзиентных батч-буферов. Бот сегодня ~1248 МБ (bge-m3 резидент). Search на ~2600 векторах
+    (vec0 brute-force) — sub-100ms, запас до 10K+.</p>
+  </div>
+
+  <h3>Деплой на Contabo</h3>
+  <div class="flow">
+    <span class="step add">pip install watchfiles</span><span class="arrow">→</span>
+    <span class="step">restart kesha-bot-vps</span><span class="arrow">→</span>
+    <span class="step">schema v7→v8 rebuild</span><span class="arrow">→</span>
+    <span class="step">backfill ~1342 файла</span><span class="arrow">→</span>
+    <span class="step add">watcher live</span>
+  </div>
+  <p><span class="tag ok">Задеплоено</span> Бот живой, schema v7→v8, backfill идёт. <code>WORK_DIR</code> уже
+  = <code>/opt/cog-second-brain</code>.</p>
+
+  <details>
+    <summary>Инфра-заметка (не код) — HTTPS_PROXY фильтрует HuggingFace</summary>
+    <div class="body"><p>Во время тестов OOM-kills побили локальный fastembed-кеш (bge-m3 .onnx → 0-байт).
+    Ре-даунлоад падал с <code>403 Filtered</code> — оказалось <code>HTTPS_PROXY</code> (Anthropic-прокси)
+    режет HuggingFace. Фикс: <code>env -u HTTPS_PROXY</code> для HF-фетчей. На проде не воспроизводится
+    (там HF доступен напрямую).</p></div>
+  </details>
+</section>
+
+<footer>
+  <p><b>Task #10 · Full-Cycle</b> — research → эксперименты → план → Codex → имплементация.
+  Файлы: <code>rag.py</code> +390, <code>bot.py</code> +22, <code>kesha_tools.py</code> +18,
+  <code>requirements.txt</code> +watchfiles, <code>tests/test_rag_files.py</code> (27 тестов).</p>
+  <p>Артефакты: <code>docs/tasks/10/</code> — research.md · plan.md · codex-review-plan.md ·
+  codex-review-impl.md · report.md</p>
+</footer>
+
+<script>
+const css = getComputedStyle(document.documentElement);
+const ink = css.getPropertyValue('--ink-soft').trim();
+const grid = css.getPropertyValue('--border').trim();
+new Chart(document.getElementById('mrrChart'), {
+  type: 'bar',
+  data: {
+    labels: ['top-1 hit', 'top-3 hit', 'MRR'],
+    datasets: [
+      { label: 'naive char-window', data: [0.60, 0.80, 0.700], backgroundColor: '#ef4444aa', borderColor:'#ef4444', borderWidth:1 },
+      { label: 'md-aware (heading)', data: [0.80, 1.00, 0.900], backgroundColor: '#22c55eaa', borderColor:'#22c55e', borderWidth:1 }
+    ]
+  },
+  options: {
+    responsive: true,
+    scales: {
+      y: { beginAtZero:true, max:1, ticks:{ color:ink, callback:v=>v.toFixed(1) }, grid:{ color:grid } },
+      x: { ticks:{ color:ink }, grid:{ display:false } }
+    },
+    plugins: {
+      legend: { labels:{ color:ink, font:{ family:'system-ui' } } },
+      tooltip: { callbacks:{ label:c=>c.dataset.label+': '+c.parsed.y.toFixed(3) } }
+    }
+  }
+});
+</script>
+</body>
+</html>

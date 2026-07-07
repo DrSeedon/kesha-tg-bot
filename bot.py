@@ -126,6 +126,7 @@ def _acquire_singleton_lock():
 
 _singleton_lock_fp = None
 _rag_executor: Optional[ThreadPoolExecutor] = None
+_rag_read_executor: Optional[ThreadPoolExecutor] = None
 
 
 async def main():
@@ -164,10 +165,12 @@ async def main():
     _media.cleanup_logs()
     asyncio.create_task(_media.daily_cleanup_loop())
 
-    # RAG semantic memory — single dedicated thread owns sqlite-vec conn + embedder
-    global _rag_executor
-    _rag_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag")
-    _rag.set_executor(_rag_executor)
+    # RAG semantic memory — два потока: write (index/backfill, RW conn) и read (search, RO conn).
+    # WAL → search не ждёт backfill (иначе search висел 300с в очереди за embed-батчами). #10-opt
+    global _rag_executor, _rag_read_executor
+    _rag_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-w")
+    _rag_read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-r")
+    _rag.set_executor(_rag_executor, _rag_read_executor)
     loop = asyncio.get_running_loop()
     rag_queue: asyncio.Queue = asyncio.Queue()
 
@@ -248,6 +251,8 @@ async def main():
         await registry.shutdown()
         if _rag_executor:
             _rag_executor.shutdown(wait=False)
+        if _rag_read_executor:
+            _rag_read_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":
