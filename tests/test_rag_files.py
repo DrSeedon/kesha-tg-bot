@@ -238,12 +238,18 @@ def test_both_sources_can_appear(mem):
     # both indexed on the same topic → both retrievable
 
 
-def test_role_filter_excludes_files(mem):
-    mem.index_message(1, 100, "user", "витамин D важен для иммунитета")
+def test_role_filter_keeps_files(mem):
+    # PROD BUG regression: Кеша всегда шлёт role="user". Файлы должны находиться ВСЁ РАВНО.
+    # role фильтрует ТОЛЬКО диалоги (у файлов нет role), но НЕ выкидывает файлы из поиска.
+    mem.index_message(1, 100, "assistant", "витамин D важен для иммунитета и костей")
     mem.index_file("health.md", RU_MD)
-    res = mem.search(100, "витамин D норма", limit=10, role="user")
+    res = mem.search(100, "витамин D норма в крови", limit=10, role="user")
     assert res
-    assert all(r["source"] == "dialog" for r in res), "role filter must exclude files"
+    # assistant-сообщение отфильтровано role="user", но файл — есть
+    assert any(r["source"] == "file" and r["path"] == "health.md" for r in res), \
+        "role='user' НЕ должен прятать файлы (prod bug)"
+    assert all(r.get("role") != "assistant" for r in res if r["source"] == "dialog"), \
+        "role='user' фильтрует диалоги по роли"
 
 
 def test_rrf_namespaced_keys_no_collision():

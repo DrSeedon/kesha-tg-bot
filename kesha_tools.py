@@ -280,7 +280,7 @@ async def update_reminder(args):
       "asks about their notes/knowledge. Do NOT call on every message — only when memory is needed. "
       "Results are tagged: [file: path] for notes, [timestamp | role] for dialog. "
       "query: what to find (natural language). role: optional filter 'user'/'assistant' "
-      "(applies to dialog only — excludes files). limit: max results (default 5).",
+      "(filters dialog messages by role; files are always searched). limit: max results (default 5).",
       {"query": str, "limit": int, "role": str})
 async def search_memory(args):
     chat_id = _require_chat()

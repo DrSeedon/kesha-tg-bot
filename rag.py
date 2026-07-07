@@ -540,15 +540,14 @@ class RagMemory:
             return []
         pool = max(limit * POOL_MULT, limit)
         qvec = self._embed([query], is_query=True)[0]
-        # диалоги: namespaced ключ ('d', parent_message_id)
+        # диалоги: namespaced ключ ('d', parent_message_id). role фильтрует ТОЛЬКО диалоги.
         d_vec = [("d", m) for m in self._vec_search(chat_id, qvec, pool, role)]
         d_fts = [("d", m) for m in self._fts_search(chat_id, query, pool, role)]
-        # файлы: chunk-level, ключ ('f', chunk_id). role-фильтр → диалоги-only (у файлов нет role).
-        if role:
-            f_vec, f_fts = [], []
-        else:
-            f_vec = [("f", c) for c in self._vec_search_files(qvec, pool)]
-            f_fts = [("f", c) for c in self._fts_search_files(query, pool)]
+        # файлы: chunk-level, ключ ('f', chunk_id). ВСЕГДА ищем — у файлов нет role, поэтому role
+        # к ним неприменим (НЕ повод их выкидывать). Кеша всегда шлёт role="user" → иначе файлы
+        # не находились бы никогда. role-фильтр применяется к диалогам выше, к файлам — нет.
+        f_vec = [("f", c) for c in self._vec_search_files(qvec, pool)]
+        f_fts = [("f", c) for c in self._fts_search_files(query, pool)]
         ranked = self._rrf(d_vec, d_fts, f_vec, f_fts)
         if not ranked:
             return []
