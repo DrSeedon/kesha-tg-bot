@@ -189,6 +189,28 @@ async def main():
     _msg_db().set_on_message(_enqueue_index)
     asyncio.ensure_future(_rag.run(loop, "backfill"))
 
+    # RAG file indexing (task #10) — knowledge base (cog-second-brain) → same rag_executor.
+    # backfill on startup (non-blocking) + live watchfiles watcher.
+    asyncio.ensure_future(_rag.run(loop, "backfill_files"))
+
+    async def _file_watcher():
+        from watchfiles import awatch, Change
+        root = _rag.KNOWLEDGE_DIR
+        try:
+            async for changes in awatch(str(root)):
+                for change, raw_path in changes:
+                    rel = _rag.file_change_target(raw_path, root)
+                    if rel is None:
+                        continue
+                    deleted = change == Change.deleted
+                    try:
+                        await _rag.run(loop, "apply_file_change", deleted, rel, raw_path)
+                    except Exception as e:
+                        logger.error(f"RAG file change failed ({rel}): {e}")
+        except Exception as e:
+            logger.error(f"RAG file watcher stopped: {e}", exc_info=True)
+    asyncio.create_task(_file_watcher())
+
     await _handlers.set_commands(bot)
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL}")
     logger.info(f"Allowed: {ALLOWED or 'all'}")

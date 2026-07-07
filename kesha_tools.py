@@ -274,11 +274,13 @@ async def update_reminder(args):
 
 
 @tool("search_memory",
-      "Semantic search across the ENTIRE dialog history (survives context compaction/reset). "
+      "Semantic search across the ENTIRE knowledge base: dialog history AND the user's file notes "
+      "(cog-second-brain — diaries, daily dumps, projects). Survives context compaction/reset. "
       "Use when the user references the past ('помнишь', 'что я говорил про…', 'мы обсуждали') or "
-      "when after compaction you need details no longer in context. Do NOT call on every message — "
-      "only when memory is actually needed. query: what to find (natural language). "
-      "role: optional filter 'user'/'assistant'. limit: max results (default 5).",
+      "asks about their notes/knowledge. Do NOT call on every message — only when memory is needed. "
+      "Results are tagged: [file: path] for notes, [timestamp | role] for dialog. "
+      "query: what to find (natural language). role: optional filter 'user'/'assistant' "
+      "(applies to dialog only — excludes files). limit: max results (default 5).",
       {"query": str, "limit": int, "role": str})
 async def search_memory(args):
     chat_id = _require_chat()
@@ -302,7 +304,13 @@ async def search_memory(args):
         rows = [dict(r) for r in get_db().search(chat_id, query, limit)]
     if not rows:
         return {"content": [{"type": "text", "text": "No matches in history"}]}
-    lines = [f"[{r['timestamp']} | {r['role']}] {r['content']}" for r in rows]
+
+    def _fmt(r):
+        # file результат → [file: rel/path]; диалог (или LIKE-фолбэк без source) → [ts | role]
+        if r.get("source") == "file":
+            return f"[file: {r['path']}] {r['content']}"
+        return f"[{r['timestamp']} | {r['role']}] {r['content']}"
+    lines = [_fmt(r) for r in rows]
     return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
 
