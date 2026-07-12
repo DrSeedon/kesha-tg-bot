@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic orphaned ozon MCP node cleanup
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

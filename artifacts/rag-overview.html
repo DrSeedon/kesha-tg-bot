@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>RAG-память Кеши — обзор + анализ для Orchestra</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root{
+  --bg:#0e0e12;--surface:#16161c;--surface-2:#1c1c24;--border:#2a2a32;
+  --ink:#f1f1f4;--ink-soft:#a8a8b3;--accent:#7c3aed;--accent-soft:#7c3aed33;
+  --ok:#22c55e;--warn:#f59e0b;--danger:#ef4444;--info:#3b82f6;
+  --serif:Charter,"Iowan Old Style","Source Serif 4",ui-serif,Georgia,serif;
+  --sans:system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#fafaf7;--surface:#fff;--surface-2:#f5f5f0;--border:#e7e5df;--ink:#1a1a1f;--ink-soft:#555560;}
+}
+@media print{
+  :root{--bg:#fff;--surface:#f8f8f8;--surface-2:#f0f0f0;--border:#ddd;--ink:#000;--ink-soft:#555;}
+  .no-print{display:none!important;}*{print-color-adjust:exact;-webkit-print-color-adjust:exact;}
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;}
+html{background:var(--bg);color:var(--ink);scroll-behavior:smooth;}
+body{font:16px/1.55 var(--serif);max-width:920px;margin:0 auto;padding:0 1.25rem 5rem;}
+header.top{padding:3rem 0 1.5rem;border-bottom:1px solid var(--border);margin-bottom:1rem;}
+.crumb{font:600 12px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:.75rem;}
+h1{font:700 2.2rem/1.12 var(--sans);letter-spacing:-.02em;margin-bottom:.6rem;}
+.tldr{font-size:1.12rem;color:var(--ink-soft);max-width:72ch;}
+.meta{font:13px/1.5 var(--sans);color:var(--ink-soft);margin-top:1rem;}.meta b{color:var(--ok);}
+nav.toc{position:sticky;top:0;background:var(--bg);z-index:10;padding:.7rem 0;border-bottom:1px solid var(--border);margin-bottom:2rem;font:13px/1 var(--sans);}
+nav.toc .scroll{display:flex;flex-wrap:wrap;gap:.4rem 0;}
+nav.toc a{color:var(--ink-soft);text-decoration:none;margin-right:1rem;white-space:nowrap;}
+nav.toc a:hover{color:var(--accent);}
+section{margin:3rem 0;scroll-margin-top:3.5rem;}
+h2{font:700 1.55rem/1.2 var(--sans);letter-spacing:-.01em;margin-bottom:.5rem;}
+h2 .n{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:.5rem;}
+h3{font:600 1.12rem/1.3 var(--sans);margin:1.6rem 0 .5rem;}
+p{margin:.7rem 0;}.lead{color:var(--ink-soft);font-size:1.02rem;}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font:14px/1.4 var(--sans);}
+th,td{text-align:left;padding:.55rem .7rem;border-bottom:1px solid var(--border);vertical-align:top;}
+th{font-weight:600;color:var(--ink-soft);font-size:12px;text-transform:uppercase;letter-spacing:.04em;}
+td.num{font-variant-numeric:tabular-nums;text-align:right;font-family:var(--mono);}
+tr:hover td{background:var(--surface);}
+.win{color:var(--ok);font-weight:600;}.lose{color:var(--danger);}
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.9rem;margin:1.5rem 0;}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1rem 1.1rem;}
+.stat .v{font:700 1.55rem/1 var(--sans);font-variant-numeric:tabular-nums;}
+.stat .v.ok{color:var(--ok);}.stat .v.ac{color:var(--accent);}
+.stat .l{font:12.5px/1.3 var(--sans);color:var(--ink-soft);margin-top:.4rem;}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;margin:1.3rem 0;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.1rem 1.25rem;}
+.card h4{font:600 14px/1.2 var(--sans);margin-bottom:.5rem;}
+.card p{font-size:.92rem;color:var(--ink-soft);margin:.35rem 0;}
+.tag{display:inline-block;font:600 11px/1 var(--sans);padding:.28em .6em;border-radius:3px;letter-spacing:.03em;}
+.tag.ok{background:#22c55e22;color:var(--ok);}.tag.warn{background:#f59e0b22;color:var(--warn);}
+.tag.danger{background:#ef444422;color:var(--danger);}.tag.info{background:#3b82f622;color:var(--info);}
+.tag.accent{background:var(--accent-soft);color:#b794f6;}
+pre{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:.9rem 1rem;overflow-x:auto;font:12.5px/1.5 var(--mono);margin:1rem 0;}
+code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:.1em .35em;border-radius:3px;}
+pre code{background:none;padding:0;}
+.c-key{color:#c792ea;}.c-str{color:#c3e88d;}.c-com{color:#5c6370;font-style:italic;}.c-fn{color:#82aaff;}
+.callout{border-left:4px solid var(--accent);background:var(--surface);padding:.9rem 1.2rem;margin:1.2rem 0;border-radius:0 6px 6px 0;}
+.callout.ok{border-color:var(--ok);}.callout.warn{border-color:var(--warn);}.callout.info{border-color:var(--info);}
+.callout h4{font:600 14px/1.2 var(--sans);margin-bottom:.3rem;}.callout p{font-size:.95rem;margin:.3rem 0;}
+.chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1.2rem;margin:1.5rem 0;}
+.chart-wrap h4{font:600 13px/1 var(--sans);color:var(--ink-soft);margin-bottom:1rem;text-transform:uppercase;letter-spacing:.04em;}
+.pipe{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:1rem 0;font:13px/1.3 var(--sans);}
+.pipe .b{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:.5rem .8rem;}
+.pipe .b.hot{border-color:var(--accent);}.pipe .arr{color:var(--accent);font-weight:700;}
+.timeline{border-left:2px solid var(--border);margin:1.5rem 0 1.5rem .5rem;padding-left:1.5rem;}
+.tl{position:relative;margin-bottom:1.3rem;}
+.tl::before{content:"";position:absolute;left:-1.94rem;top:.3rem;width:11px;height:11px;border-radius:50%;background:var(--accent);border:2px solid var(--bg);}
+.tl .v{font:600 14px/1.2 var(--sans);}.tl .d{font-size:.92rem;color:var(--ink-soft);margin-top:.2rem;}
+.tl .score{font-family:var(--mono);font-weight:700;}
+svg{max-width:100%;height:auto;}
+.arch text{font:12px var(--mono);fill:var(--ink);}
+.arch .lbl{font:600 10.5px var(--sans);fill:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;}
+.verdict{background:linear-gradient(180deg,var(--surface),var(--surface-2));border:1px solid var(--accent);border-radius:8px;padding:1.4rem 1.6rem;margin:1.5rem 0;}
+.verdict h3{margin-top:0;color:#b794f6;}
+footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);font:13px/1.6 var(--sans);color:var(--ink-soft);}
+.op{font-style:italic;border-left:3px solid var(--info);padding-left:1rem;color:var(--ink);margin:1rem 0;}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <p class="crumb">Kesha TG Bot · RAG Memory · Overview + Orchestra analysis</p>
+  <h1>RAG-память Кеши: что построено и стоит ли это в Orchestra</h1>
+  <p class="tldr">Гибридная семантическая память: <b>5930 чанков</b> из 1586 диалогов и 1318 файлов
+  базы знаний, единым поиском (bge-m3 + sqlite-vec + FTS5 + RRF). Переживает compact/restart.
+  Ниже — полная архитектура, метрики, эволюция качества — и разбор, стоит ли встраивать
+  аналог в саму Orchestra как память агентов.</p>
+  <p class="meta">schema v8 · <b>39 MB vec.db</b> · RSS 1.2 GB · search <b>37 ms</b> · backfill ~30 мин one-time · прод Contabo</p>
+</header>
+
+<nav class="toc no-print"><div class="scroll">
+  <a href="#arch">Архитектура</a>
+  <a href="#index">Что индексит</a>
+  <a href="#quality">Качество</a>
+  <a href="#prod">Прод-метрики</a>
+  <a href="#evo">Эволюция</a>
+  <a href="#feat">Watcher/dedup</a>
+  <a href="#orchestra">RAG для Orchestra</a>
+</div></nav>
+
+<!-- ARCH -->
+<section id="arch">
+  <h2><span class="n">1</span>Архитектура</h2>
+  <p class="lead">Один процесс бота, отдельный поток на embed/search. Модель, sqlite-vec и FTS5
+  живут в выделенных потоках (SQLite thread-affinity). После оптимизации #10 — раздельные
+  read/write потоки: поиск не ждёт индексацию.</p>
+
+  <svg class="arch" viewBox="0 0 860 300" role="img" aria-label="RAG архитектура">
+    <defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--accent)"/></marker></defs>
+    <text x="16" y="22" class="lbl">Источники</text>
+    <rect x="16" y="34" width="150" height="46" rx="6" fill="var(--surface)" stroke="var(--border)"/><text x="28" y="54">messages.db</text><text x="28" y="72" fill="var(--ink-soft)">1586 диалогов</text>
+    <rect x="16" y="92" width="150" height="46" rx="6" fill="var(--surface)" stroke="var(--border)"/><text x="28" y="112">cog-second-brain</text><text x="28" y="130" fill="var(--ink-soft)">1318 .md/.txt</text>
+
+    <text x="300" y="22" class="lbl">Индексация (write-поток)</text>
+    <rect x="300" y="34" width="220" height="104" rx="6" fill="var(--surface)" stroke="var(--accent)"/>
+    <text x="314" y="56">chunk (heading-aware)</text>
+    <text x="314" y="78" fill="var(--ink-soft)">→ bge-m3 int8 (1024d)</text>
+    <text x="314" y="100" fill="var(--ink-soft)">→ vec0 + FTS5 insert</text>
+    <text x="314" y="122" fill="var(--ink-soft)">sha256 dedup, batch 64</text>
+
+    <text x="640" y="22" class="lbl">Хранилище (vec.db, WAL)</text>
+    <rect x="640" y="34" width="200" height="104" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="652" y="56">vec_messages / vec_files</text>
+    <text x="652" y="78" fill="var(--ink-soft)">fts_messages / fts_files</text>
+    <text x="652" y="100" fill="var(--ink-soft)">file_chunks, files, indexed</text>
+    <text x="652" y="122" fill="var(--ink-soft)">39 MB · 5930 векторов</text>
+
+    <text x="300" y="176" class="lbl">Поиск (read-поток, RO conn)</text>
+    <rect x="300" y="188" width="220" height="86" rx="6" fill="var(--surface)" stroke="var(--info)"/>
+    <text x="314" y="210">query → bge-m3</text>
+    <text x="314" y="232" fill="var(--ink-soft)">vec KNN + FTS5 BM25</text>
+    <text x="314" y="254" fill="var(--ink-soft)">→ RRF fusion (k=60)</text>
+
+    <rect x="640" y="188" width="200" height="86" rx="6" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="652" y="210" class="lbl" fill="var(--accent)">search_memory (MCP)</text>
+    <text x="652" y="232" fill="var(--ink-soft)">[file: path] / [dialog]</text>
+    <text x="652" y="254" fill="var(--ink-soft)">37 ms, top-5</text>
+
+    <line x1="166" y1="57" x2="298" y2="72" stroke="var(--accent)" marker-end="url(#a)"/>
+    <line x1="166" y1="115" x2="298" y2="96" stroke="var(--accent)" marker-end="url(#a)"/>
+    <line x1="520" y1="86" x2="638" y2="86" stroke="var(--accent)" marker-end="url(#a)"/>
+    <line x1="640" y1="231" x2="522" y2="231" stroke="var(--info)" marker-end="url(#a)"/>
+    <line x1="520" y1="231" x2="638" y2="231" stroke="var(--info)" marker-end="url(#a)"/>
+  </svg>
+
+  <table>
+    <thead><tr><th>Слой</th><th>Технология</th><th>Зачем</th></tr></thead>
+    <tbody>
+      <tr><td>Эмбеддинги</td><td>bge-m3 int8 ONNX (1024d), FastEmbed, CLS-пулинг</td><td>Лучший separation margin на русских абстрактных запросах</td></tr>
+      <tr><td>Векторный поиск</td><td>sqlite-vec vec0 (brute-force KNN)</td><td>&lt;100ms до 10K+ векторов, ноль инфры</td></tr>
+      <tr><td>Лексический поиск</td><td>FTS5 BM25 + prefix-expansion (рус. морфология)</td><td>Ловит точные слова/имена, которые вектор размывает</td></tr>
+      <tr><td>Фьюжн</td><td>Reciprocal Rank Fusion (k=60)</td><td>Объединяет vec+fts без тюнинга весов</td></tr>
+      <tr><td>Конкурентность</td><td>RO/RW executor split, WAL, shared embedder</td><td>Поиск не ждёт индексацию (37ms vs 300s ранее)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- INDEX -->
+<section id="index">
+  <h2><span class="n">2</span>Что индексируется</h2>
+  <div class="stat-row">
+    <div class="stat"><div class="v ac">5930</div><div class="l">всего чанков (векторов)</div></div>
+    <div class="stat"><div class="v">1586</div><div class="l">диалогов → 2432 чанка</div></div>
+    <div class="stat"><div class="v">1318</div><div class="l">файлов → 3498 чанков</div></div>
+    <div class="stat"><div class="v ok">39 MB</div><div class="l">vec.db</div></div>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <h4>Диалоги (messages.db)</h4>
+      <p>Вся история переписки user+assistant. Длинные (голосовые на 500 слов) чанкуются
+      char-окном ~800 симв. с overlap. Переживает <code>/clear</code> и рестарт.</p>
+    </div>
+    <div class="card">
+      <h4>Файлы (cog-second-brain, только .md/.txt)</h4>
+      <p>1342 .md: дневники, daily-dumps, проекты, консолидированный ресёрч. xml/csv/json/html
+      исключены — машинные данные = мусор в retrieval (замер). Markdown чанкуется по заголовкам.</p>
+    </div>
+  </div>
+  <p class="lead">Поиск <b>unified</b>: один запрос → и диалоги, и файлы, RRF-ранжирование, с
+  атрибуцией источника <code>[file: 01-daily/...]</code> vs <code>[2026-06 | user]</code>.</p>
+</section>
+
+<!-- QUALITY -->
+<section id="quality">
+  <h2><span class="n">3</span>Качество</h2>
+  <p class="lead">Две метрики решали дизайн: <b>separation margin</b> (выбор модели) и <b>MRR</b>
+  на контрольных запросах (выбор чанкинга). Всё замерено на боевых данных, не на синтетике.</p>
+
+  <div class="chart-wrap">
+    <h4>Separation margin по моделям (шире = чётче отделяет релевантное)</h4>
+    <canvas id="marginChart" height="110"></canvas>
+  </div>
+  <p class="lead">bge-m3 = <b>+0.237</b> vs e5-large +0.063 vs e5-small +0.055 — в 4× шире.
+  На абстрактных русских запросах («еда», «психология») bge-m3 стабильно вытаскивал топ-1.</p>
+
+  <div class="chart-wrap">
+    <h4>Retrieval: heading-aware чанкинг vs naive (multi-doc, с дистракторами)</h4>
+    <canvas id="mrrChart" height="110"></canvas>
+  </div>
+  <p class="lead">Markdown heading-aware бьёт naive char-window: top-3 <span class="win">5/5</span>
+  vs 4/5, MRR <span class="win">0.90</span> vs 0.70, чистый старт чанка (заголовок/список, не
+  посреди фразы) — 100% vs 33%. При масштабе с дистракторами разница решает.</p>
+  <p class="lead">Контроль на проде: 5/5 запросов → топ-1 (включая еду, психологию, тренировки).</p>
+</section>
+
+<!-- PROD -->
+<section id="prod">
+  <h2><span class="n">4</span>Прод-метрики</h2>
+  <div class="stat-row">
+    <div class="stat"><div class="v ok">37 ms</div><div class="l">search latency (во время backfill)</div></div>
+    <div class="stat"><div class="v">1.2 GB</div><div class="l">RSS бота (embedder резидент)</div></div>
+    <div class="stat"><div class="v">39 MB</div><div class="l">vec.db (5930 векторов)</div></div>
+    <div class="stat"><div class="v">~30 мин</div><div class="l">backfill one-time, non-blocking</div></div>
+  </div>
+  <div class="callout ok">
+    <h4>Ключевая оптимизация: поиск не ждёт индексацию</h4>
+    <p>Было: single-thread executor → search стоял в очереди за embed-батчами backfill'а <b>300с</b>
+    → reconnect. Профиль: embed 82ms/chunk vs insert 0.6ms (138×) — узкое место CPU-embed, не SQLite.
+    Фикс: RO/RW split + WAL (37 конкурентных читений/0 ошибок) + shared embedder (ONNX thread-safe).
+    Результат: <b>37ms во время тяжёлого backfill</b> (было ~300000ms). ~7300×.</p>
+  </div>
+  <div class="callout warn">
+    <h4>RAM-история (честно про грабли)</h4>
+    <p>e5-large int8 (561MB) → OOM на старом VPS 2.9GB. mpnet тоже OOM. Root cause: FastEmbed грузил
+    все docs одним вызовом → onnxruntime arena раздувалась. Фикс: batch_size + <code>enable_cpu_mem_arena=False</code>.
+    Переезд на Contabo 8GB снял ограничение → bge-m3 (1024d).</p>
+  </div>
+</section>
+
+<!-- EVOLUTION -->
+<section id="evo">
+  <h2><span class="n">5</span>Эволюция качества</h2>
+  <p class="lead">Не выбрали bge-m3 сразу — дошли до него через замеры на боевых 677 сообщениях.</p>
+  <div class="timeline">
+    <div class="tl"><div class="v">MiniLM + sqlite-vec + FTS5 <span class="score lose">2.2/5</span></div><div class="d">v2.3.0. Гибрид завёлся, но качество на русском слабое.</div></div>
+    <div class="tl"><div class="v">e5-large int8 (561MB) <span class="score lose">OOM</span></div><div class="d">v2.3.1. Качество выше, но убивал VPS 2.9GB. mpnet тоже. Откат на MiniLM.</div></div>
+    <div class="tl"><div class="v">e5-small int8 (118MB) <span class="score warn">4.3/5</span></div><div class="d">v2.3.2. batch=16 + arena-off → RAM стабилен, качество прыгнуло.</div></div>
+    <div class="tl"><div class="v">bge-m3 int8 (1024d) <span class="score win">5/5</span></div><div class="d">v2.5.0. Переезд на Contabo 8GB. separation margin в 4× шире. 5/5 контрольных → топ-1.</div></div>
+    <div class="tl"><div class="v">+ файлы базы знаний <span class="score win">unified</span></div><div class="d">task #10. 1318 файлов, heading-aware чанкинг, watcher, dedup. Единый поиск диалоги+файлы.</div></div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="feat">
+  <h2><span class="n">6</span>Watcher, дедуп, атрибуция</h2>
+  <div class="grid2">
+    <div class="card"><h4>watchfiles live watcher</h4><p>Rust inotify, async-native <code>awatch()</code>, встроенный debounce. Файл создан/изменён/удалён → индекс обновляется в реальном времени, пишет через тот же executor.</p></div>
+    <div class="card"><h4>sha256 дедуп</h4><p>Ключ по content-hash + path. mtime сменился, контент нет → skip. Изменился → delete старых чанков + reindex. Prune удалённых с диска.</p></div>
+    <div class="card"><h4>Source attribution</h4><p>Результат несёт <code>source</code>: <code>[file: rel/path]</code> для заметок, <code>[ts | role]</code> для диалога. role фильтрует ТОЛЬКО диалоги — файлы всегда ищутся.</p></div>
+    <div class="card"><h4>Chunk-level retrieval</h4><p>Файловый FTS keyed by chunk_id → находит и возвращает НУЖНУЮ секцию 50-чанкового файла, а не весь файл целиком.</p></div>
+  </div>
+</section>
+
+<!-- ORCHESTRA -->
+<section id="orchestra">
+  <h2><span class="n">7</span>RAG для Orchestra — стоит ли встраивать</h2>
+  <p class="lead">Вопрос: дать агентам Orchestra такую же семантическую память — чтобы они помнили
+  прошлые задачи, решения и ошибки через compact/restart, и искали по <code>docs/tasks</code> всех
+  проектов. Разбор по фактам (проверено в репо Orchestra), не по ощущениям.</p>
+
+  <h3>Что это даст</h3>
+  <table>
+    <thead><tr><th>Сценарий</th><th>Сейчас</th><th>С RAG</th></tr></thead>
+    <tbody>
+      <tr><td>Агент после compact/restart</td><td>Контекст потерян, читает файлы заново</td><td><span class="win">search_memory</span> → достаёт прошлые решения по теме</td></tr>
+      <tr><td>«Мы это уже решали?»</td><td>Оркестратор гадает или ищет grep'ом</td><td>Семантический поиск по 1146 docs/tasks всех проектов</td></tr>
+      <tr><td>Повтор ошибки</td><td>Агент наступает на те же грабли</td><td>Ретро/BUGS.md в индексе → находит «уже ловили это»</td></tr>
+      <tr><td>Онбординг нового воркера</td><td>Читает CLAUDE.md + гадает</td><td>Запрос → релевантные куски прошлых сессий</td></tr>
+    </tbody>
+  </table>
+  <div class="callout info">
+    <h4>Факт (проверено в репо)</h4>
+    <p>Orchestra сейчас <b>НЕ имеет</b> embedding/RAG (grep пусто). SQLite <code>data/orchestra.db</code>:
+    sessions, logs, tm_tasks, bg_jobs. <b>1146 файлов <code>docs/tasks/*.md</code></b> по всем проектам —
+    ровно то, что RAG бы индексировал как память агентов. Плюс таблица <code>logs</code> = история турнов.</p>
+  </div>
+
+  <h3>Архитектурные развилки</h3>
+  <div class="grid2">
+    <div class="card"><h4>Общий RAG vs per-project</h4><p><b>Общий индекс + фильтр по project</b> (как chat_id у Кеши). Один embedder, одна vec.db, партиция/фильтр по проекту. Кросс-проектный поиск — фича, не баг (агент видит решение из другого проекта).</p></div>
+    <div class="card"><h4>Где embedder</h4><p>Orchestra = долгоживущий FastAPI-процесс. Embedder-синглтон в отдельном потоке (как у Кеши после #10). +1.2GB RSS на сервер — единожды, не per-agent.</p></div>
+    <div class="card"><h4>Кто индексирует</h4><p><b>Фоновый процесс</b>, не агент. watchfiles на <code>docs/tasks/**/*.md</code> + хук на запись logs. Агент только <code>search_memory</code> (MCP-тул). Детерминизм: агент не решает «индексировать ли».</p></div>
+    <div class="card"><h4>Scaling</h4><p>1146 файлов + логи ≈ 5-15K чанков. vec0 brute-force держит &lt;100ms до ~50K. На горизонте года — хватает без ANN-индекса.</p></div>
+  </div>
+
+  <h3>Реюз rag.py</h3>
+  <table>
+    <thead><tr><th>Компонент</th><th>Реюз</th><th>Переделать</th></tr></thead>
+    <tbody>
+      <tr><td>Чанкинг (md heading-aware, char-window)</td><td><span class="tag ok">1:1</span></td><td>—</td></tr>
+      <tr><td>Embedder singleton, RO/RW split, WAL</td><td><span class="tag ok">1:1</span></td><td>—</td></tr>
+      <tr><td>vec0 + FTS5 + RRF search</td><td><span class="tag ok">почти</span></td><td>partition: chat_id → project_id</td></tr>
+      <tr><td>Источник контента</td><td><span class="tag warn">частично</span></td><td>messages.db → logs + файловый walk docs/tasks</td></tr>
+      <tr><td>watchfiles watcher</td><td><span class="tag ok">1:1</span></td><td>путь → docs/tasks/**</td></tr>
+      <tr><td>MCP tool search_memory</td><td><span class="tag warn">адаптер</span></td><td>Orchestra MCP-сервер (не kesha_tools)</td></tr>
+    </tbody>
+  </table>
+  <p class="lead">rag.py ~700 строк. Ядро (чанк/embed/search/RRF/executor) переносится почти дословно —
+  оно уже спроектировано модульно и провалидировано 53 тестами. Работа = адаптеры источников + MCP.</p>
+
+  <h3>Оценка сложности</h3>
+  <div class="stat-row">
+    <div class="stat"><div class="v ac">Medium</div><div class="l">не large — ядро готово</div></div>
+    <div class="stat"><div class="v">~2-3 дня</div><div class="l">full-cycle воркер</div></div>
+    <div class="stat"><div class="v">~700→900</div><div class="l">строк (rag.py + адаптеры)</div></div>
+    <div class="stat"><div class="v ok">0</div><div class="l">новой инфры (та же SQLite)</div></div>
+  </div>
+  <p class="lead">Medium, не large: 70% кода уже написано и обкатано в проде Кеши. Основная новая
+  работа — (1) индексатор logs + docs/tasks, (2) project-партиция, (3) MCP-тул в Orchestra,
+  (4) решить что индексировать из logs (не весь шум турнов — только итоги/решения/ретро).</p>
+
+  <div class="verdict">
+    <h3>Моё мнение (строил это)</h3>
+    <p class="op">Да, стоит — но начать узко. Самая большая отдача не от индексации ВСЕХ логов
+    (там 90% шума — tool-вызовы, статусы), а от <b>docs/tasks/*.md</b>: research/plan/report/retro
+    уже дистиллированы человеком и агентом. Это готовый корпус «памяти решений» — 1146 файлов
+    лежат и не используются семантически.</p>
+    <p><b>Фаза 1 (эта отдача):</b> индексировать только <code>docs/tasks/**/*.md</code> + BUGS.md +
+    CLAUDE.md-заметки. watcher + search_memory MCP-тул. Реюз rag.py ядра. ~2 дня. Агент после
+    рестарта спрашивает «делали похожее?» → достаёт прошлый research/retro. Низкий риск, высокая польза.</p>
+    <p><b>Фаза 2 (если зайдёт):</b> селективная индексация logs — не сырые турны, а извлечённые
+    «решение/ошибка/правило» (LLM-фильтр на входе, как self-improvement RULE). Тут риск шума —
+    делать после того как Фаза 1 докажет ценность.</p>
+    <p><b>Не делать:</b> индексировать всё подряд из logs сырьём — это утопит сигнал в 90% tool-шума
+    и раздует vec.db без пользы. И не делать per-project изоляцию — кросс-проектная память
+    («в polus решали похожий SQL-баг») это киллер-фича, а не утечка.</p>
+    <p style="margin-top:1rem;"><span class="tag accent">Вердикт: MEDIUM, делать Фазу 1, ядро rag.py переносится 1:1</span></p>
+  </div>
+</section>
+
+<footer>
+  <p><b>RAG-память Кеши</b> — bge-m3 int8 + sqlite-vec + FTS5 + RRF, RO/RW executor split.
+  5930 чанков (1586 диалогов + 1318 файлов), 39MB, search 37ms. schema v8, прод Contabo.</p>
+  <p>Цифры: замеры на боевых данных (separation margin на 677 msgs, MRR multi-doc, latency под backfill).
+  Orchestra-анализ: факты проверены в репозитории (нет RAG, 1146 docs/tasks, SQLite).</p>
+</footer>
+
+<script>
+const css=getComputedStyle(document.documentElement);
+const ink=css.getPropertyValue('--ink-soft').trim(), grid=css.getPropertyValue('--border').trim();
+new Chart(document.getElementById('marginChart'),{
+  type:'bar',
+  data:{labels:['MiniLM','e5-small','e5-large','bge-m3'],
+    datasets:[{label:'separation margin',data:[0.02,0.055,0.063,0.237],
+      backgroundColor:['#ef4444aa','#f59e0baa','#3b82f6aa','#22c55eaa'],borderWidth:1}]},
+  options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'+'+c.parsed.y.toFixed(3)}}},
+    scales:{y:{beginAtZero:true,ticks:{color:ink},grid:{color:grid}},x:{ticks:{color:ink},grid:{display:false}}}}
+});
+new Chart(document.getElementById('mrrChart'),{
+  type:'bar',
+  data:{labels:['top-1','top-3','MRR','start-clean'],
+    datasets:[
+      {label:'naive char-window',data:[0.60,0.80,0.70,0.33],backgroundColor:'#ef4444aa',borderWidth:1},
+      {label:'md heading-aware',data:[0.80,1.00,0.90,1.00],backgroundColor:'#22c55eaa',borderWidth:1}]},
+  options:{responsive:true,
+    plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}},tooltip:{callbacks:{label:c=>c.dataset.label+': '+c.parsed.y.toFixed(2)}}},
+    scales:{y:{beginAtZero:true,max:1,ticks:{color:ink,callback:v=>v.toFixed(1)},grid:{color:grid}},x:{ticks:{color:ink},grid:{display:false}}}}
+});
+</script>
+</body>
+</html>

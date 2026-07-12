@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly preventive ozon region cookie refresh
+
+[Timer]
+# region observed to slip ~6 days → refresh every 5 days, off-peak
+OnCalendar=*-*-01,06,11,16,21,26 04:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Kill orphaned ozon MCP node processes (zombie Chromium cleanup)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ozon-mcp-server/kill-stale.sh

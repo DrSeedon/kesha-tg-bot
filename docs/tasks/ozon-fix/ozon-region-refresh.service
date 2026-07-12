@@ -1,0 +1,9 @@
+[Unit]
+Description=Preventive refresh of ozon Krasnoyarsk region cookies (krsk-state.json)
+
+[Service]
+Type=oneshot
+User=ozon
+Environment=HOME=/home/ozon
+ExecStart=/opt/ozon-mcp-server/refresh-region.sh
+TimeoutStartSec=240
