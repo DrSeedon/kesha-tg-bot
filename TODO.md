@@ -1,6 +1,5 @@
 # TODO
 
-- [ ] **Деплой v2.6.0 на Contabo** — File RAG + preventive compact + session-limit fix + file-search fix. `git pull && systemctl restart kesha-bot-vps` + `pip install watchfiles>=0.24`. НЕ задеплоено (юзер сказал потом)
 - [ ] **Processing watchdog** — убивать зависший Claude CLI если нет активности N минут. Текущий stall detection (120s) ловит только паузы между stream-чанками, не зависание внутри tool-вызова
 - [ ] **urgent_llm delivery guarantee** — доставка urgent_llm best-effort (fire-and-forget через ChatState). Если хендлер упал — напоминалка теряется. Codex отметил как архитектурное ограничение
 - [ ] **Compact durable handoff** — при падении между reset и preamble контекст теряется
