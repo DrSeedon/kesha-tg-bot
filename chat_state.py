@@ -15,6 +15,22 @@ logger = logging.getLogger("kesha")
 
 TRANSCRIPTION_WAIT_MAX = 30  # seconds to wait for pending transcriptions before proceeding
 
+# Preventive compact — compact before an inevitable cold-start to make it cheap (research:
+# docs/tasks/cache-compact). At idle >T min the user has ~likely left; cache TTL=60min → cold-start
+# is coming; compact NOW (warm cache, read 0.1×) shrinks ctx to a summary so the eventual cold-start
+# re-reads ~1% instead of 40-80%. Saves 4-9× limit-burn on the wake-up turn.
+#
+# FIXED 55min, not adaptive-by-hour: false-compact rate (user returns <60min, ctx wasted) falls
+# monotonically with T — 50min=15.9%, 55min=7.5%, 59min=0.9% (measured, 1211 gaps). Later = fewer
+# wasted compacts. 55 is the sweet spot: 7.5% false + a 5-min margin to run the compact before the
+# 60-min TTL evicts the cache. (59 gives 0.9% but zero margin → risky.) Adaptive-by-hour saves only
+# ~$0.78/mo — noise — so a single constant wins on simplicity.
+# breakeven = 19.4% ctx: compact shrinks to ~4% (measured, not 1%), so re-reading that 4% on the
+# cold-start eats the saving below ~19%. Gate at 20% (just above breakeven) → only compact when it pays.
+PREVENTIVE_COMPACT_MIN_CTX = 20.0
+PREVENTIVE_IDLE_MINUTES = 55        # fire compact after this much user-idle time
+KRSK_UTC_OFFSET = 7                 # Krasnoyarsk — for the log line's local hour
+
 
 class ChatPhase(StrEnum):
     IDLE = "idle"
@@ -87,6 +103,7 @@ class ChatState:
         self.media_generation: int = 0
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
+        self._preventive_task: asyncio.Task | None = None  # preventive-compact idle timer
         self._lock = asyncio.Lock()
         self._shutdown: bool = False
 
@@ -101,6 +118,7 @@ class ChatState:
         """Enqueue a new user/reminder entry. Arms debounce or injects if already processing."""
         async with self._lock:
             if self._shutdown: return
+            self._arm_preventive_timer()  # any incoming message pushes the idle-compact deadline back
             if entry.source == "user" and entry.message_id:
                 self.last_user_message_id = entry.message_id
 
@@ -383,6 +401,43 @@ class ChatState:
         """Kick off _run_batch as a tracked task."""
         self._processing_task = asyncio.create_task(self._run_batch(batch))
 
+    def _arm_preventive_timer(self) -> None:
+        """(Re)arm the preventive-compact idle timer. Called on EVERY incoming message so a fresh
+        message pushes the deadline back. Cheap: cancel + recreate. Not persistent (restart = re-arm)."""
+        if self._shutdown:
+            return
+        if self._preventive_task and not self._preventive_task.done():
+            self._preventive_task.cancel()
+        self._preventive_task = asyncio.create_task(self._on_preventive_elapsed())
+
+    async def _on_preventive_elapsed(self) -> None:
+        """After PREVENTIVE_IDLE_MINUTES of no new message → compact so the inevitable cold-start
+        is cheap. Skips if ctx below threshold or bot is busy (request_compact defers/no-ops safely)."""
+        try:
+            await asyncio.sleep(PREVENTIVE_IDLE_MINUTES * 60)
+        except asyncio.CancelledError:
+            return
+        if self._shutdown:
+            return
+        # ctx gate — compact only worth it above breakeven
+        try:
+            usage = await self.session.get_context_usage()
+            ctx_pct = usage.get("percentage", 0) if usage else 0
+        except Exception as e:
+            logger.warning(f"Chat {self.chat_id}: preventive compact ctx check failed: {e}")
+            return
+        if ctx_pct < PREVENTIVE_COMPACT_MIN_CTX:
+            logger.info(f"Chat {self.chat_id}: preventive compact skipped (ctx {ctx_pct:.0f}% < {PREVENTIVE_COMPACT_MIN_CTX:.0f}%)")
+            return
+        # busy check is advisory — request_compact() re-checks phase under lock and defers/no-ops
+        if self.is_busy:
+            logger.info(f"Chat {self.chat_id}: preventive compact skipped (busy: {self.phase})")
+            return
+        from datetime import datetime, timezone, timedelta
+        hour = (datetime.now(timezone.utc) + timedelta(hours=KRSK_UTC_OFFSET)).hour
+        logger.info(f"Chat {self.chat_id}: preventive compact (idle {PREVENTIVE_IDLE_MINUTES}min, ctx {ctx_pct:.0f}%, hour {hour})")
+        await self.request_compact()
+
     async def _run_batch(self, batch: list[PendingEntry]) -> None:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
         from datetime import timezone, timedelta
@@ -647,6 +702,9 @@ class ChatRegistry:
             if chat._processing_task and not chat._processing_task.done():
                 chat._processing_task.cancel()
                 tasks.append(chat._processing_task)
+            if chat._preventive_task and not chat._preventive_task.done():
+                chat._preventive_task.cancel()
+                tasks.append(chat._preventive_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for chat in self._chats.values():

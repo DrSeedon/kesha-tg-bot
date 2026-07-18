@@ -70,9 +70,9 @@ footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);fon
   <h1>Compact «перед сном»: reset ради дешёвого cold-start</h1>
   <p class="tldr">Правильная постановка: при простое &gt;55 мин cold-start <b>неизбежен</b> (замер:
   если не писал 55 мин, в 92.5% не вернёшься в течение часа). Вопрос не «compact vs горячий кеш»,
-  а <b>«cold-start на 80% контекста vs compact сейчас + cold-start на ~1%»</b>. Ответ:
-  <span style="color:var(--ok);font-weight:600">compact окупается уже с ~6% контекста</span> — при
-  типичных 30-40% Кеши экономит 3-5× burn'а лимитов на пробуждении.</p>
+  а <b>«cold-start на 80% контекста vs compact сейчас + cold-start на ~4%»</b>. Ответ:
+  <span style="color:var(--ok);font-weight:600">compact окупается с ~20% контекста</span> — при
+  типичных 30-40% Кеши экономит 1.5-2× burn'а лимитов на пробуждении (до 4.3× на забитом).</p>
   <p class="meta">Opus 4.6 · 200K ctx · cold re-bill 20× · <b>P(gap&gt;60 | gap&gt;55)=92.5%</b> ·
   сон медиана 113 мин · данные: messages.db + docs/tasks/cache-optimization</p>
 </header>
@@ -96,8 +96,8 @@ footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);fon
   <div class="stat-row">
     <div class="stat"><div class="v warn">92.5%</div><div class="l">P(gap&gt;60 | gap&gt;55) — cold-start почти неизбежен</div></div>
     <div class="stat"><div class="v">113 мин</div><div class="l">медиана «сна» (среди gap&gt;55)</div></div>
-    <div class="stat"><div class="v ac">5.8%</div><div class="l">breakeven — с этого ctx compact окупается</div></div>
-    <div class="stat"><div class="v ok">3-5×</div><div class="l">экономия при ctx 30-40%</div></div>
+    <div class="stat"><div class="v ac">19.4%</div><div class="l">breakeven — с этого ctx compact окупается</div></div>
+    <div class="stat"><div class="v ok">1.5-2×</div><div class="l">экономия при ctx 30-40%</div></div>
   </div>
   <p class="lead">Из 1211 интервалов между сообщениями юзера: если пауза уже &gt;55 мин, то в
   <b>92.5%</b> она перевалит за 60 (кеш остынет). Медиана таких пауз — <b>113 мин</b>, среднее 220,
@@ -115,7 +115,7 @@ footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);fon
     <div class="card"><h4>1. Простой 55 мин = сигнал</h4><p>Не писал почти час → с вероятностью 92.5% не напишешь ещё &gt;час. Ушёл спать/по делам.</p></div>
     <div class="card"><h4>2. Кеш ТОЧНО остынет</h4><p>TTL 60 мин. Сон 113 мин &gt; TTL → eviction гарантирован. Cold-start будет.</p></div>
     <div class="card"><h4>3. Вопрос — цена cold-start</h4><p>Cold-start перечитывает весь префикс при create-цене 2.0× (20× vs read). На 80% ctx это дорого.</p></div>
-    <div class="card"><h4>4. Compact заранее обнуляет ctx</h4><p>Compact на 55-й минуте → контекст ужимается в summary (~1.1%). Cold-start потом перечитывает не 80%, а 1%.</p></div>
+    <div class="card"><h4>4. Compact заранее обнуляет ctx</h4><p>Compact на 55-й минуте → контекст ужимается в summary (~4%). Cold-start потом перечитывает не 80%, а 4%.</p></div>
   </div>
   <div class="callout info">
     <h4>В чём была ошибка первого расчёта</h4>
@@ -133,7 +133,7 @@ footer{margin-top:4rem;padding-top:1.5rem;border-top:1px solid var(--border);fon
 cold_start(%)        = ctx_tok × <span style="color:#ef4444">2.0×</span> $5/M + 338 × $25/M    <span style="color:#5c6370"># перечитать весь префикс (create)</span>
 compact_now(%)       = ctx_tok × 0.1× $5/M + 2280 × $25/M + 2280 × 2.0× $5/M
                        <span style="color:#5c6370"># read тёплого ctx + summary + запись префикса — платится ОДИН раз, сейчас</span>
-cold_after_compact   = 2280 × <span style="color:#ef4444">2.0×</span> $5/M + 338 × $25/M    <span style="color:#5c6370"># cold-start уже на ~1.1% ctx (дёшево)</span>
+cold_after_compact   = 2280 × <span style="color:#ef4444">2.0×</span> $5/M + 338 × $25/M    <span style="color:#5c6370"># cold-start уже на ~4% ctx (дёшево)</span>
 
 Сравнение при пробуждении:
   A (ничего)          = cold_start(X%)
@@ -141,29 +141,34 @@ cold_after_compact   = 2280 × <span style="color:#ef4444">2.0×</span> $5/M + 3
   экономия            = A − B
   </div>
   <p class="lead">Compact платится в тёплом кеше (read 0.1×) — пока не остыл, это дёшево. Его цена —
-  в основном генерация summary (2280 tok × $25/M). Зато cold-start потом бьёт по 1%, а не по 80%.</p>
+  в основном генерация summary (2280 tok × $25/M). Зато cold-start потом бьёт по 4%, а не по 80%.</p>
 </section>
 
 <!-- TABLE -->
 <section id="table">
   <h2><span class="n">4</span>Cold-start дорогой vs дешёвый (milli-$)</h2>
+  <div class="correction">⟳ <b>Поправка (compact сжимает до 4%, не 1%).</b> Замерено по логам прода
+  (два compact'а: 95%→4%, 40%→4%, summary 7-9K симв ≈ 8000 tok). Пересчитал: cold-start после compact
+  перечитывает 4% (не 1%), поэтому <b>breakeven сдвинулся 5.8% → 19.4%</b>, экономия 1.5-4.3× (была
+  4-9×). Всё ещё выгодно при 30%+, но порог гейта поднял до 20% (ниже — убыток).</div>
   <table>
-    <thead><tr><th>ctx%</th><th class="num">A: cold-start(X%)</th><th class="num">B: compact + cold(1%)</th><th class="num">экономия A−B</th><th class="num">во сколько</th><th>B дешевле?</th></tr></thead>
+    <thead><tr><th>ctx%</th><th class="num">A: cold-start(X%)</th><th class="num">B: compact + cold(4%)</th><th class="num">экономия A−B</th><th class="num">во сколько</th><th>B дешевле?</th></tr></thead>
     <tbody>
-      <tr><td>10%</td><td class="num lose">208</td><td class="num win">121</td><td class="num">87</td><td class="num">1.7×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>20%</td><td class="num lose">408</td><td class="num win">131</td><td class="num">277</td><td class="num">3.1×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>30%</td><td class="num lose">608</td><td class="num win">141</td><td class="num">467</td><td class="num">4.3×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>40%</td><td class="num lose">808</td><td class="num win">151</td><td class="num">657</td><td class="num">5.4×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>50%</td><td class="num lose">1008</td><td class="num win">161</td><td class="num">847</td><td class="num">6.3×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>60%</td><td class="num lose">1208</td><td class="num win">171</td><td class="num">1037</td><td class="num">7.1×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>70%</td><td class="num lose">1408</td><td class="num win">181</td><td class="num">1227</td><td class="num">7.8×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>80%</td><td class="num lose">1608</td><td class="num win">191</td><td class="num">1417</td><td class="num">8.4×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>90%</td><td class="num lose">1808</td><td class="num win">201</td><td class="num">1607</td><td class="num">9.0×</td><td><span class="tag ok">да</span></td></tr>
-      <tr><td>100%</td><td class="num lose">2008</td><td class="num win">211</td><td class="num">1797</td><td class="num">9.5×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>10%</td><td class="num">208</td><td class="num lose">378</td><td class="num lose">−170</td><td class="num lose">0.6×</td><td><span class="tag danger">НЕТ</span></td></tr>
+      <tr><td>20%</td><td class="num lose">408</td><td class="num win">388</td><td class="num">20</td><td class="num">1.1×</td><td><span class="tag ok">да (край)</span></td></tr>
+      <tr><td>30%</td><td class="num lose">608</td><td class="num win">398</td><td class="num">210</td><td class="num">1.5×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>40%</td><td class="num lose">808</td><td class="num win">408</td><td class="num">400</td><td class="num">2.0×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>50%</td><td class="num lose">1008</td><td class="num win">418</td><td class="num">590</td><td class="num">2.4×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>60%</td><td class="num lose">1208</td><td class="num win">428</td><td class="num">780</td><td class="num">2.8×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>70%</td><td class="num lose">1408</td><td class="num win">438</td><td class="num">970</td><td class="num">3.2×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>80%</td><td class="num lose">1608</td><td class="num win">448</td><td class="num">1160</td><td class="num">3.6×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>90%</td><td class="num lose">1808</td><td class="num win">458</td><td class="num">1350</td><td class="num">3.9×</td><td><span class="tag ok">да</span></td></tr>
+      <tr><td>100%</td><td class="num lose">2008</td><td class="num win">468</td><td class="num">1540</td><td class="num">4.3×</td><td><span class="tag ok">да</span></td></tr>
     </tbody>
   </table>
-  <p class="lead"><b>Breakeven = 5.8% контекста.</b> Выше — compact-перед-сном экономит. При типичных
-  30-40% Кеши экономия 4-5×; на забитом контексте до 9.5×. Экономия растёт линейно с % (чем больше
+  <p class="lead"><b>Breakeven = 19.4% контекста</b> (compact→4%). Выше — compact-перед-сном экономит.
+  При типичных 30-40% Кеши экономия 1.5-2×; на забитом контексте до 4.3×. Ниже 20% — убыток (сжатие в
+  4% не окупает перечитывание этих 4% на cold-start). Экономия растёт линейно с % (чем больше
   висит в контексте, тем дороже его перечитывать на cold-start).</p>
   <div class="chart-wrap">
     <h4>Стоимость пробуждения: A (cold-start полный) vs B (compact+cold маленький)</h4>
@@ -177,7 +182,7 @@ cold_after_compact   = 2280 × <span style="color:#ef4444">2.0×</span> $5/M + 3
   <p class="lead">С учётом что в 7.5% юзер всё же вернётся тёплым (compact там был лишним):</p>
   <div class="formula">
 EV(ничего)          = 0.925 × cold_start(X%) + 0.075 × warm_resume(X%)
-EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm(1%)
+EV(compact заранее) = compact_now(X%) + 0.925 × cold(4%) + 0.075 × warm(1%)
   </div>
   <table>
     <thead><tr><th>ctx%</th><th class="num">EV(ничего)</th><th class="num">EV(compact заранее)</th><th class="num">выигрыш</th><th>вывод</th></tr></thead>
@@ -216,7 +221,7 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
 <!-- COLD-START CHART -->
 <section id="coldchart">
   <h2><span class="n">7</span>Стоимость пробуждения: полный ctx vs после compact</h2>
-  <p class="lead">Тот же расчёт из таблицы §4, но визуально с шагом 5% — видно точку breakeven (~5.8%)
+  <p class="lead">Тот же расчёт из таблицы §4, но визуально с шагом 5% — видно точку breakeven (~19.4%)
   и как экономия расходится веером с ростом контекста.</p>
   <div class="chart-wrap">
     <h4>Абсолют (milli-$, лог-шкала) — 3 линии</h4>
@@ -226,9 +231,9 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
     <h4>Кратность экономии (во сколько раз compact дешевле)</h4>
     <canvas id="coldMultChart" height="95"></canvas>
   </div>
-  <p class="lead">Breakeven на <b>5.8%</b> (линии сходятся). Дельта (экономия) растёт линейно —
+  <p class="lead">Breakeven на <b>19.4%</b> (линии сходятся). Дельта (экономия) растёт линейно —
   каждые +10% контекста добавляют ~200 milli-$ к цене «ничего не делать», а к цене «compact» почти
-  ничего (перечитывается всё те же 1%). Кратность: 1.7× на 10% → 9.5× на 100%.</p>
+  ничего (перечитывается всё те же 4%). Кратность: 0.6× на 10% (убыток) → 4.3× на 100%.</p>
 </section>
 
 <!-- LOSS SIMULATION -->
@@ -331,6 +336,32 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
   </div>
 </section>
 
+<!-- FALSE RATE SWEEP -->
+<section id="falserate">
+  <h2><span class="n">9б</span>False-rate по каждой минуте (1-59)</h2>
+  <p class="lead">«Ложное срабатывание» = таймер сработал на минуте T, но юзер вернулся <b>&lt;60 мин</b> —
+  кеш был бы ещё тёплый, а мы зря сжали контекст (потеряли детали). Чем позже T, тем меньше ложных:
+  кривая падает монотонно с 88% (T=1) до 0.9% (T=59). Считано на 1211 паузах messages.db.</p>
+  <div class="chart-wrap">
+    <h4>False-rate (% зря-компактов) vs минута простоя T — оптимум у границы TTL</h4>
+    <canvas id="falseChart" height="115"></canvas>
+  </div>
+  <table>
+    <thead><tr><th class="num">T мин</th><th class="num">40</th><th class="num">45</th><th class="num">50</th><th class="num win">55</th><th class="num">59</th></tr></thead>
+    <tbody>
+      <tr><td>false-rate</td><td class="num">26.5%</td><td class="num">21.3%</td><td class="num">15.9%</td><td class="num win">7.5%</td><td class="num">0.9%</td></tr>
+      <tr><td>запас до TTL</td><td class="num">20 мин</td><td class="num">15 мин</td><td class="num">10 мин</td><td class="num win">5 мин</td><td class="num lose">1 мин</td></tr>
+    </tbody>
+  </table>
+  <div class="callout ok">
+    <h4>Оптимум = 55 мин (7.5% ложных + 5 мин запаса)</h4>
+    <p>False-rate падает до самого конца, но T должен быть <b>&lt;60</b> с запасом на выполнение compact
+    (проверка таймера + генерация summary ~несколько секунд). 59 мин даёт 0.9% ложных, но <b>1 мин запаса</b> —
+    рискованно (кеш может уже начать evict). <b>55 мин</b> — лучший компромисс: всего 7.5% зря-компактов
+    и надёжные 5 мин до TTL. Именно это в коде (<code>PREVENTIVE_IDLE_MINUTES = 55</code>).</p>
+  </div>
+</section>
+
 <!-- SEGMENTATION -->
 <section id="segments">
   <h2><span class="n">10</span>Сегментация: час суток и день недели</h2>
@@ -380,17 +411,17 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
   <div class="verdict">
     <h3>Вывод: compact-перед-сном — ДЕЛАТЬ. Юзер прав.</h3>
     <p class="op">При правильной постановке (cold-start неизбежен, вопрос в его цене) compact на 55-й
-    минуте окупается уже с ~6% контекста и экономит 4-9× burn'а лимитов на пробуждении. Мой первый
+    минуте окупается с ~20% контекста и экономит 1.5-4.3× burn'а лимитов на пробуждении. Мой первый
     расчёт был про другой сценарий («держать горячим») и потому дал обратный ответ — здесь снимаю.</p>
 
     <p><b>Конкретная стратегия для Кеши (адаптивная по времени):</b></p>
     <p>1. <span class="tag ok">Триггер</span>: таймер простоя <b>~55 мин</b> — оптимум (кеш не остывает
     до 60, значит ждать выгодно: P(юзер ушёл)=92.5%, запас 5 мин на выполнение). Адаптивность по часу
     даёт немного: ночью можно и раньше (уже на 30-й P=84%), но 55 мин работает для всех сегментов.</p>
-    <p>2. <span class="tag ok">Условие</span>: контекст <b>&gt; ~10%</b> (ниже breakeven 5.8% — не трогать).
+    <p>2. <span class="tag ok">Условие</span>: контекст <b>&gt; ~20%</b> (ниже breakeven 19.4% — не трогать).
     На практике Кеша 30-40% → почти всегда стоит.</p>
     <p>3. <span class="tag ok">Действие</span>: <code>compact</code> → контекст ужимается в summary →
-    при возврате юзера (через часы) cold-start перечитывает 1%, а не 40-80%.</p>
+    при возврате юзера (через часы) cold-start перечитывает 4%, а не 40-80%.</p>
     <p>4. <span class="tag info">Тонкость</span>: compact на 55-й делается <b>пока кеш ещё тёплый</b>
     (read 0.1×, eviction только с 60 мин) — самый дешёвый момент. НЕ тянуть до 59-60: сам compact
     + проверка таймера должны уложиться до eviction.</p>
@@ -416,7 +447,7 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
   <p><b>Cache/compact v2 для Кеши</b> — Opus 4.6, 200K ctx, TTL 60мин. Расчёт: docs/tasks/cache-compact/calc-v2.py.
   Данные: messages.db (1211 интервалов, условная P=92.5%, сон 113мин) + docs/tasks/cache-optimization (множители, cold 20×).</p>
   <p>Правильная метрика: cold-start неизбежен при простое &gt;55мин → compact заранее делает его дешёвым
-  (перечитывается 1% вместо 80%). Breakeven 5.8% ctx, экономия 4-9× при 30-80%.</p>
+  (перечитывается 4% вместо 80%). Breakeven 19.4% ctx, экономия 1.5-4.3× при 30-80%.</p>
 </footer>
 
 <script>
@@ -435,7 +466,7 @@ new Chart(document.getElementById('costChart'),{
   type:'line',
   data:{labels:pcts.map(p=>p+'%'),datasets:[
     {label:'A: ничего → cold-start полный',data:[208,408,608,808,1008,1208,1408,1608,1808,2008],borderColor:'#ef4444',backgroundColor:'#ef444422',tension:.15},
-    {label:'B: compact заранее + cold(1%)',data:[121,131,141,151,161,171,181,191,201,211],borderColor:'#22c55e',backgroundColor:'#22c55e22',tension:.15,fill:true}
+    {label:'B: compact заранее + cold(4%)',data:[378,388,398,408,418,428,438,448,458,468],borderColor:'#22c55e',backgroundColor:'#22c55e22',tension:.15,fill:true}
   ]},
   options:{responsive:true,plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}},tooltip:{callbacks:{label:c=>c.dataset.label.split(':')[0]+': '+c.parsed.y+' m$'}}},
     scales:{y:{type:'logarithmic',ticks:{color:ink,callback:v=>v+'m$'},grid:{color:grid}},x:{ticks:{color:ink},grid:{display:false}}}}
@@ -444,12 +475,12 @@ new Chart(document.getElementById('costChart'),{
 // §7 cold-start abs (5% step) + multiplier
 const p5=[]; for(let p=5;p<=100;p+=5)p5.push(p);
 const coldA=p5.map(p=>p/100*200000*2.0*5/1e6*1000 + 338*25/1e6*1000);
-const compactB=p5.map(p=>(p/100*200000*0.1*5/1e6 + 2280*25/1e6 + 2280*2.0*5/1e6)*1000 + (2280*2.0*5/1e6+338*25/1e6)*1000);
+const compactB=p5.map(p=>(p/100*200000*0.1*5/1e6 + 8000*25/1e6 + 8000*2.0*5/1e6)*1000 + (8000*2.0*5/1e6+338*25/1e6)*1000);
 const delta=p5.map((p,i)=>coldA[i]-compactB[i]);
 new Chart(document.getElementById('coldAbsChart'),{type:'line',
   data:{labels:p5.map(p=>p+'%'),datasets:[
     {label:'A: cold-start полный',data:coldA,borderColor:'#ef4444',backgroundColor:'#ef444422',tension:.1},
-    {label:'B: compact + cold(1%)',data:compactB,borderColor:'#22c55e',backgroundColor:'#22c55e22',tension:.1,fill:true},
+    {label:'B: compact + cold(4%)',data:compactB,borderColor:'#22c55e',backgroundColor:'#22c55e22',tension:.1,fill:true},
     {label:'экономия (A−B)',data:delta,borderColor:'#f59e0b',borderDash:[5,4],tension:.1}
   ]},
   options:{responsive:true,plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}},tooltip:{callbacks:{label:c=>c.dataset.label.split(':')[0]+': '+c.parsed.y.toFixed(0)+'m$'}}},
@@ -488,6 +519,18 @@ new Chart(document.getElementById('timingChart'),{
 
 // §10 per-hour P
 const hourP=[100,100,0,0,0,100,0,0,80,33,57,55,67,50,53,11,67,50,38,0,80,100,100,75];
+// §9б false-rate sweep 1-59 (measured, 1211 gaps)
+const fr=[88.3,84.8,81.5,78.8,75.6,73.6,72.0,70.2,67.8,66.4,64.6,63.6,61.7,60.4,58.6,56.8,55.8,55.1,53.0,51.5,50.7,49.3,48.4,47.9,46.9,45.6,44.2,42.2,41.6,39.7,37.6,37.3,36.6,35.5,33.5,32.3,31.1,28.8,27.9,26.5,26.0,24.5,23.4,22.4,21.3,19.6,19.0,17.2,15.9,15.9,14.0,12.6,11.9,10.5,7.5,6.7,5.1,3.5,0.9];
+new Chart(document.getElementById('falseChart'),{type:'line',
+  data:{labels:[...Array(59).keys()].map(i=>i+1),datasets:[
+    {label:'false-rate % (зря-компакт)',data:fr,borderColor:'#f59e0b',backgroundColor:'#f59e0b22',fill:true,tension:.15,
+      pointRadius:fr.map((_,i)=>i+1===55?7:0),pointBackgroundColor:'#22c55e'}
+  ]},
+  options:{responsive:true,plugins:{legend:{display:false},
+    tooltip:{callbacks:{title:c=>'T='+c[0].label+'мин',label:c=>c.parsed.y+'% ложных'+(Number(c.label)===55?' ← оптимум':'')}}},
+    scales:{y:{beginAtZero:true,ticks:{color:ink,callback:v=>v+'%'},grid:{color:grid},title:{display:true,text:'false-rate',color:ink}},
+      x:{ticks:{color:ink,maxTicksLimit:12},grid:{display:false},title:{display:true,text:'минута простоя T (60 = eviction)',color:ink}}}}
+});
 new Chart(document.getElementById('hourChart'),{type:'bar',
   data:{labels:[...Array(24).keys()].map(h=>String(h).padStart(2,'0')),
     datasets:[{label:'P(gap>60 | gap>30) %',data:hourP,
