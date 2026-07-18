@@ -293,37 +293,41 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
 
 <!-- OPTIMAL TIMING -->
 <section id="timing">
-  <h2><span class="n">9</span>Оптимальный момент compact — не обязательно 55 мин</h2>
-  <p class="lead">Свип по минуте простоя T. Раньше = меньше уверенности что юзер ушёл (много зря
-  потраченных компактов). Позже = кеш ближе к остыванию (compact рискует выполниться уже на холодном).</p>
+  <h2><span class="n">9</span>Оптимальный момент compact ≈ 55 мин</h2>
+  <div class="correction">⟳ <b>Исправлено.</b> Предыдущая версия §9 вводила выдуманную линейную рампу
+  «кеш остывает с 30-й минуты» — этого НЕТ в данных. Первоисточник
+  (docs/tasks/cache-optimization, замер): стоимость <b>плоская 0-30 мин</b> (0.82× на 18-30 = ещё
+  cached); шумный бакет 30-60 (n=10, 1.12×) — <b>артефакт reset-on-hit, не eviction</b>. Доки Anthropic
+  однозначны: <b>TTL ровно 60 мин, eviction ПОСЛЕ 60</b>. → P(кеш остыл) = 0% для любого T&lt;60.</div>
+  <p class="lead">Свип по минуте простоя T. Раньше = меньше уверенности что юзер ушёл (больше зря
+  потраченных компактов, P ниже). Позже (но &lt;60) = P(юзер ушёл) выше, кеш ГАРАНТИРОВАННО тёплый.
+  Остывания до 60 мин нет → EV просто растёт с T. Оптимум = как можно позже, но пока &lt;60.</p>
   <table>
-    <thead><tr><th class="num">T мин</th><th class="num">P(gap&gt;60 | gap&gt;T)</th><th class="num">EV-выгода (чистая, 40% ctx)</th><th class="num">P(кеш уже остыл)</th><th class="num">EV с учётом риска</th></tr></thead>
+    <thead><tr><th class="num">T мин</th><th class="num">P(gap&gt;60 | gap&gt;T)</th><th class="num">P(кеш остыл)</th><th class="num">EV-выгода (40% ctx)</th></tr></thead>
     <tbody>
-      <tr><td class="num">10</td><td class="num">33.8%</td><td class="num">169</td><td class="num">0%</td><td class="num">169</td></tr>
-      <tr><td class="num">20</td><td class="num">48.7%</td><td class="num">279</td><td class="num">0%</td><td class="num">279</td></tr>
-      <tr><td class="num">25</td><td class="num">53.4%</td><td class="num">313</td><td class="num">0%</td><td class="num">313</td></tr>
-      <tr><td class="num win">30</td><td class="num win">60.7%</td><td class="num">367</td><td class="num">0%</td><td class="num win">367 ← пик</td></tr>
-      <tr><td class="num">35</td><td class="num">66.9%</td><td class="num">413</td><td class="num">17%</td><td class="num">286</td></tr>
-      <tr><td class="num">40</td><td class="num">74.0%</td><td class="num">465</td><td class="num">33%</td><td class="num">212</td></tr>
-      <tr><td class="num">50</td><td class="num">84.1%</td><td class="num">540</td><td class="num">67%</td><td class="num">33</td></tr>
-      <tr><td class="num">55</td><td class="num">92.5%</td><td class="num">602</td><td class="num">83%</td><td class="num lose">−31</td></tr>
-      <tr><td class="num">59</td><td class="num">99.1%</td><td class="num">651</td><td class="num">97%</td><td class="num lose">−84</td></tr>
+      <tr><td class="num">10</td><td class="num">33.8%</td><td class="num">0%</td><td class="num">169</td></tr>
+      <tr><td class="num">20</td><td class="num">48.7%</td><td class="num">0%</td><td class="num">279</td></tr>
+      <tr><td class="num">30</td><td class="num">60.7%</td><td class="num">0%</td><td class="num">367</td></tr>
+      <tr><td class="num">40</td><td class="num">74.0%</td><td class="num">0%</td><td class="num">465</td></tr>
+      <tr><td class="num">50</td><td class="num">84.1%</td><td class="num">0%</td><td class="num">540</td></tr>
+      <tr><td class="num win">55</td><td class="num win">92.5%</td><td class="num">0%</td><td class="num win">602 ← оптимум</td></tr>
+      <tr><td class="num">59</td><td class="num">99.1%</td><td class="num warn">0% (край)</td><td class="num">651</td></tr>
+      <tr><td class="num">≥60</td><td class="num">—</td><td class="num lose">100%</td><td class="num lose">кеш остыл, compact дорогой</td></tr>
     </tbody>
   </table>
   <div class="chart-wrap">
-    <h4>P(cold неизбежен) растёт с T · EV-выгода: без риска (растёт) vs с риском остывания (пик ~30)</h4>
+    <h4>EV-выгода растёт монотонно с T (P остыл = 0 до 60мин) · оптимум у самой границы TTL</h4>
     <canvas id="timingChart" height="120"></canvas>
   </div>
-  <div class="callout info">
-    <h4>Два взгляда — и правда между ними</h4>
-    <p><b>Чистая EV (без учёта остывания)</b> растёт монотонно до T=59: чем дольше ждёшь, тем меньше
-    зря-компактов (P выше). Идеал был бы «ждать до последнего».</p>
-    <p><b>Но</b> compact должен успеть <b>пока кеш тёплый</b> (иначе сам compact читает по create-цене, 20×).
-    Эффективный TTL размыт: стоимость плоская до ~30мин, растёт 30-60, полное остывание к ~60-120.
-    С учётом этого риска EV имеет <b>пик около T=30-35 мин</b> (пессимистичная модель остывания) —
-    после этого растущий риск «компактить на холодном» съедает выгоду.</p>
-    <p><b>Практика:</b> правда между — <b>T ≈ 30-50 мин</b>. На 30 P(cold)=61% и кеш гарантированно тёплый;
-    на 50 P=84% но кеш на грани. Безопаснее <b>~40-45 мин</b>: P(cold) 74-79%, запас до TTL ~15-20 мин.</p>
+  <div class="callout ok">
+    <h4>Вывод: оптимум T ≈ 55 мин — интуиция юзера верна</h4>
+    <p>Раз кеш не остывает до 60 мин, ждать выгодно: EV растёт монотонно (10мин→169, 55мин→602 milli-$),
+    потому что чем дольше пауза, тем выше P(юзер реально ушёл) → меньше зря-компактов. Единственное
+    ограничение — <b>успеть до 60-й минуты</b> (после eviction сам compact станет дорогим, читает по
+    create-цене).</p>
+    <p><b>Оптимум = 55 мин:</b> P(юзер ушёл)=92.5%, кеш гарантированно тёплый, запас 5 мин до TTL на
+    выполнение. 59 мин дало бы чуть выше EV, но без запаса — рискованно (проверка таймера + сам compact
+    должны уложиться). <b>55 мин — sweet spot.</b> Это ровно то, что предлагал юзер изначально.</p>
   </div>
 </section>
 
@@ -362,9 +366,10 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
   </div>
   <div class="callout ok">
     <h4>Адаптивная стратегия по времени</h4>
-    <p>Ночь (23-8): compact на <b>30 мин</b> — юзер спит (P 84-100%), кеш заведомо тёплый.
-    День (9-18): compact на <b>50 мин</b> — юзер активен, часто возвращается (P на 30-й лишь 52%),
-    ждём пока P дойдёт до 76%. Вечер/утро: <b>40 мин</b> (компромисс). Час суток — единственный сегмент
+    <p>Все пороги &lt;60 → кеш всегда тёплый (eviction только с 60-й). Отличие лишь в P(юзер ушёл):
+    Ночь (23-8): compact уже на <b>30 мин</b> — юзер спит (P 84%), ждать до 55 незачем.
+    День (9-18): ждать до <b>50-55 мин</b> — юзер активен, на 30-й P лишь 52% (много зря-компактов),
+    к 55 P растёт до 92%. Вечер/утро: <b>40-45 мин</b>. Час суток — единственный сегмент
     что стоит различать; будни/выходные — нет (разница &lt;5%).</p>
   </div>
 </section>
@@ -379,16 +384,16 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(1%) + 0.075 × warm
     расчёт был про другой сценарий («держать горячим») и потому дал обратный ответ — здесь снимаю.</p>
 
     <p><b>Конкретная стратегия для Кеши (адаптивная по времени):</b></p>
-    <p>1. <span class="tag ok">Триггер</span>: таймер простоя, порог <b>зависит от часа</b> —
-    ночь (23-8) <b>30 мин</b> (P=84%), день (9-18) <b>50 мин</b> (P=76%), вечер/утро <b>40 мин</b>.
-    Один порог 45-50 мин — приемлемое упрощение если не хочется адаптивности.</p>
+    <p>1. <span class="tag ok">Триггер</span>: таймер простоя <b>~55 мин</b> — оптимум (кеш не остывает
+    до 60, значит ждать выгодно: P(юзер ушёл)=92.5%, запас 5 мин на выполнение). Адаптивность по часу
+    даёт немного: ночью можно и раньше (уже на 30-й P=84%), но 55 мин работает для всех сегментов.</p>
     <p>2. <span class="tag ok">Условие</span>: контекст <b>&gt; ~10%</b> (ниже breakeven 5.8% — не трогать).
     На практике Кеша 30-40% → почти всегда стоит.</p>
     <p>3. <span class="tag ok">Действие</span>: <code>compact</code> → контекст ужимается в summary →
     при возврате юзера (через часы) cold-start перечитывает 1%, а не 40-80%.</p>
-    <p>4. <span class="tag info">Тонкость</span>: compact делается <b>пока кеш ещё тёплый</b> (read 0.1×) —
-    поэтому НЕ ждать до 59-й (риск: кеш уже остыл, compact сам дорогой). Оптимум EV с учётом риска
-    остывания — <b>T ≈ 30-45 мин</b>, не «в упор к TTL».</p>
+    <p>4. <span class="tag info">Тонкость</span>: compact на 55-й делается <b>пока кеш ещё тёплый</b>
+    (read 0.1×, eviction только с 60 мин) — самый дешёвый момент. НЕ тянуть до 59-60: сам compact
+    + проверка таймера должны уложиться до eviction.</p>
     <p>5. <span class="tag ok">Безопасность</span>: симуляция 119 реальных пауз → 91% компактов теряют
     ноль (разговор окончен), реальный риск потери — 3 из 119 (2.5%), и его страхует RAG-память.</p>
 
@@ -466,18 +471,19 @@ new Chart(document.getElementById('lossChart'),{type:'bar',
     scales:{x:{beginAtZero:true,ticks:{color:ink},grid:{color:grid}},y:{ticks:{color:ink,font:{size:11}},grid:{display:false}}}}
 });
 
-// §9 timing sweep
-const Ts=[10,20,25,30,35,40,50,55,59];
+// §9 timing sweep — TTL=60min: P(evicted)=0 for T<60, EV rises monotonically → optimum ~55min
+const Ts=[10,20,30,40,50,55,59];
 new Chart(document.getElementById('timingChart'),{
   data:{labels:Ts.map(t=>t+'м'),datasets:[
-    {type:'line',label:'P(cold неизбежен) %',data:[33.8,48.7,53.4,60.7,66.9,74,84.1,92.5,99.1],borderColor:'#3b82f6',yAxisID:'y1',tension:.2},
-    {type:'line',label:'EV-выгода без риска (m$)',data:[169,279,313,367,413,465,540,602,651],borderColor:'#22c55e',borderDash:[4,3],yAxisID:'y',tension:.2},
-    {type:'line',label:'EV с риском остывания (m$)',data:[169,279,313,367,286,212,33,-31,-84],borderColor:'#f59e0b',backgroundColor:'#f59e0b22',fill:true,yAxisID:'y',tension:.2}
+    {type:'line',label:'P(юзер ушёл | gap>T) %',data:[33.8,48.7,60.7,74,84.1,92.5,99.1],borderColor:'#3b82f6',yAxisID:'y1',tension:.2},
+    {type:'line',label:'EV-выгода (m$)',data:[169,279,367,465,540,602,651],borderColor:'#22c55e',backgroundColor:'#22c55e22',fill:true,yAxisID:'y',tension:.2,
+      pointBackgroundColor:Ts.map(t=>t===55?'#22c55e':'#22c55e'),pointRadius:Ts.map(t=>t===55?6:3)}
   ]},
-  options:{responsive:true,plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}}},
-    scales:{y:{position:'left',ticks:{color:ink,callback:v=>v+'m$'},grid:{color:grid}},
+  options:{responsive:true,plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}},
+    tooltip:{callbacks:{afterBody:c=>c[0].label==='55м'?'← оптимум: P=92.5%, кеш тёплый, запас 5мин':''}}},
+    scales:{y:{position:'left',ticks:{color:ink,callback:v=>v+'m$'},grid:{color:grid},title:{display:true,text:'EV-выгода',color:ink}},
       y1:{position:'right',max:100,ticks:{color:'#3b82f6',callback:v=>v+'%'},grid:{display:false}},
-      x:{ticks:{color:ink},grid:{display:false}}}}
+      x:{ticks:{color:ink},grid:{display:false},title:{display:true,text:'минута простоя T (eviction только при T≥60)',color:ink}}}}
 });
 
 // §10 per-hour P

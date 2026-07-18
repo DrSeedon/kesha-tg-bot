@@ -32,15 +32,14 @@ print("\n=== If you check every 5min and gap lands in [T, T+5], risk cache alrea
 print("Practical sweet spot = latest T still safely < TTL. With TTL~60, T=50-55 maximizes P while")
 print("keeping compact on a WARM cache. T<30 → too many false compacts (P<60%).")
 
-print("\n=== EV with DEADLINE RISK: compact must run while cache warm (evicts at ~60min) ===")
-# Model: if you fire at minute T but the actual eviction happened between last-hit and now,
-# the compact reads at CREATE price (cold), costing ~20x more → the compact itself is wasted+expensive.
-# Effective TTL is fuzzy (30-60min per research). Model P(already-evicted at T) rising near 60.
+print("\n=== EV with CORRECT eviction model: TTL=60min (Anthropic docs + measured, reset-on-hit) ===")
+# CORRECTION: prior version used an invented linear 30->60 ramp — NOT supported by data.
+# Primary research (docs/tasks/cache-optimization/research.md, measured): cost FLAT 0-30min
+# (0.82x at 18-30 = still cached); the noisy 30-60 bucket (n=10, 1.12x) is a TTL-reset artifact,
+# not eviction. Docs unambiguous: eviction AFTER 60min, resets on every hit.
+# → P(cache evicted at T) = 0 for T<60, 1 for T>=60. Compact at any T<60 runs on a WARM cache.
 def p_evicted(T):
-    # cache empirically flat to ~30min, climbs 30-60, gone by ~60-120. Approximate.
-    if T<=30: return 0.0
-    if T>=60: return 1.0
-    return (T-30)/30  # linear 30→60
+    return 0.0 if T < 60 else 1.0
 def compact_cold(p_pct):  # compact when cache already evicted → reads at create
     return tok(p_pct)*WRITE + SUMMARY*OUT + SUMMARY*WRITE
 print(f"{'T':>4} {'P(cold|>T)':>11} {'P(evicted@T)':>12} {'EV_net_adj':>11}")
@@ -54,4 +53,5 @@ for T in sorted(P):
     net = ev_do - ev_comp
     if net>best[1]: best=(T,net)
     print(f"{T:>4} {p*100:>9.1f}% {pe*100:>10.0f}% ${net*1000:>9.1f}m")
-print(f"\nWith deadline risk, max net benefit at T={best[0]}min. Sweet spot balances high P vs eviction risk.")
+print(f"\nEV rises monotonically to T={best[0]}min (P(evicted)=0 for all T<60). Optimal fire ≈ 55-59min:")
+print("latest safe moment before TTL — maximizes P(user gone) while cache still warm. Confirms user intuition.")
