@@ -91,6 +91,12 @@ async def compact_session(claude, notify=None) -> dict:
     logger.info(f"Compact: got summary {len(summary)} chars, resetting session")
     logger.debug(f"Compact summary:\n{summary}")
 
+    if notify:
+        try:
+            await notify(f"📋 Compact summary:\n\n{summary}")
+        except Exception:
+            pass
+
     logger.info(f"Compact: pre-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
     await claude.reset_async()
     logger.info(f"Compact: post-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
