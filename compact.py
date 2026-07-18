@@ -8,6 +8,12 @@ logger = logging.getLogger("kesha.compact")
 
 COMPACT_PROMPT = """[SYSTEM: Context compaction requested — handoff summary]
 
+BEFORE writing the summary — persist your knowledge to files so it survives compact:
+1. CLAUDE.md — update with key decisions, new rules, user preferences, patterns discovered this session
+2. Create/update relevant .md files in your knowledge base for important topics discussed
+3. If there were TODOs or action items — save them to a file so they're not lost
+Use your file tools (Edit/Write) NOW to save this information. Then write the summary below.
+
 Write a detailed handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Be thorough.
 
 INTENT: What the user is working on and why (2-3 sentences with full context).
