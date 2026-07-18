@@ -443,6 +443,60 @@ EV(compact заранее) = compact_now(X%) + 0.925 × cold(4%) + 0.075 × warm
   </div>
 </section>
 
+<!-- BOTTOM LINE -->
+<section id="bottomline">
+  <h2><span class="n">12</span>Bottom line — сколько это экономит от подписки</h2>
+  <p class="lead">Итоговая цифра: сколько реального burn'а лимитов Max экономит таймер, на боевых
+  частотах Кеши (messages.db, span 24 дня → месячные оценки).</p>
+  <div class="stat-row">
+    <div class="stat"><div class="v">141/мес</div><div class="l">cold-starts (gap&gt;60мин) = 33/нед</div></div>
+    <div class="stat"><div class="v ok">8×</div><div class="l">дешевле cold-start после compact (708→88 m$)</div></div>
+    <div class="stat"><div class="v ok">~$61/мес</div><div class="l">чистая экономия (~$14/нед, виртуальные $)</div></div>
+    <div class="stat"><div class="v ac">~18%</div><div class="l">от месячного burn Кеши (~$333)</div></div>
+  </div>
+
+  <h3>Расчёт (виртуальные $ = burn лимитов 1:1)</h3>
+  <table>
+    <thead><tr><th>Позиция</th><th class="num">значение</th><th>как</th></tr></thead>
+    <tbody>
+      <tr><td>Cold-starts в месяц</td><td class="num">141</td><td>gap&gt;60мин из messages.db (33/нед)</td></tr>
+      <tr><td>Стоимость cold-start @ctx 35%</td><td class="num lose">708 m$</td><td>перечитать весь префикс при create 2.0× (20× vs read)</td></tr>
+      <tr><td>Cold-start ПОСЛЕ compact (ctx 4%)</td><td class="num win">88 m$</td><td>тот же 20×, но по 4% контекста</td></tr>
+      <tr><td>Экономия на 1 cold-start</td><td class="num win">620 m$</td><td>708 − 88 (<b>8× дешевле</b>)</td></tr>
+      <tr><td>Стоимость 1 compact</td><td class="num">172 m$</td><td>read тёплого ctx + gen summary (2280 tok) + запись 4%-префикса</td></tr>
+      <tr><td>Compact'ов срабатывает/мес</td><td class="num">153</td><td>gap&gt;55, из них 7.5% ложных (юзер вернулся тёплым)</td></tr>
+      <tr><td>Валовая экономия</td><td class="num win">+$87.7</td><td>142 реальных × 620 m$</td></tr>
+      <tr><td>Минус стоимость compact'ов (вкл. ложные)</td><td class="num lose">−$26.3</td><td>153 × 172 m$</td></tr>
+      <tr><td><b>ЧИСТАЯ экономия/мес</b></td><td class="num win"><b>+$61.4</b></td><td>~$14.3/нед</td></tr>
+    </tbody>
+  </table>
+
+  <div class="chart-wrap">
+    <h4>Месячный burn на пробуждениях: без таймера vs с таймером (виртуальные $)</h4>
+    <canvas id="roiChart" height="95"></canvas>
+  </div>
+
+  <div class="callout ok">
+    <h4>Итог: таймер срезает cold-start waste вдвое</h4>
+    <p>Cold-starts без таймера жгут <b>~$100/мес</b> = <b>30%</b> месячного burn Кеши (~$333).
+    С таймером они падают до ~$40/мес → <b>cold-start доля burn'а 30% → 12%</b>. Чистая экономия
+    <b>~$61/мес (~18% всего burn Кеши)</b>. Поскольку виртуальные $ = burn лимитов 1:1 —
+    <b>5-часовое и недельное окна Max эффективно растягиваются на ~18%</b> при типичной для Кеши
+    idle-heavy нагрузке (92% пауз &lt;60мин, но 8% длинных = дорогие пробуждения).</p>
+    <p style="margin-top:.5rem;"><b>Одной фразой:</b> <span class="tag ok">compact-таймер экономит ~18%
+    подписки Кеши / продлевает 5h-лимит на ~18-22%</span> — почти даром (сам compact съедает лишь
+    30% от валовой экономии, включая 7.5% ложных срабатываний).</p>
+  </div>
+
+  <h3>Оговорки</h3>
+  <div class="grid2">
+    <div class="card"><h4>Оценка Кешиного burn (~$333/мес)</h4><p>= ~1514 turns/мес × $0.22 blended (Opus 4.6). Грубо; реальный burn зависит от длины turn'ов. % от него — порядок величины, не точность до цифры.</p></div>
+    <div class="card"><h4>$200 Max — номинал</h4><p>Max 20x = ~$200/мес по подписке, но реальный API-equivalent burn Кеши (~$333) его превышает (на то и 20x). Честнее считать % от СВОЕГО burn (18%), чем от номинала.</p></div>
+    <div class="card"><h4>ctx 35% — типичный</h4><p>Кеша обычно 30-40%. На забитом контексте экономия выше (до 4.3× на cold-start), на пустом — ниже. 35% — репрезентативная середина.</p></div>
+    <div class="card"><h4>Ложные 7.5% учтены</h4><p>11 из 153 compact'ов/мес срабатывают зря (юзер вернулся &lt;60мин). Их стоимость уже вычтена из чистой экономии — цифра $61 честная.</p></div>
+  </div>
+</section>
+
 <footer>
   <p><b>Cache/compact v2 для Кеши</b> — Opus 4.6, 200K ctx, TTL 60мин. Расчёт: docs/tasks/cache-compact/calc-v2.py.
   Данные: messages.db (1211 интервалов, условная P=92.5%, сон 113мин) + docs/tasks/cache-optimization (множители, cold 20×).</p>
@@ -537,6 +591,20 @@ new Chart(document.getElementById('hourChart'),{type:'bar',
       backgroundColor:hourP.map(p=>p>=75?'#ef4444cc':p>=50?'#f59e0bcc':'#3b82f6aa'),borderWidth:0}]},
   options:{responsive:true,plugins:{legend:{display:false},tooltip:{callbacks:{title:c=>c[0].label+':00',label:c=>'P(остыл)='+c.parsed.y+'%'}}},
     scales:{y:{beginAtZero:true,max:100,ticks:{color:ink,callback:v=>v+'%'},grid:{color:grid}},x:{ticks:{color:ink,font:{size:10}},grid:{display:false},title:{display:true,text:'час суток (Красноярск)',color:ink}}}}
+});
+
+// §12 ROI — monthly wake-up burn without vs with timer (virtual $)
+new Chart(document.getElementById('roiChart'),{type:'bar',
+  data:{labels:['Cold-starts (пробуждения)','Compact spend'],datasets:[
+    {label:'без таймера',data:[100,0],backgroundColor:'#ef4444cc'},
+    {label:'с таймером',data:[40,26],backgroundColor:['#22c55ecc','#f59e0bcc']}
+  ]},
+  options:{responsive:true,indexAxis:'y',
+    plugins:{legend:{labels:{color:ink,font:{family:'system-ui'}}},
+      tooltip:{callbacks:{label:c=>c.dataset.label+': $'+c.parsed.x+'/мес'}},
+      title:{display:true,text:'без: $100/мес → с: $40+$26=$66 → чистая экономия $61/мес',color:ink,font:{size:12}}},
+    scales:{x:{beginAtZero:true,ticks:{color:ink,callback:v=>'$'+v},grid:{color:grid},title:{display:true,text:'виртуальные $/мес',color:ink}},
+      y:{ticks:{color:ink,font:{size:11}},grid:{display:false}}}}
 });
 </script>
 </body>

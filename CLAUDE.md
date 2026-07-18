@@ -14,7 +14,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 |------|-------|-----------|
 | **bot.py** | ~200 | Bootstrap: bot/dp creation, main(), singleton lock, wiring |
 | **config.py** | ~200 | Env, logging, STRINGS, t(), ALLOWED_MODELS |
-| **chat_state.py** | ~620 | ChatPhase state machine, PendingEntry, ChatState, ChatRegistry |
+| **chat_state.py** | ~710 | ChatPhase state machine, PendingEntry, ChatState, ChatRegistry, preventive compact-таймер |
 | **handlers.py** | ~540 | Все @dp.message handlers, set_commands() |
 | **response_stream.py** | ~270 | _ask() — streaming via send+edit_message_text, ToolStatusTracker, retries |
 | **telegram_io.py** | ~170 | user_prefix, _send_safe, split_msg, typing_loop, draft helpers |
@@ -25,7 +25,7 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **kesha_tools.py** | ~400 | MCP tools: send_media, reminders, config, search_memory, run_on_laptop |
 | **reminders.py** | ~360 | SQLite reminders (plain/urgent_llm/lazy_llm) |
 | **message_log.py** | ~80 | SQLite full message logging (user+assistant), on_message callback for RAG |
-| **rag.py** | ~260 | RAG semantic memory: bge-m3 int8 + sqlite-vec + FTS5 hybrid search + chunking |
+| **rag.py** | ~730 | RAG semantic memory: bge-m3 int8 + sqlite-vec + FTS5 + chunking. Диалоги + ФАЙЛЫ (.md/.txt heading-aware), watchfiles watcher, RO/RW executor split |
 
 ### ChatState — центр per-chat state
 
@@ -83,8 +83,9 @@ IDLE → COLLECTING → PROCESSING → IDLE
 ```
 - **Тулы:** `ozon_search` (поиск: sku/name/price/**ourPrice**/oldPrice/discount/rating/reviews/brand/url/image), `ozon_product_details` (карточка: price/**ourPrice**/priceRegular/oldPrice/available/seller/characteristics/description/images), `ozon_product_reviews` (author/score/comment/pros/cons/date/hasPhotos).
 - **`ourPrice`** = оценка цены с Ozon-аккаунтом = `round(cardPrice × 0.8949)` (без логина). ПРИБЛИЖЕНИЕ (замер 5 SKU, ±0.1%), не точная цена. `price` = публичная «С банками». Точная аккаунт-цена требует логина (не делаем). Причина: аноним MCP vs залогиненный `premiumSubscribe` tier.
-- **Регион = КРАСНОЯРСК** форсится через `krsk-state.json` (куки, captured 1 раз кликом карты). `browser.js` грузит storageState (абс. путь) + **fail-closed** self-check: если регион ≠ Красноярск → tool возвращает `isError`, НЕ московские цены. Refresh куки (365d TTL): `node /opt/ozon-mcp-server/capture-region.mjs headless` на москве.
+- **Регион = КРАСНОЯРСК** форсится через `krsk-state.json` (куки, captured 1 раз кликом карты). `browser.js` грузит storageState (абс. путь) + **fail-closed** self-check: регион ≠ Красноярск → **авто-запуск `refresh-region.sh`** (re-capture, ретрай 1 раз) → если не помогло, tool возвращает `isError`, НЕ московские цены. Куки слетают ~6д (не 365d) → превентивный `ozon-region-refresh.timer` каждые 5 дней. Ручной refresh: `node capture-region.mjs headless`.
 - **RAM-защита прода** (там же seedon.ru + CryptoBot, 3GB): юзер `ozon` в `user-1002.slice` c `MemoryMax=800M, MemorySwapMax=0` (systemd drop-in). Пик реального запроса ~306MB. OOM бьёт ТОЛЬКО ozon-слайс (проверено kill-test'ом), прод не страдает. Idle-close браузера через 10 мин.
+- **Zombie-cleanup:** `kill-stale.sh` (**root** systemd timer каждые 20мин) убивает ozon `index.js` чей parent sshd БЕЗ ESTABLISHED сокета (или PPID=1) + age>2h — зомби от протухших SSH. MUST root (ss под ozon видит 0 pid'ов → убил бы живые). Патчи: docs/tasks/ozon-fix/.
 - **Доступ:** ключ kesha@Contabo в `/home/ozon/.ssh/authorized_keys` с forced-command (`no-pty`, без shell). `index.js` при EOF/обрыве SSH чистит Chromium (нет сирот).
 - **Ограничения:** нет истории цен; отзывы обрезаются (лимит 1–30); первый вызов ~13с (антибот), дальше 0.3–1с; данные из внутреннего composer-api (может смениться).
 
@@ -196,6 +197,36 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 - Юзер упоминал **MMO-файл** (`04-projects/mmo-economy-game.md`) и **Google Cloud Zahoron** — ни то ни другое не реализовано, задачи не созданы. Если спросит — уточнить что именно нужно.
 - **Ozon фильтры** (бренд/тип/etc) — достижимы (research #9 подтвердил, фасеты есть в raw JSON), но не имплементированы. Таск не создан.
 - **CLAUDE.md частично устарел** — секция «Стриминг» всё ещё упоминает SendMessageDraft (строка 58), хотя стриминг уже через edit_message_text. Мелочь, но заметно.
+
+## Session notes (2026-07-18) — File RAG, preventive compact, Ozon fixes
+
+### Что сделано (v2.6.0)
+1. **File RAG (#10)** — индексация `.md`/`.txt` из cog-second-brain (1318 файлов, 3498 чанков) в тот же
+   RAG что диалоги. Heading-aware чанкинг, watchfiles watcher, sha256 дедуп, source attribution. SCHEMA 7→8,
+   отдельные файловые таблицы. RO/RW executor split (search не ждёт backfill: 37ms vs 300000ms). docs/tasks/10/.
+2. **Preventive compact-таймер** — chat_state.py: idle 55мин + ctx>20% → compact пока кеш тёплый (перед
+   неизбежным cold-start). Экономит ~18% burn лимитов (cold-start доля 30%→12%). docs/tasks/cache-compact/.
+3. **Session-limit fix** — «hit your session limit» не ретраить (был loop 2-3× reconnect). response_stream.py.
+4. **File-search role bug** — role="user" выкидывал ВСЕ файлы. Fix: файлы ищутся всегда, role → только диалоги.
+5. **Ozon fixes** (москва) — kill-stale.sh (root timer, зомби node по socket-state) + region auto-refresh
+   (browser.js → refresh-region.sh при провале self-check + weekly timer). docs/tasks/ozon-fix/.
+6. **ourPrice 0.893→0.8949** (5 SKU).
+
+### Ключевые решения (замерено, не догадки)
+- **Compact-таймер T=55мин фикс, не адаптивный:** false-rate падает монотонно (50→15.9%, 55→7.5%, 59→0.9%);
+  55 = 7.5% ложных + 5мин запаса до TTL. Адаптив по часу экономил бы ~$0.78/мес (шум).
+- **ctx-гейт 20%:** compact сжимает до ~4% (замер, не 1%) → breakeven 19.4%. Ниже — убыток.
+- **kill-stale MUST root:** `ss` под юзером ozon видит 0 pid'ов → снёс бы живые сессии (поймал в тесте).
+  Зомби = parent sshd без ESTABLISHED сокета, НЕ по возрасту (MCP-сессия долгоживущая).
+- **Cold-start эмпирика:** TTL ровно 60мин, P(gap>60|gap>55)=92.5% → cold-start почти неизбежен при простое.
+
+### Process rule (усвоено)
+- **Не выдумывать кривые для допущений.** Первый timing-sweep использовал выдуманную «рампу остывания
+  кеша с 30мин» — первоисточник (docs/tasks/cache-optimization) опровергает: TTL=60, плоско до 30мин.
+  Оркестратор поймал. Число из замера, НЕ «правдоподобная» интерполяция.
+
+### Открытые вопросы
+- **v2.6.0 НЕ задеплоено** на Contabo (юзер сказал потом). Нужен `pip install watchfiles>=0.24` + рестарт.
 
 ## TODO
 

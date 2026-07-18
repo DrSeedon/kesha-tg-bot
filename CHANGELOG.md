@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.6.0 — 2026-07-18
+
+### Added — File RAG: индексация базы знаний (#10)
+- 📚 **RAG теперь ищет и по файлам, не только по диалогам.** Индексирует `.md`/`.txt` из
+  `WORK_DIR` (`/opt/cog-second-brain` — дневники, daily-dumps, проекты, заметки) вместе с перепиской,
+  единым гибридным поиском. `search_memory` возвращает и то и другое с атрибуцией источника
+  `[file: 01-daily/...]` vs `[timestamp | role]`. **Прод: 1318 файлов → 3498 чанков** (всего ~5930 с диалогами).
+- 🎯 **Только `.md` + `.txt`** — замер показал: xml/csv/json/html = машинные данные (гос-отчёты,
+  логи транзакций, дампы дашбордов) → мусор в retrieval. Индексируем только прозу. `FILE_EXTENSIONS`.
+- ✂️ **Markdown heading-aware чанкинг** — режем по заголовкам с хлебной крошкой, а не тупым char-окном.
+  Замер (multi-doc + дистракторы): top-3 **5/5 vs 4/5**, MRR **0.90 vs 0.70**, чистый старт чанка
+  100% vs 33%. `.txt` → параграфы, fallback → char-window.
+- 👁 **watchfiles live watcher** — Rust inotify, async `awatch()`, встроенный debounce. Файл создан/
+  изменён/удалён → индекс обновляется в реальном времени через тот же executor.
+- 🔑 **sha256 дедуп** — ключ по content-hash + path. mtime сменился, контент нет → skip. Изменился →
+  delete старых чанков + reindex. Prune удалённых с диска в `backfill_files`.
+- 🗄 **SCHEMA_VERSION 7→8** — отдельные файловые таблицы (`vec_files`/`file_chunks`/`fts_files`/`files`),
+  диалоговый RAG не тронут. Namespaced RRF (`('d',msg_id)`/`('f',chunk_id)`) — chunk-level (matched
+  секция, не весь файл). Codex поймал этот blocking на этапе плана.
+- 📦 Зависимость `watchfiles>=0.24`. Файлы: `rag.py` (+390), `bot.py` (+22), `kesha_tools.py`,
+  `tests/test_rag_files.py` (30 тестов). docs/tasks/10/.
+
+### Changed — File RAG оптимизация: поиск не ждёт индексацию (#10-opt)
+- ⚡ **RO/RW executor split.** `search_memory` висел 300с во время backfill → reconnect. Профиль:
+  embed **82ms/chunk vs insert 0.6ms (138×)** — узкое место CPU-embed, не SQLite. Фикс: поиск на
+  read-only коннекте в своём потоке (WAL = lock-free concurrent read, замер 37 читений/0 ошибок),
+  индексация на RW. **E2E: search 37ms во время тяжёлого backfill (было ~300000ms).**
+- 🧠 **Shared embedder singleton** — ONNX `InferenceSession.run()` thread-safe (замер 15+15 конкурентных
+  embed/0 ошибок), оба потока делят ОДИН embedder — без +1.3GB RAM.
+- 🔧 **batch_size 16→64** (embed 113→98ms/chunk).
+
+### Added — Превентивный compact-таймер
+- 💤 **Compact «перед сном» ради дешёвого пробуждения.** При простое юзера **55 мин** (кеш TTL=60мин →
+  cold-start почти неизбежен: замер P(gap>60|gap>55)=92.5%) → `compact` пока кеш ещё тёплый. Контекст
+  ужимается в summary → при возврате юзера cold-start перечитывает ~4%, а не 40-80%. **Экономия
+  1.5-4.3× burn лимитов** на первом сообщении после паузы.
+- 🎚 **Гейт ctx>20%** (breakeven 19.4% при сжатии до 4%), фикс порог **55 мин** (false-rate падает
+  монотонно: 50мин=15.9%, 55=7.5%, 59=0.9% — 55 = оптимум с запасом до TTL). Адаптив по часу
+  экономил бы ~$0.78/мес (шум) → не делали. Таймер сбрасывается на КАЖДОМ входящем сообщении.
+- **Техсуть:** `chat_state.py` — `_arm_preventive_timer()` в `accept_entry`, `_on_preventive_elapsed()`
+  → `request_compact()`. Лог `preventive compact (idle 55min, ctx Y%, hour Z)`. Не персистентный
+  (рестарт = re-arm). `tests/test_preventive_compact.py` (7). docs/tasks/cache-compact/.
+
+### Fixed
+- 🐛 **Session-limit retry loop.** «You've hit your session limit · resets 2:20pm» содержит "session"
+  → старый handler reconnect+retry'ил 2-3 раза, каждый ловил тот же лимит. Fix: `_session_limit_reset()`
+  распознаёт лимит как НЕ-ретраимый, извлекает время сброса, сообщает юзеру «⏳ лимит сессии (сброс X)»
+  и выходит БЕЗ retry. Отличает от транзиентных `No conversation found`/`process exited`/`connection reset`.
+  `response_stream.py`, `config.py` (STRINGS `session_limit` ru/en), `tests/test_session_limit.py` (6).
+- 🐛 **Файлы не искались при role="user".** `if role: f_vec,f_fts=[],[]` выкидывал ВСЕ файлы когда
+  role передан — а Кеша всегда шлёт role="user" → файлы не находились никогда. Fix: файлы ищутся ВСЕГДА,
+  role фильтрует только диалоги. `rag.py`, регрессионный тест.
+- 🐛 **ourPrice коэффициент 0.893 → 0.8949** — пересчёт по 5 SKU (был 3), попадание ±18₽ на 55К.
+  `src/parse.js` (`OUR_PRICE_FACTOR=0.8949`).
+
+### Fixed — Ozon MCP (москва 72.56.235.40)
+- 🧟 **Zombie node-процессы.** SSH к Ozon MCP при протухании коннекта не закрывались → orphan Chromium
+  копился → OOM-риск для seedon.ru (нашёл 3 зомби: 5д/2д/1д). Fix: `kill-stale.sh` (root systemd timer
+  каждые 20мин) убивает ozon `index.js` чей parent sshd **без ESTABLISHED сокета** (или PPID=1) + age>2h.
+  **MUST root** — `ss` под юзером ozon видит 0 pid'ов (сокет sshd root-owned) → убил бы живые (поймал в тесте).
+- 🌍 **Регион слетал.** krsk-state.json куки протухали ~6д (не 365d). Fix: `browser.js` при провале
+  region-check авто-запускает `refresh-region.sh` (закрывает свой браузер → нет 2 Chromium под 800M cap),
+  ретрай 1 раз, fail-closed. + превентивный `ozon-region-refresh.timer` каждые 5 дней. Патчи в docs/tasks/ozon-fix/.
+
 ## v2.5.0 — 2026-07-03
 
 ### Changed (RAG модель: e5-small int8 → bge-m3 int8 — переезд на Contabo 8GB)
@@ -39,7 +103,7 @@
 
 ### Added (#9 — «наша цена» / Ozon-Account estimate)
 - 💰 **`ourPrice` в Ozon MCP** — оценка цены с Ozon-аккаунтом БЕЗ логина. Замерено: аккаунт-цена = стабильно **0.893 × публичной cardPrice** (±0.1% на 3 SKU). Тул теперь отдаёт `ourPrice = round(cardPrice × 0.893)` в `ozon_search` и `ozon_product_details`. Проверено: SKU 1446334512 → `price=708, ourPrice=632` (= юзерская зелёная). **Техсуть:** `src/parse.js` (`OUR_PRICE_FACTOR=0.893`, поле в обоих return'ах), `src/index.js` (описания тулов). **Known tradeoff:** ПРИБЛИЖЕНИЕ (×0.893), не точная аккаунт-цена — выборка 3 SKU (LIKELY), может ломаться на категорийных/промо/продавец-специфичных ставках. Точная цена требует залогиненной сессии (не делаем — security/ToS). Причина расхождения 632 vs 708 расследована: анонимный MCP vs залогиненный Ozon-Account/Premium tier (`premiumSubscribe`), см. docs/tasks/9/research.md.
-- 💰 **`ourPrice` в Ozon MCP** — оценка цены с Ozon-аккаунтом БЕЗ логина. Замерено: аккаунт-цена = стабильно **~0.893–0.895 × публичной cardPrice** (±0.1% на 3 SKU). Тул теперь отдаёт `ourPrice = round(cardPrice × 0.8949)` в `ozon_search` и `ozon_product_details`. Проверено: SKU 1446334512 → `price=708, ourPrice=634`. **Техсуть:** `src/parse.js` (`OUR_PRICE_FACTOR=0.8949`, поле в обоих return'ах), `src/index.js` (описания тулов). **Known tradeoff:** ПРИБЛИЖЕНИЕ (×0.8949), не точная аккаунт-цена — выборка 3 SKU (LIKELY), может ломаться на категорийных/промо/продавец-специфичных ставках. Точная цена требует залогиненной сессии (не делаем — security/ToS). Причина расхождения 632 vs 708 расследована: анонимный MCP vs залогиненный Ozon-Account/Premium tier (`premiumSubscribe`), см. docs/tasks/9/research.md.
+  <!-- коэффициент уточнён до 0.8949 в v2.6.0 (Fixed) -->
 
 ### Added (cleanup, доработка #7)
 - 🧹 **Temp-cleanup Playwright** — браузер плодил `/tmp/playwright-artifacts-*` + `/tmp/playwright_chromiumdev_profile-*` на каждый запуск. Нормальный `browser.close()` их сам чистит (проверено: 5 запросов → /tmp не растёт), но SIGKILL/обрыв-SSH оставляли orphan'ов (накопилось 6 dirs/75 файлов от тестов). Фикс 3 слоя: `clean-tmp.sh` (сносит >60мин) в `ozon-mcp-wrapper.sh` при каждом старте MCP + `ozon-tmp-cleanup.timer` (systemd daily). Разовая уборка накопленного сделана. `.cache` 641MB = бинарники браузера (норм, не трогали).
