@@ -98,10 +98,12 @@ async def compact_session(claude, notify=None) -> dict:
     logger.debug(f"Compact summary:\n{summary}")
 
     if notify:
-        try:
-            await notify(f"📋 Compact summary:\n\n{summary}")
-        except Exception:
-            pass
+        from telegram_io import split_msg
+        for part in split_msg(f"📋 Compact summary:\n\n{summary}"):
+            try:
+                await notify(part)
+            except Exception:
+                pass
 
     logger.info(f"Compact: pre-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
     await claude.reset_async()
