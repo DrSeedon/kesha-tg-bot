@@ -15,7 +15,7 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()}
 WORK_DIR = os.getenv("WORK_DIR", ".")
-MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5")
 DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
