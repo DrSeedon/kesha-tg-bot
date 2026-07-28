@@ -10,6 +10,7 @@ from aiogram import types
 from aiogram.exceptions import TelegramRetryAfter
 
 import config as _config
+from claude_session import usage_limit_reset as _session_limit_reset
 from config import MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
 from telegram_io import (
     _send_safe,
@@ -19,23 +20,6 @@ from telegram_io import (
 from tool_status import ToolStatusTracker
 
 STREAM_EDIT_INTERVAL = 1.0  # TG edit limit ~20/min → 1s safe minimum
-
-import re
-
-# «You've hit your session limit · resets 2:20pm (Europe/Berlin)» — это НЕ-ретраимо:
-# reconnect бесполезен (лимит тот же) → ждать сброса, не спамить reconnect. Отличаем от
-# «session died / process exited» (транзиентно, reconnect помогает).
-_SESSION_LIMIT_RE = re.compile(r"(hit\s+your\s+.*limit|session\s+limit|usage\s+limit)", re.IGNORECASE)
-_RESET_RE = re.compile(r"resets?\s+([^\n.)]+?(?:\([^)]+\))?)\s*$", re.IGNORECASE)
-
-
-def _session_limit_reset(err: str) -> str | None:
-    """Если err = ошибка лимита сессии → вернуть строку сброса (' · resets 2:20pm (Europe/Berlin)')
-    или '' если время не распознано. None если это НЕ лимит (обычная session-ошибка → reconnect)."""
-    if not _SESSION_LIMIT_RE.search(err):
-        return None
-    m = _RESET_RE.search(err.strip())
-    return f" (сброс {m.group(1).strip()})" if m else ""
 
 _bot = None
 _registry = None
@@ -92,6 +76,7 @@ async def _ask_inner(message, prompt, cid, typer):
     last_edit_text = ""
     edit_flood_until = 0.0
     finalized: list[int] = []
+    terminal_handled = False
 
     status: Optional[ToolStatusTracker] = None
 
@@ -228,6 +213,48 @@ async def _ask_inner(message, prompt, cid, typer):
                 finalized.append(mid)
             status = None
 
+    async def _handle_usage_limit(err: str) -> None:
+        nonlocal parts, has_deltas, current_msg_id, last_edit_time
+        nonlocal last_edit_text, terminal_handled
+
+        reset = _session_limit_reset(err) or ""
+        notice = (
+            _t_cfg(message, "session_limit", reset=reset)
+            if message is not None
+            else STRINGS["ru"]["session_limit"].format(reset=reset)
+        )
+        await _finalize_status()
+        parts.clear()
+        has_deltas = False
+
+        delivered = False
+        if current_msg_id is not None:
+            try:
+                await _bot.edit_message_text(
+                    notice, chat_id=cid, message_id=current_msg_id, parse_mode=None
+                )
+                finalized.append(current_msg_id)
+                delivered = True
+            except Exception as edit_error:
+                logger.warning(f"Chat {cid}: limit terminal edit failed: {edit_error}")
+                try:
+                    await _bot.delete_message(cid, current_msg_id)
+                except Exception:
+                    pass
+
+        if not delivered:
+            if message is not None:
+                sent = await _send_safe(message, notice)
+            else:
+                sent = await _bot.send_message(cid, notice, parse_mode=None)
+            if sent:
+                finalized.append(sent.message_id)
+
+        current_msg_id = None
+        last_edit_time = 0.0
+        last_edit_text = ""
+        terminal_handled = True
+
     CHUNK_TIMEOUT_TEXT = 120
     CHUNK_TIMEOUT_TOOL = 300
 
@@ -310,14 +337,10 @@ async def _ask_inner(message, prompt, cid, typer):
                 elif ct == "error":
                     err = chunk["content"]
                     reset = _session_limit_reset(err)
-                    if reset is not None:
+                    if chunk.get("kind") == "usage_limit" or reset is not None:
                         # лимит сессии — НЕ ретраить (reconnect бесполезен), сообщить и выйти
                         logger.warning(f"Chat {cid}: session limit hit, NOT retrying: {err}")
-                        await _finalize_status()
-                        if message is not None:
-                            await _send_safe(message, _t_cfg(message, "session_limit", reset=reset))
-                        elif _bot is not None:
-                            await _bot.send_message(cid, STRINGS["ru"]["session_limit"].format(reset=reset))
+                        await _handle_usage_limit(err)
                         break
                     if "session" in err.lower() or "process" in err.lower():
                         logger.warning(f"Session error, reconnecting: {err}")
@@ -353,10 +376,7 @@ async def _ask_inner(message, prompt, cid, typer):
             reset = _session_limit_reset(str(e))
             if reset is not None:
                 logger.warning(f"Chat {cid}: session limit (exception), NOT retrying: {e}")
-                if message is not None:
-                    await _send_safe(message, _t_cfg(message, "session_limit", reset=reset))
-                elif _bot is not None:
-                    await _bot.send_message(cid, STRINGS["ru"]["session_limit"].format(reset=reset))
+                await _handle_usage_limit(str(e))
                 break
             logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {type(e).__name__}: {e}", exc_info=True)
             retries += 1
@@ -395,5 +415,5 @@ async def _ask_inner(message, prompt, cid, typer):
             await status.cancel_empty()
         status = None
 
-    if not text and not finalized:
+    if not text and not finalized and not terminal_handled:
         await _answer(STRINGS["ru"]["empty"] if message is None else _t_cfg(message, "empty"))

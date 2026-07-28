@@ -1,7 +1,10 @@
 """Context compaction — summarize conversation, reset session, continue with summary."""
 
+import asyncio
 import logging
 from typing import Optional
+
+from claude_session import usage_limit_reset
 
 logger = logging.getLogger("kesha.compact")
 
@@ -43,119 +46,163 @@ CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted]
 
 
 async def compact_session(claude, notify=None) -> dict:
-    """Summarize current session, reset, continue with summary.
-
-    Args:
-        claude: ClaudeSession instance
-        notify: optional async callable(text: str) to report progress to user
-
-    Returns:
-        dict with keys: ok (bool), before_pct, after_pct, summary_chars, error (optional)
-    """
+    """Summarize the active session and atomically replace it with the summary."""
     before = await claude.get_context_usage()
     before_pct = before.get("percentage", 0) if before else 0
 
-    if notify:
+    async def report(text: str, *, replace: bool) -> None:
+        if not notify:
+            return
         try:
-            await notify(f"🗜 Сжимаю контекст... (было {before_pct:.0f}%)")
-        except Exception:
-            pass
+            await notify(text, replace=replace)
+        except Exception as exc:
+            logger.warning(f"Compact notification failed: {exc}")
 
+    async def terminal_report(text: str) -> None:
+        await asyncio.shield(report(text, replace=True))
+
+    await report(f"🗜 Сжимаю контекст... (было {before_pct:.0f}%)", replace=True)
     logger.info(f"Compact: requesting summary, before={before_pct:.1f}%")
 
+    transaction = claude.begin_session_replacement()
     summary_parts: list[str] = []
-    has_deltas = False
+    summary = ""
+    failure_reason = "summary_error"
+
     try:
-        async for chunk in claude.send_message(COMPACT_PROMPT):
-            ct = chunk.get("type")
-            if ct == "text_delta":
-                has_deltas = True
-                summary_parts.append(chunk["content"])
-            elif ct == "text" and not has_deltas:
-                summary_parts.append(chunk["content"])
-            elif ct == "error":
-                raise RuntimeError(f"SDK error during summary: {chunk.get('content')}")
-    except Exception as e:
-        logger.error(f"Compact: summary request failed: {e}", exc_info=True)
-        if notify:
-            try:
-                await notify(f"⚠️ Сжатие не удалось: {e}")
-            except Exception:
-                pass
-        return {"ok": False, "before_pct": before_pct, "after_pct": before_pct, "summary_chars": 0, "error": str(e)}
+        has_deltas = False
+        limit_hit = False
+        summary_failed = False
+        try:
+            async for chunk in claude.send_message(COMPACT_PROMPT):
+                chunk_type = chunk.get("type")
+                content = str(chunk.get("content") or "")
+                if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
+                    limit_hit = True
+                    summary_parts.clear()
+                    continue
+                if limit_hit:
+                    continue
+                if chunk_type == "text_delta":
+                    has_deltas = True
+                    summary_parts.append(content)
+                elif chunk_type == "text" and not has_deltas:
+                    summary_parts.append(content)
+                elif chunk_type == "error":
+                    summary_failed = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Compact: summary request failed: {exc}", exc_info=True)
+            summary_failed = True
 
-    summary = "".join(summary_parts).strip()
-    if not summary:
-        logger.warning("Compact: Claude returned empty summary, aborting")
-        if notify:
-            try:
-                await notify("⚠️ Кеша вернул пустое саммари, пропускаю сжатие")
-            except Exception:
-                pass
-        return {"ok": False, "before_pct": before_pct, "after_pct": before_pct, "summary_chars": 0, "error": "empty summary"}
+        if limit_hit:
+            failure_reason = "usage_limit"
+            raise RuntimeError(failure_reason)
+        if summary_failed:
+            raise RuntimeError(failure_reason)
 
-    logger.info(f"Compact: got summary {len(summary)} chars, resetting session")
-    logger.debug(f"Compact summary:\n{summary}")
+        summary = "".join(summary_parts).strip()
+        if not summary:
+            failure_reason = "empty_summary"
+            raise RuntimeError(failure_reason)
+        if claude.session_id != transaction.session_id:
+            failure_reason = "source_session_changed"
+            raise RuntimeError(failure_reason)
 
-    if notify:
-        from telegram_io import split_msg
-        for part in split_msg(f"📋 Compact summary:\n\n{summary}"):
-            try:
-                await notify(part)
-            except Exception:
-                pass
+        logger.info(f"Compact: got summary {len(summary)} chars, starting candidate")
+        logger.debug(f"Compact summary:\n{summary}")
+        claude.start_session_candidate(transaction)
 
-    logger.info(f"Compact: pre-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
-    await claude.reset_async()
-    logger.info(f"Compact: post-reset session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
-
-    preamble = CONTINUATION_PREAMBLE.format(summary=summary)
-    preamble_ok = True
-    try:
+        preamble = CONTINUATION_PREAMBLE.format(summary=summary)
+        preamble_failed = False
+        preamble_limit = False
         async for chunk in claude.send_message(preamble):
-            if chunk.get("type") == "error":
-                logger.warning(f"Compact preamble error: {chunk.get('content')}")
-                preamble_ok = False
-    except Exception as e:
-        logger.error(f"Compact preamble failed: {e}", exc_info=True)
-        preamble_ok = False
+            if chunk.get("type") != "error":
+                continue
+            content = str(chunk.get("content") or "")
+            if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
+                preamble_limit = True
+                failure_reason = "usage_limit"
+            else:
+                preamble_failed = True
+                failure_reason = "preamble_error"
 
-    if not claude.session_id:
-        logger.error("Compact: no session_id after preamble — session lost")
-        preamble_ok = False
+        if preamble_limit or preamble_failed:
+            raise RuntimeError(failure_reason)
+        if not claude.session_id:
+            failure_reason = "missing_candidate_session"
+            raise RuntimeError(failure_reason)
 
-    logger.info(f"Compact: preamble done (ok={preamble_ok}), new session_id={claude.session_id[:8] + '...' if claude.session_id else 'None'}")
+        claude.commit_session_replacement(transaction)
+        logger.info(f"Compact: committed session_id={claude.session_id[:8]}...")
 
-    after = await claude.get_context_usage()
-    after_pct = after.get("percentage", 0) if after else 0
-
-    logger.info(f"Compact: done, {before_pct:.1f}% → {after_pct:.1f}%, summary={len(summary)} chars")
-
-    if preamble_ok:
         if notify:
-            try:
-                await notify(f"✅ Контекст сжат: {before_pct:.0f}% → {after_pct:.0f}%")
-            except Exception:
-                pass
-    else:
-        if notify:
-            try:
-                await notify(f"⚠️ Контекст сброшен, но саммари могло не загрузиться ({before_pct:.0f}% → {after_pct:.0f}%)")
-            except Exception:
-                pass
+            from telegram_io import split_msg
 
-    return {
-        "ok": preamble_ok,
-        "before_pct": before_pct,
-        "after_pct": after_pct,
-        "summary_chars": len(summary),
-    }
+            for part in split_msg(f"📋 Compact summary:\n\n{summary}"):
+                await report(part, replace=False)
+
+        try:
+            after = await claude.get_context_usage()
+            after_pct = after.get("percentage", 0) if after else 0
+        except Exception as exc:
+            logger.warning(f"Compact: post-commit context usage failed: {exc}")
+            after_pct = 0
+
+        await report(
+            f"✅ Контекст сжат: {before_pct:.0f}% → {after_pct:.0f}%",
+            replace=True,
+        )
+        logger.info(
+            f"Compact: done, {before_pct:.1f}% → {after_pct:.1f}%, "
+            f"summary={len(summary)} chars"
+        )
+        return {
+            "ok": True,
+            "before_pct": before_pct,
+            "after_pct": after_pct,
+            "summary_chars": len(summary),
+        }
+    except asyncio.CancelledError:
+        if not transaction.committed:
+            await asyncio.shield(claude.rollback_session_replacement(transaction))
+            terminal = "⚠️ Сжатие отменено — контекст сохранён."
+        else:
+            terminal = "✅ Контекст сжат."
+        await terminal_report(terminal)
+        raise
+    except BaseException as exc:
+        if not transaction.committed:
+            await asyncio.shield(claude.rollback_session_replacement(transaction))
+        if not isinstance(exc, Exception):
+            raise
+        logger.error(f"Compact failed safely ({failure_reason}): {exc}")
+        if transaction.committed:
+            terminal = "✅ Контекст сжат."
+        elif failure_reason == "usage_limit":
+            terminal = "⏳ Лимит Claude исчерпан — сжатие пропущено, контекст сохранён."
+        elif failure_reason == "empty_summary":
+            terminal = "⚠️ Пустое саммари — сжатие пропущено, контекст сохранён."
+        else:
+            terminal = "⚠️ Сжатие не удалось — контекст сохранён."
+        await report(terminal, replace=True)
+        return {
+            "ok": False,
+            "reason": failure_reason,
+            "before_pct": before_pct,
+            "after_pct": before_pct,
+            "summary_chars": len(summary),
+        }
 
 
 async def maybe_auto_compact(claude, threshold_pct: float, notify=None) -> Optional[dict]:
     """Check context usage and trigger compact if above threshold. Returns result dict or None."""
     if threshold_pct <= 0 or threshold_pct >= 100:
-        return None  # disabled
+        return None
+    if claude.usage_limit_active:
+        logger.info("Auto-compact skipped while usage-limit latch is active")
+        return {"ok": False, "reason": "usage_limit", "skipped": True}
     usage = await claude.get_context_usage()
     if not usage:
         return None

@@ -2,6 +2,10 @@
 
 import asyncio
 import logging
+import os
+import re
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -24,6 +28,31 @@ logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path("./storage/sessions")
 
+_USAGE_LIMIT_RE = re.compile(
+    r"(hit\s+your\s+.*limit|session\s+limit|usage\s+limit|monthly\s+spend\s+limit)",
+    re.IGNORECASE,
+)
+_RESET_RE = re.compile(r"resets?\s+([^\n.)]+?(?:\([^)]+\))?)\s*$", re.IGNORECASE)
+
+
+def usage_limit_reset(err: str) -> str | None:
+    """Return a localized reset suffix for a usage limit, or None otherwise."""
+    if not _USAGE_LIMIT_RE.search(err):
+        return None
+    match = _RESET_RE.search(err.strip())
+    return f" (сброс {match.group(1).strip()})" if match else ""
+
+
+@dataclass
+class _SessionReplacement:
+    session_id: Optional[str]
+    session_resumed: bool
+    last_ctx_usage: Optional[dict]
+    client: Any
+    connected: bool
+    candidate_started: bool = False
+    committed: bool = False
+
 
 class ClaudeSession:
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
@@ -42,6 +71,7 @@ class ClaudeSession:
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
         self.rate_limit: Optional[dict[str, Any]] = None
+        self.usage_limit_active = False
         self.last_duration_ms: int = 0
         self.last_num_turns: int = 0
         self.last_stop_reason: Optional[str] = None
@@ -54,6 +84,7 @@ class ClaudeSession:
         self._is_processing = False
         self._session_resumed = bool(self.session_id)
         self._query_lock = asyncio.Lock()
+        self._session_replacement: Optional[_SessionReplacement] = None
 
     def _load_session(self) -> Optional[str]:
         if self._session_file.exists():
@@ -64,8 +95,106 @@ class ClaudeSession:
         return None
 
     def _save_session(self):
+        if self._session_replacement and not self._session_replacement.committed:
+            return
+        self._write_session_id(self.session_id or "")
+
+    def _write_session_id(self, session_id: str) -> None:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
-        self._session_file.write_text(self.session_id or "")
+        fd, temp_name = tempfile.mkstemp(
+            dir=self._session_file.parent,
+            prefix=f".{self._session_file.name}.",
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as temp_file:
+                temp_file.write(session_id)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, self._session_file)
+            try:
+                dir_fd = os.open(self._session_file.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError as exc:
+                logger.warning(f"Session directory fsync failed after atomic replace: {exc}")
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def begin_session_replacement(self) -> _SessionReplacement:
+        if self._session_replacement is not None:
+            raise RuntimeError("session replacement already active")
+        snapshot = _SessionReplacement(
+            session_id=self.session_id,
+            session_resumed=self._session_resumed,
+            last_ctx_usage=self._last_ctx_usage,
+            client=self._client,
+            connected=self._connected,
+        )
+        self._session_replacement = snapshot
+        return snapshot
+
+    def start_session_candidate(self, snapshot: _SessionReplacement) -> None:
+        if self._session_replacement is not snapshot or snapshot.committed:
+            raise RuntimeError("session replacement is not active")
+        if self.session_id != snapshot.session_id:
+            raise RuntimeError("source session changed during summary")
+        snapshot.candidate_started = True
+        self._pending_disconnect = self._client or self._pending_disconnect
+        self._client = None
+        self._connected = False
+        self.session_id = None
+        self._session_resumed = False
+        self._last_ctx_usage = None
+
+    def commit_session_replacement(self, snapshot: _SessionReplacement) -> None:
+        if self._session_replacement is not snapshot:
+            raise RuntimeError("session replacement is not active")
+        if not snapshot.candidate_started:
+            raise RuntimeError("candidate session was not started")
+        if not self.session_id:
+            raise RuntimeError("candidate session has no session_id")
+        self._write_session_id(self.session_id)
+        snapshot.committed = True
+        self._session_replacement = None
+
+    async def rollback_session_replacement(self, snapshot: _SessionReplacement) -> None:
+        if snapshot.committed:
+            return
+        if self._session_replacement is not snapshot:
+            raise RuntimeError("session replacement is not active")
+
+        source_unchanged = (
+            not snapshot.candidate_started
+            and self.session_id == snapshot.session_id
+            and self._client is snapshot.client
+            and self._connected == snapshot.connected
+        )
+        self.session_id = snapshot.session_id
+        self._session_resumed = snapshot.session_resumed
+        self._last_ctx_usage = snapshot.last_ctx_usage
+        self._session_replacement = None
+        if source_unchanged:
+            return
+
+        clients = [
+            client
+            for client in (self._client, self._pending_disconnect, snapshot.client)
+            if client
+        ]
+        self._client = None
+        self._pending_disconnect = None
+        self._connected = False
+
+        seen = set()
+        for client in clients:
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            await self._safe_disconnect(client)
 
     def _invalidate_session(self):
         self.session_id = None
@@ -139,6 +268,11 @@ class ClaudeSession:
 
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
+        pending_limit: Optional[str] = None
+        limit_seen = False
+        limit_content = ""
+        batch_had_error = False
+        generic_errors: list[str] = []
 
         try:
             logger.info("send_message: ensuring connected...")
@@ -147,11 +281,23 @@ class ClaudeSession:
             async with self._query_lock:
                 await self._client.query(text)
                 self._expected_results = 1
+                self._is_processing = True
             logger.info("send_message: query sent, receiving messages...")
-            self._is_processing = True
 
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
+                    assistant_error = getattr(msg, "error", None)
+                    if assistant_error in {"rate_limit", "billing_error"}:
+                        raw = "\n".join(
+                            block.text for block in msg.content
+                            if isinstance(block, TextBlock) and block.text
+                        )
+                        pending_limit = raw or assistant_error
+                        limit_content = limit_content or pending_limit
+                        limit_seen = True
+                        continue
+                    if limit_seen:
+                        continue
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
                             yield {"type": "text", "content": block.text}
@@ -161,28 +307,65 @@ class ClaudeSession:
                             content = block.content if isinstance(block.content, str) else str(block.content)
                             yield {"type": "result", "content": content[:200], "error": block.is_error}
                 elif isinstance(msg, ResultMessage):
-                    if hasattr(msg, 'session_id') and msg.session_id:
+                    if getattr(msg, "session_id", None):
                         self.session_id = msg.session_id
                         self._save_session()
                         logger.info(f"Session ID saved: {self.session_id[:8]}...")
-                    if hasattr(msg, 'total_cost_usd') and msg.total_cost_usd is not None:
+                    if getattr(msg, "total_cost_usd", None) is not None:
                         self.last_cost_usd = msg.total_cost_usd
                         self.total_cost_usd += msg.total_cost_usd
-                    if hasattr(msg, 'usage') and msg.usage:
+                    if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
-                    self.last_duration_ms = getattr(msg, 'duration_ms', 0) or 0
-                    self.last_num_turns = getattr(msg, 'num_turns', 0) or 0
-                    self.last_stop_reason = getattr(msg, 'stop_reason', None)
+                    self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
+                    self.last_num_turns = getattr(msg, "num_turns", 0) or 0
+                    self.last_stop_reason = getattr(msg, "stop_reason", None)
                     dur_s = self.last_duration_ms / 1000
-                    logger.info(f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}")
-                    if msg.is_error and msg.result:
-                        yield {"type": "error", "content": str(msg.result)}
-                    self._expected_results -= 1
-                    if self._expected_results <= 0:
+                    logger.info(
+                        f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, "
+                        f"stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}"
+                    )
+
+                    raw_result = str(msg.result or "")
+                    result_is_limit = (
+                        pending_limit is not None
+                        or getattr(msg, "api_error_status", None) == 429
+                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
+                        or usage_limit_reset(raw_result) is not None
+                    )
+                    if result_is_limit:
+                        limit_seen = True
+                        limit_content = limit_content or pending_limit or raw_result or "usage limit"
+                        self.usage_limit_active = True
+                    elif msg.is_error:
+                        batch_had_error = True
+                        if raw_result:
+                            generic_errors.append(raw_result)
+                    pending_limit = None
+
+                    async with self._query_lock:
+                        self._expected_results = max(0, self._expected_results - 1)
+                        terminal = self._expected_results == 0
+                        if terminal:
+                            self._is_processing = False
+
+                    if terminal:
+                        if limit_seen:
+                            yield {
+                                "type": "error",
+                                "kind": "usage_limit",
+                                "content": limit_content or "usage limit",
+                            }
+                        else:
+                            if not batch_had_error:
+                                self.usage_limit_active = False
+                            for error in generic_errors:
+                                yield {"type": "error", "content": error}
                         break
-                    else:
+                    if not limit_seen:
                         yield {"type": "turn_done"}
                 elif isinstance(msg, StreamEvent):
+                    if limit_seen:
+                        continue
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
                         delta = evt.get("delta", {})
@@ -197,10 +380,25 @@ class ClaudeSession:
                         "type": rl.rate_limit_type,
                         "utilization": rl.utilization,
                     }
+                    if rl.status == "rejected":
+                        pending_limit = pending_limit or "usage limit"
+                        limit_content = limit_content or pending_limit
+                        limit_seen = True
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
         except Exception as e:
-            if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
-                logger.warning("Session %s failed (%s), invalidating and retrying", self.session_id[:8], type(e).__name__)
+            err = str(e)
+            if usage_limit_reset(err) is not None:
+                self.usage_limit_active = True
+                self._connected = False
+                self._client = None
+                self._expected_results = 0
+                yield {"type": "error", "kind": "usage_limit", "content": err}
+                return
+            if self.session_id and ("No conversation found" in err or "exit code 1" in err):
+                logger.warning(
+                    "Session %s failed (%s), invalidating and retrying",
+                    self.session_id[:8], type(e).__name__,
+                )
                 self._invalidate_session()
                 self._connected = False
                 self._client = None
@@ -210,18 +408,31 @@ class ClaudeSession:
             logger.error(f"SDK error: {e}", exc_info=True)
             self._connected = False
             self._client = None
-            yield {"type": "error", "content": str(e)}
+            self._expected_results = 0
+            yield {"type": "error", "content": err}
         finally:
-            self._is_processing = False
+            if self._is_processing:
+                async with self._query_lock:
+                    self._is_processing = False
 
     async def inject(self, text: str) -> bool:
         if not (self._client and self._connected and self._is_processing):
             return False
         try:
             async with self._query_lock:
-                await self._client.query(text)
+                if not (self._client and self._connected and self._is_processing):
+                    return False
+                client = self._client
+                await client.query(text)
+                if not (
+                    self._client is client
+                    and self._connected
+                    and self._is_processing
+                ):
+                    return False
                 self._expected_results += 1
-            logger.info(f"Injected (expect {self._expected_results} results): {text[:80]}...")
+                expected = self._expected_results
+            logger.info(f"Injected (expect {expected} results): {text[:80]}...")
             return True
         except Exception as e:
             logger.error(f"Inject error: {e}")
