@@ -103,6 +103,27 @@ async def test_preamble_limit_rolls_back_old_sid_and_sends_no_summary(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_summary_retry_cannot_invalidate_persisted_source_sid(tmp_path):
+    path = session_file(tmp_path)
+
+    async def retried_without_source_context(session):
+        session._invalidate_session()
+        session.session_id = "sid-retry-without-context"
+        yield {"type": "text", "content": "summary from wrong session"}
+
+    session = ScriptedSession(path, [retried_without_source_context])
+    notices = Notices()
+
+    result = await compact_session(session, notify=notices)
+
+    assert result["reason"] == "source_session_changed"
+    assert session.session_id == "sid-old"
+    assert path.read_text() == "sid-old"
+    assert ClaudeSession(cwd=".", session_file=path).session_id == "sid-old"
+    assert all("📋" not in text for text, _ in notices.items)
+
+
+@pytest.mark.asyncio
 async def test_cancellation_before_commit_rolls_back_sid_and_terminalizes_progress(tmp_path):
     path = session_file(tmp_path)
     candidate_started = asyncio.Event()
@@ -214,12 +235,14 @@ async def test_session_replacement_is_restart_atomic_across_all_commit_points(
 
     during = ClaudeSession(cwd=".", session_file=path)
     transaction = during.begin_session_replacement()
+    during.start_session_candidate(transaction)
     during.session_id = "sid-candidate"
     assert ClaudeSession(cwd=".", session_file=path).session_id == "sid-old"
     await during.rollback_session_replacement(transaction)
 
     failing = ClaudeSession(cwd=".", session_file=path)
     transaction = failing.begin_session_replacement()
+    failing.start_session_candidate(transaction)
     failing.session_id = "sid-candidate"
 
     def fail_replace(source, destination):
@@ -235,6 +258,7 @@ async def test_session_replacement_is_restart_atomic_across_all_commit_points(
     monkeypatch.undo()
     committed = ClaudeSession(cwd=".", session_file=path)
     transaction = committed.begin_session_replacement()
+    committed.start_session_candidate(transaction)
     committed.session_id = "sid-candidate"
     committed.commit_session_replacement(transaction)
     assert ClaudeSession(cwd=".", session_file=path).session_id == "sid-candidate"
@@ -251,4 +275,3 @@ async def test_maybe_auto_compact_latch_skips_context_and_summary():
     result = await maybe_auto_compact(Latched(), 95)
 
     assert result == {"ok": False, "reason": "usage_limit", "skipped": True}
-

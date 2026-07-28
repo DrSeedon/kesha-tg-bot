@@ -89,4 +89,3 @@ async def test_streamed_raw_limit_is_replaced_by_one_friendly_terminal_outcome(
     assert RAW_LIMIT not in final_text
     all_visible = [final_text]
     assert not any("Пустой ответ" in text or "📋" in text for text in all_visible)
-

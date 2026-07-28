@@ -64,76 +64,56 @@ async def compact_session(claude, notify=None) -> dict:
     await report(f"🗜 Сжимаю контекст... (было {before_pct:.0f}%)", replace=True)
     logger.info(f"Compact: requesting summary, before={before_pct:.1f}%")
 
-    summary_parts: list[str] = []
-    has_deltas = False
-    limit_hit = False
-    summary_failed = False
-    try:
-        async for chunk in claude.send_message(COMPACT_PROMPT):
-            chunk_type = chunk.get("type")
-            content = str(chunk.get("content") or "")
-            if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
-                limit_hit = True
-                summary_parts.clear()
-                continue
-            if limit_hit:
-                continue
-            if chunk_type == "text_delta":
-                has_deltas = True
-                summary_parts.append(content)
-            elif chunk_type == "text" and not has_deltas:
-                summary_parts.append(content)
-            elif chunk_type == "error":
-                summary_failed = True
-    except asyncio.CancelledError:
-        await terminal_report("⚠️ Сжатие отменено — контекст сохранён.")
-        raise
-    except Exception as exc:
-        logger.error(f"Compact: summary request failed: {exc}", exc_info=True)
-        summary_failed = True
-
-    if limit_hit:
-        logger.warning("Compact: usage limit during summary; session replacement skipped")
-        await report(
-            "⏳ Лимит Claude исчерпан — сжатие пропущено, контекст сохранён.",
-            replace=True,
-        )
-        return {
-            "ok": False,
-            "reason": "usage_limit",
-            "before_pct": before_pct,
-            "after_pct": before_pct,
-            "summary_chars": 0,
-        }
-
-    if summary_failed:
-        await report("⚠️ Сжатие не удалось — контекст сохранён.", replace=True)
-        return {
-            "ok": False,
-            "reason": "summary_error",
-            "before_pct": before_pct,
-            "after_pct": before_pct,
-            "summary_chars": 0,
-        }
-
-    summary = "".join(summary_parts).strip()
-    if not summary:
-        logger.warning("Compact: Claude returned empty summary, aborting")
-        await report("⚠️ Пустое саммари — сжатие пропущено, контекст сохранён.", replace=True)
-        return {
-            "ok": False,
-            "reason": "empty_summary",
-            "before_pct": before_pct,
-            "after_pct": before_pct,
-            "summary_chars": 0,
-        }
-
-    logger.info(f"Compact: got summary {len(summary)} chars, starting replacement")
-    logger.debug(f"Compact summary:\n{summary}")
     transaction = claude.begin_session_replacement()
-    failure_reason = "preamble_error"
+    summary_parts: list[str] = []
+    summary = ""
+    failure_reason = "summary_error"
 
     try:
+        has_deltas = False
+        limit_hit = False
+        summary_failed = False
+        try:
+            async for chunk in claude.send_message(COMPACT_PROMPT):
+                chunk_type = chunk.get("type")
+                content = str(chunk.get("content") or "")
+                if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
+                    limit_hit = True
+                    summary_parts.clear()
+                    continue
+                if limit_hit:
+                    continue
+                if chunk_type == "text_delta":
+                    has_deltas = True
+                    summary_parts.append(content)
+                elif chunk_type == "text" and not has_deltas:
+                    summary_parts.append(content)
+                elif chunk_type == "error":
+                    summary_failed = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Compact: summary request failed: {exc}", exc_info=True)
+            summary_failed = True
+
+        if limit_hit:
+            failure_reason = "usage_limit"
+            raise RuntimeError(failure_reason)
+        if summary_failed:
+            raise RuntimeError(failure_reason)
+
+        summary = "".join(summary_parts).strip()
+        if not summary:
+            failure_reason = "empty_summary"
+            raise RuntimeError(failure_reason)
+        if claude.session_id != transaction.session_id:
+            failure_reason = "source_session_changed"
+            raise RuntimeError(failure_reason)
+
+        logger.info(f"Compact: got summary {len(summary)} chars, starting candidate")
+        logger.debug(f"Compact summary:\n{summary}")
+        claude.start_session_candidate(transaction)
+
         preamble = CONTINUATION_PREAMBLE.format(summary=summary)
         preamble_failed = False
         preamble_limit = False
@@ -146,6 +126,7 @@ async def compact_session(claude, notify=None) -> dict:
                 failure_reason = "usage_limit"
             else:
                 preamble_failed = True
+                failure_reason = "preamble_error"
 
         if preamble_limit or preamble_failed:
             raise RuntimeError(failure_reason)
@@ -196,9 +177,13 @@ async def compact_session(claude, notify=None) -> dict:
             await asyncio.shield(claude.rollback_session_replacement(transaction))
         if not isinstance(exc, Exception):
             raise
-        logger.error(f"Compact: candidate session failed: {exc}", exc_info=True)
-        if failure_reason == "usage_limit":
+        logger.error(f"Compact failed safely ({failure_reason}): {exc}")
+        if transaction.committed:
+            terminal = "✅ Контекст сжат."
+        elif failure_reason == "usage_limit":
             terminal = "⏳ Лимит Claude исчерпан — сжатие пропущено, контекст сохранён."
+        elif failure_reason == "empty_summary":
+            terminal = "⚠️ Пустое саммари — сжатие пропущено, контекст сохранён."
         else:
             terminal = "⚠️ Сжатие не удалось — контекст сохранён."
         await report(terminal, replace=True)

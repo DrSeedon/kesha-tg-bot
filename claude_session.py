@@ -48,6 +48,9 @@ class _SessionReplacement:
     session_id: Optional[str]
     session_resumed: bool
     last_ctx_usage: Optional[dict]
+    client: Any
+    connected: bool
+    candidate_started: bool = False
     committed: bool = False
 
 
@@ -128,19 +131,30 @@ class ClaudeSession:
             session_id=self.session_id,
             session_resumed=self._session_resumed,
             last_ctx_usage=self._last_ctx_usage,
+            client=self._client,
+            connected=self._connected,
         )
         self._session_replacement = snapshot
+        return snapshot
+
+    def start_session_candidate(self, snapshot: _SessionReplacement) -> None:
+        if self._session_replacement is not snapshot or snapshot.committed:
+            raise RuntimeError("session replacement is not active")
+        if self.session_id != snapshot.session_id:
+            raise RuntimeError("source session changed during summary")
+        snapshot.candidate_started = True
         self._pending_disconnect = self._client or self._pending_disconnect
         self._client = None
         self._connected = False
         self.session_id = None
         self._session_resumed = False
         self._last_ctx_usage = None
-        return snapshot
 
     def commit_session_replacement(self, snapshot: _SessionReplacement) -> None:
         if self._session_replacement is not snapshot:
             raise RuntimeError("session replacement is not active")
+        if not snapshot.candidate_started:
+            raise RuntimeError("candidate session was not started")
         if not self.session_id:
             raise RuntimeError("candidate session has no session_id")
         self._write_session_id(self.session_id)
@@ -153,14 +167,27 @@ class ClaudeSession:
         if self._session_replacement is not snapshot:
             raise RuntimeError("session replacement is not active")
 
-        clients = [client for client in (self._client, self._pending_disconnect) if client]
-        self._client = None
-        self._pending_disconnect = None
-        self._connected = False
+        source_unchanged = (
+            not snapshot.candidate_started
+            and self.session_id == snapshot.session_id
+            and self._client is snapshot.client
+            and self._connected == snapshot.connected
+        )
         self.session_id = snapshot.session_id
         self._session_resumed = snapshot.session_resumed
         self._last_ctx_usage = snapshot.last_ctx_usage
         self._session_replacement = None
+        if source_unchanged:
+            return
+
+        clients = [
+            client
+            for client in (self._client, self._pending_disconnect, snapshot.client)
+            if client
+        ]
+        self._client = None
+        self._pending_disconnect = None
+        self._connected = False
 
         seen = set()
         for client in clients:
@@ -381,6 +408,7 @@ class ClaudeSession:
             logger.error(f"SDK error: {e}", exc_info=True)
             self._connected = False
             self._client = None
+            self._expected_results = 0
             yield {"type": "error", "content": err}
         finally:
             if self._is_processing:
@@ -394,7 +422,14 @@ class ClaudeSession:
             async with self._query_lock:
                 if not (self._client and self._connected and self._is_processing):
                     return False
-                await self._client.query(text)
+                client = self._client
+                await client.query(text)
+                if not (
+                    self._client is client
+                    and self._connected
+                    and self._is_processing
+                ):
+                    return False
                 self._expected_results += 1
                 expected = self._expected_results
             logger.info(f"Injected (expect {expected} results): {text[:80]}...")

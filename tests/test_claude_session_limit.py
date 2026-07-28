@@ -185,6 +185,49 @@ async def test_terminal_result_and_inject_race_cannot_leave_stale_result(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_inflight_inject_is_rejected_if_stream_fails_during_query(tmp_path):
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    class FailingClient:
+        async def query(self, text):
+            if text == "racing":
+                query_started.set()
+                await release_query.wait()
+
+        async def receive_messages(self):
+            await query_started.wait()
+            raise RuntimeError("stream failed while inject was in flight")
+            yield
+
+    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+    client = FailingClient()
+    session._client = client
+    session._connected = True
+
+    async def connected():
+        return None
+
+    session._ensure_connected = connected
+    response = asyncio.create_task(collect(session, "first"))
+    while not session._is_processing:
+        await asyncio.sleep(0)
+    injected = asyncio.create_task(session.inject("racing"))
+    await query_started.wait()
+    await asyncio.sleep(0)
+    release_query.set()
+
+    chunks, accepted = await asyncio.gather(response, injected)
+
+    assert chunks == [
+        {"type": "error", "content": "stream failed while inject was in flight"}
+    ]
+    assert accepted is False
+    assert session._expected_results == 0
+    assert session._is_processing is False
+
+
+@pytest.mark.asyncio
 async def test_allowed_other_scope_does_not_clear_rejection_but_successful_turn_does(tmp_path):
     session, client = make_session(tmp_path)
     limited = asyncio.create_task(collect(session, "limited"))
