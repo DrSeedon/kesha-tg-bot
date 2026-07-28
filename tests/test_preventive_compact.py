@@ -19,6 +19,7 @@ def _mk_state(ctx_pct=40.0):
     session = MagicMock()
     session.get_context_usage = AsyncMock(return_value={"percentage": ctx_pct})
     session.inject = AsyncMock(return_value=True)
+    session.usage_limit_active = False
     cs = ChatState(
         chat_id=1, session=session, bot=MagicMock(), debounce_sec=0,
         auto_compact_pct=95.0, ask_fn=AsyncMock(), set_current_chat_fn=MagicMock(),
@@ -57,7 +58,7 @@ async def test_fires_compact_after_idle():
     cs.pending.clear()
     cs.phase = ChatPhase.IDLE
     await asyncio.sleep(0.12)
-    cs.request_compact.assert_awaited_once()
+    cs.request_compact.assert_awaited_once_with(automatic=True)
 
 
 @pytest.mark.asyncio
@@ -94,7 +95,7 @@ async def test_new_message_resets_timer():
     assert first.cancelled() or first.done()
     assert cs._preventive_task is not first
     await asyncio.sleep(0.12)
-    cs.request_compact.assert_awaited_once()  # fires once, from the second timer
+    cs.request_compact.assert_awaited_once_with(automatic=True)
     cs._shutdown = True
     if cs._preventive_task and not cs._preventive_task.done():
         cs._preventive_task.cancel()
@@ -119,3 +120,80 @@ async def test_arm_noop_when_shutdown():
     cs._shutdown = True
     cs._arm_preventive_timer()
     assert cs._preventive_task is None
+
+
+@pytest.mark.asyncio
+async def test_preventive_latch_skips_before_context_lookup():
+    cs = _mk_state()
+    cs.session.usage_limit_active = True
+    cs.request_compact = AsyncMock(return_value=True)
+    cs.phase = ChatPhase.IDLE
+    cs._arm_preventive_timer()
+
+    await asyncio.sleep(0.12)
+
+    cs.session.get_context_usage.assert_not_awaited()
+    cs.request_compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deferred_automatic_request_rechecks_latch_at_execution_boundary():
+    cs = _mk_state()
+    cs.phase = ChatPhase.PROCESSING
+    cs._drain_or_idle = AsyncMock()
+    await cs.request_compact(automatic=True)
+    cs.session.usage_limit_active = True
+
+    await cs._finish_processing()
+
+    cs._compact_session_fn.assert_not_awaited()
+    cs._drain_or_idle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_provenance_is_sticky_over_coalesced_preventive_request():
+    cs = _mk_state()
+    cs.phase = ChatPhase.PROCESSING
+    cs._drain_or_idle = AsyncMock()
+    await cs.request_compact(automatic=False)
+    await cs.request_compact(automatic=True)
+    cs.session.usage_limit_active = True
+
+    assert cs.compact_requested_automatic is False
+    await cs._finish_processing()
+
+    cs._compact_session_fn.assert_awaited_once()
+    cs._drain_or_idle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compact_notifier_edits_one_progress_message():
+    cs = _mk_state()
+    cs.bot.send_message = AsyncMock(return_value=MagicMock(message_id=17))
+    cs.bot.edit_message_text = AsyncMock()
+    notify = cs._make_compact_notifier()
+
+    await notify("start", replace=True)
+    await notify("terminal", replace=True)
+
+    cs.bot.send_message.assert_awaited_once_with(1, "start")
+    cs.bot.edit_message_text.assert_awaited_once_with(
+        "terminal", chat_id=1, message_id=17
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_notifier_edit_failure_deletes_and_sends_terminal_fallback():
+    cs = _mk_state()
+    cs.bot.send_message = AsyncMock(
+        side_effect=[MagicMock(message_id=17), MagicMock(message_id=18)]
+    )
+    cs.bot.edit_message_text = AsyncMock(side_effect=RuntimeError("edit failed"))
+    cs.bot.delete_message = AsyncMock()
+    notify = cs._make_compact_notifier()
+
+    await notify("start", replace=True)
+    await notify("terminal", replace=True)
+
+    cs.bot.delete_message.assert_awaited_once_with(1, 17)
+    assert cs.bot.send_message.await_args_list[-1].args == (1, "terminal")

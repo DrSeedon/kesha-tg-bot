@@ -97,6 +97,7 @@ class ChatState:
         self.pending_transcriptions: int = 0
         self.cancel_requested: bool = False
         self.compact_requested: bool = False
+        self.compact_requested_automatic: bool = False
         self.batch_message_ids: list[int] = []
         self.last_user_message_id: int | None = None
         self.generation: int = 0
@@ -239,6 +240,7 @@ class ChatState:
             self.deferred.clear()
             self.cancel_requested = False
             self.compact_requested = False
+            self.compact_requested_automatic = False
             self.batch_message_ids.clear()
             self.pending_transcriptions = 0
             self.generation += 1
@@ -251,13 +253,23 @@ class ChatState:
         await self.session.reset_async()
         return True
 
-    async def request_compact(self) -> bool:
-        """Request compaction. Deferred during PROCESSING/STOPPING, runs now from IDLE/COLLECTING/WAITING_MEDIA."""
+    async def request_compact(self, automatic: bool = False) -> bool:
+        """Request compaction; deferred requests preserve manual-over-automatic provenance."""
         async with self._lock:
-            if self._shutdown: return False
+            if self._shutdown:
+                return False
+            if automatic and getattr(self.session, "usage_limit_active", False):
+                logger.info(f"Chat {self.chat_id}: automatic compact skipped (usage limit)")
+                return True
             if self.phase == ChatPhase.COMPACTING:
                 return True
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
+                if not self.compact_requested:
+                    self.compact_requested_automatic = automatic
+                else:
+                    self.compact_requested_automatic = (
+                        self.compact_requested_automatic and automatic
+                    )
                 self.compact_requested = True
                 return True
             if self._debounce_task and not self._debounce_task.done():
@@ -270,11 +282,14 @@ class ChatState:
                 cancelled_count = self.pending_transcriptions
                 self.media_generation += 1
                 self.pending_transcriptions = 0
-                logger.info(f"Chat {self.chat_id}: compact cancelled {cancelled_count} pending transcriptions")
+                logger.info(
+                    f"Chat {self.chat_id}: compact cancelled "
+                    f"{cancelled_count} pending transcriptions"
+                )
             prev = self.phase
             self.phase = ChatPhase.COMPACTING
             logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_compact]")
-        await self._do_compact()
+        await self._do_compact(automatic=automatic)
         return True
 
     async def run_urgent_prompt(self, prompt: str) -> None:
@@ -419,6 +434,9 @@ class ChatState:
             return
         if self._shutdown:
             return
+        if getattr(self.session, "usage_limit_active", False):
+            logger.info(f"Chat {self.chat_id}: preventive compact skipped (usage limit)")
+            return
         # ctx gate — compact only worth it above breakeven
         try:
             usage = await self.session.get_context_usage()
@@ -436,7 +454,7 @@ class ChatState:
         from datetime import datetime, timezone, timedelta
         hour = (datetime.now(timezone.utc) + timedelta(hours=KRSK_UTC_OFFSET)).hour
         logger.info(f"Chat {self.chat_id}: preventive compact (idle {PREVENTIVE_IDLE_MINUTES}min, ctx {ctx_pct:.0f}%, hour {hour})")
-        await self.request_compact()
+        await self.request_compact(automatic=True)
 
     async def _run_batch(self, batch: list[PendingEntry]) -> None:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
@@ -536,10 +554,13 @@ class ChatState:
         """Finalize: run deferred compact, transition to IDLE, drain deferred."""
         logger.info(f"Chat {self.chat_id}: _finish_processing start")
         needs_compact = False
+        automatic = False
         async with self._lock:
             if self.compact_requested:
                 needs_compact = True
+                automatic = self.compact_requested_automatic
                 self.compact_requested = False
+                self.compact_requested_automatic = False
 
             self.cancel_requested = False
             self.batch_message_ids.clear()
@@ -547,33 +568,78 @@ class ChatState:
         if needs_compact:
             async with self._lock:
                 self.phase = ChatPhase.COMPACTING
-            await self._do_compact()
+            await self._do_compact(automatic=automatic)
         else:
             await self._drain_or_idle()
 
+    def _make_compact_notifier(self):
+        progress_message_id = None
+
+        async def notify(text: str, *, replace: bool = False):
+            nonlocal progress_message_id
+            if not replace:
+                return await self.bot.send_message(self.chat_id, text)
+
+            if progress_message_id is not None:
+                try:
+                    await self.bot.edit_message_text(
+                        text,
+                        chat_id=self.chat_id,
+                        message_id=progress_message_id,
+                    )
+                    return None
+                except Exception as exc:
+                    if "message is not modified" in str(exc).lower():
+                        return None
+                    logger.warning(
+                        f"Chat {self.chat_id}: compact progress edit failed: {exc}"
+                    )
+                    try:
+                        await self.bot.delete_message(self.chat_id, progress_message_id)
+                    except Exception:
+                        pass
+
+            progress = await self.bot.send_message(self.chat_id, text)
+            progress_message_id = progress.message_id if progress else None
+            return progress
+
+        return notify
+
     async def _maybe_auto_compact(self) -> None:
-        """Run auto-compact if threshold exceeded. Sets COMPACTING phase during compact."""
+        """Run threshold auto-compact unless the last terminal turn hit a usage limit."""
         if self.auto_compact_pct <= 0:
+            return
+        if getattr(self.session, "usage_limit_active", False):
+            logger.info(f"Chat {self.chat_id}: auto-compact skipped (usage limit)")
             return
         usage = await self.session.get_context_usage()
         pct = usage.get("percentage", 0) if usage else 0
         if pct < self.auto_compact_pct:
-            logger.info(f"Chat {self.chat_id}: auto-compact skip ({pct:.0f}% < {self.auto_compact_pct:.0f}%)")
+            logger.info(
+                f"Chat {self.chat_id}: auto-compact skip "
+                f"({pct:.0f}% < {self.auto_compact_pct:.0f}%)"
+            )
             return
-        logger.info(f"Chat {self.chat_id}: auto-compact triggered ({pct:.0f}% >= {self.auto_compact_pct:.0f}%)")
+        logger.info(
+            f"Chat {self.chat_id}: auto-compact triggered "
+            f"({pct:.0f}% >= {self.auto_compact_pct:.0f}%)"
+        )
         async with self._lock:
             self.phase = ChatPhase.COMPACTING
         try:
-            async def _notify(text):
-                await self.bot.send_message(self.chat_id, text)
-            result = await self._maybe_auto_compact_fn(self.session, self.auto_compact_pct, notify=_notify)
+            result = await self._maybe_auto_compact_fn(
+                self.session,
+                self.auto_compact_pct,
+                notify=self._make_compact_notifier(),
+            )
             if result and result.get("ok"):
                 logger.info(
                     f"Chat {self.chat_id}: auto-compact ok, "
-                    f"{result.get('before_pct', 0):.1f}% → {result.get('after_pct', 0):.1f}%"
+                    f"{result.get('before_pct', 0):.1f}% → "
+                    f"{result.get('after_pct', 0):.1f}%"
                 )
             elif result:
-                logger.info(f"Chat {self.chat_id}: auto-compact not needed ({result})")
+                logger.info(f"Chat {self.chat_id}: auto-compact skipped ({result})")
         except Exception as e:
             logger.error(f"Chat {self.chat_id}: auto-compact failed: {e}", exc_info=True)
         finally:
@@ -581,22 +647,30 @@ class ChatState:
                 if self.phase == ChatPhase.COMPACTING:
                     self.phase = ChatPhase.PROCESSING  # restore — _finish_processing sets IDLE
 
-    async def _do_compact(self) -> None:
-        """Execute manual compaction (from request_compact). Called outside lock."""
+    async def _do_compact(self, automatic: bool = False) -> None:
+        """Execute a compact request outside the state lock."""
         try:
-            async def _notify(text):
-                await self.bot.send_message(self.chat_id, text)
-            result = await self._compact_session_fn(self.session, notify=_notify)
+            if automatic and getattr(self.session, "usage_limit_active", False):
+                logger.info(
+                    f"Chat {self.chat_id}: deferred automatic compact skipped (usage limit)"
+                )
+                return
+            result = await self._compact_session_fn(
+                self.session,
+                notify=self._make_compact_notifier(),
+            )
             if result and result.get("ok"):
                 logger.info(
                     f"Chat {self.chat_id}: compact ok, "
-                    f"{result.get('before_pct', 0):.1f}% → {result.get('after_pct', 0):.1f}%"
+                    f"{result.get('before_pct', 0):.1f}% → "
+                    f"{result.get('after_pct', 0):.1f}%"
                 )
         except Exception as e:
             logger.error(f"Chat {self.chat_id}: compact failed: {e}", exc_info=True)
         finally:
             async with self._lock:
                 self.compact_requested = False
+                self.compact_requested_automatic = False
             await self._drain_or_idle()
 
     async def _drain_or_idle(self) -> None:

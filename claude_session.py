@@ -2,7 +2,10 @@
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -40,6 +43,14 @@ def usage_limit_reset(err: str) -> str | None:
     return f" (сброс {match.group(1).strip()})" if match else ""
 
 
+@dataclass
+class _SessionReplacement:
+    session_id: Optional[str]
+    session_resumed: bool
+    last_ctx_usage: Optional[dict]
+    committed: bool = False
+
+
 class ClaudeSession:
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
                  system_prompt: str = "",
@@ -70,6 +81,7 @@ class ClaudeSession:
         self._is_processing = False
         self._session_resumed = bool(self.session_id)
         self._query_lock = asyncio.Lock()
+        self._session_replacement: Optional[_SessionReplacement] = None
 
     def _load_session(self) -> Optional[str]:
         if self._session_file.exists():
@@ -80,8 +92,82 @@ class ClaudeSession:
         return None
 
     def _save_session(self):
+        if self._session_replacement and not self._session_replacement.committed:
+            return
+        self._write_session_id(self.session_id or "")
+
+    def _write_session_id(self, session_id: str) -> None:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
-        self._session_file.write_text(self.session_id or "")
+        fd, temp_name = tempfile.mkstemp(
+            dir=self._session_file.parent,
+            prefix=f".{self._session_file.name}.",
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as temp_file:
+                temp_file.write(session_id)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, self._session_file)
+            try:
+                dir_fd = os.open(self._session_file.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError as exc:
+                logger.warning(f"Session directory fsync failed after atomic replace: {exc}")
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def begin_session_replacement(self) -> _SessionReplacement:
+        if self._session_replacement is not None:
+            raise RuntimeError("session replacement already active")
+        snapshot = _SessionReplacement(
+            session_id=self.session_id,
+            session_resumed=self._session_resumed,
+            last_ctx_usage=self._last_ctx_usage,
+        )
+        self._session_replacement = snapshot
+        self._pending_disconnect = self._client or self._pending_disconnect
+        self._client = None
+        self._connected = False
+        self.session_id = None
+        self._session_resumed = False
+        self._last_ctx_usage = None
+        return snapshot
+
+    def commit_session_replacement(self, snapshot: _SessionReplacement) -> None:
+        if self._session_replacement is not snapshot:
+            raise RuntimeError("session replacement is not active")
+        if not self.session_id:
+            raise RuntimeError("candidate session has no session_id")
+        self._write_session_id(self.session_id)
+        snapshot.committed = True
+        self._session_replacement = None
+
+    async def rollback_session_replacement(self, snapshot: _SessionReplacement) -> None:
+        if snapshot.committed:
+            return
+        if self._session_replacement is not snapshot:
+            raise RuntimeError("session replacement is not active")
+
+        clients = [client for client in (self._client, self._pending_disconnect) if client]
+        self._client = None
+        self._pending_disconnect = None
+        self._connected = False
+        self.session_id = snapshot.session_id
+        self._session_resumed = snapshot.session_resumed
+        self._last_ctx_usage = snapshot.last_ctx_usage
+        self._session_replacement = None
+
+        seen = set()
+        for client in clients:
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            await self._safe_disconnect(client)
 
     def _invalidate_session(self):
         self.session_id = None
@@ -276,6 +362,9 @@ class ClaudeSession:
             err = str(e)
             if usage_limit_reset(err) is not None:
                 self.usage_limit_active = True
+                self._connected = False
+                self._client = None
+                self._expected_results = 0
                 yield {"type": "error", "kind": "usage_limit", "content": err}
                 return
             if self.session_id and ("No conversation found" in err or "exit code 1" in err):
