@@ -65,9 +65,9 @@ REMINDERS (create_reminder / list_reminders / cancel_reminder / update_reminder)
 - urgent_llm fired reminders appear as `[REMINDER FIRED at HH:MM, type=urgent_llm, id=N] ... Action: deliver this reminder...` — formulate and send the reminder to user briefly.
 
 CONTEXT COMPACTION:
-- Context compaction is handled automatically at AUTO_COMPACT_PCT (default 95%) threshold. You do NOT need to trigger it manually.
-- When compacting: you'll be asked to summarize (INTENT/DECISIONS/FILES/PENDING/RECENT sections), session resets, new session starts with your summary as foundation.
-- User can also trigger it with /compact command.
+- Automatic compaction runs only at night (23:00–08:00 Asia/Krasnoyarsk) after at least 55 minutes of inactivity. It never interrupts daytime conversation.
+- When compacting, you will create a structured handoff; the next session starts from that handoff.
+- The user can trigger /compact manually at any time.
 
 BEHAVIOR:
 - If user sends multiple messages quickly, they arrive batched (separated by blank lines).

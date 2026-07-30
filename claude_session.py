@@ -33,6 +33,13 @@ _USAGE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 _RESET_RE = re.compile(r"resets?\s+([^\n.)]+?(?:\([^)]+\))?)\s*$", re.IGNORECASE)
+_CONTEXT_LIMIT_RE = re.compile(
+    r"(prompt\s+is\s+too\s+long|"
+    r"context(?:\s+window)?\s+(?:exceeds?|exceeded|is\s+over|reached)"
+    r".{0,80}(?:token|limit)|"
+    r"maximum\s+context\s+(?:length|window))",
+    re.IGNORECASE,
+)
 
 
 def usage_limit_reset(err: str) -> str | None:
@@ -41,6 +48,11 @@ def usage_limit_reset(err: str) -> str | None:
         return None
     match = _RESET_RE.search(err.strip())
     return f" (сброс {match.group(1).strip()})" if match else ""
+
+
+def is_context_limit(err: str) -> bool:
+    """Return whether Claude rejected the request because context is full."""
+    return bool(_CONTEXT_LIMIT_RE.search(err))
 
 
 @dataclass
@@ -85,6 +97,8 @@ class ClaudeSession:
         self._session_resumed = bool(self.session_id)
         self._query_lock = asyncio.Lock()
         self._session_replacement: Optional[_SessionReplacement] = None
+        self.slash_commands: Optional[list[str]] = None
+        self.native_compact_violation = False
 
     def _load_session(self) -> Optional[str]:
         if self._session_file.exists():
@@ -222,6 +236,7 @@ class ClaudeSession:
             permission_mode="default",
             can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
+            env={"DISABLE_AUTO_COMPACT": "1"},
         )
         if self.system_prompt:
             options.system_prompt = self.system_prompt
@@ -231,7 +246,7 @@ class ClaudeSession:
             options.resume = self.session_id
         return options
 
-    async def _ensure_connected(self):
+    async def _ensure_connected(self, *, preserve_session: bool = False):
         if self._client and self._connected:
             return
         if self._pending_disconnect is not None:
@@ -256,7 +271,11 @@ class ClaudeSession:
         try:
             await self._client.connect()
         except Exception as e:
-            if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
+            if (
+                not preserve_session
+                and self.session_id
+                and ("No conversation found" in str(e) or "exit code 1" in str(e))
+            ):
                 logger.warning("Session %s expired, invalidating", self.session_id[:8])
                 self._invalidate_session()
                 options = self._make_options()
@@ -271,6 +290,8 @@ class ClaudeSession:
         pending_limit: Optional[str] = None
         limit_seen = False
         limit_content = ""
+        context_limit_seen = False
+        context_limit_content = ""
         batch_had_error = False
         generic_errors: list[str] = []
 
@@ -296,7 +317,22 @@ class ClaudeSession:
                         limit_content = limit_content or pending_limit
                         limit_seen = True
                         continue
-                    if limit_seen:
+                    raw_assistant = "\n".join(
+                        block.text for block in msg.content
+                        if isinstance(block, TextBlock) and block.text
+                    )
+                    if (
+                        assistant_error in {"context_limit", "prompt_too_long"}
+                        or is_context_limit(raw_assistant)
+                    ):
+                        context_limit_seen = True
+                        context_limit_content = (
+                            context_limit_content
+                            or raw_assistant
+                            or str(assistant_error)
+                        )
+                        continue
+                    if limit_seen or context_limit_seen:
                         continue
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
@@ -332,10 +368,22 @@ class ClaudeSession:
                         or getattr(msg, "terminal_reason", None) == "blocking_limit"
                         or usage_limit_reset(raw_result) is not None
                     )
+                    result_is_context_limit = (
+                        not result_is_limit
+                        and (
+                            getattr(msg, "terminal_reason", None) == "context_limit"
+                            or is_context_limit(raw_result)
+                        )
+                    )
                     if result_is_limit:
                         limit_seen = True
                         limit_content = limit_content or pending_limit or raw_result or "usage limit"
                         self.usage_limit_active = True
+                    elif result_is_context_limit:
+                        context_limit_seen = True
+                        context_limit_content = (
+                            context_limit_content or raw_result or "context limit"
+                        )
                     elif msg.is_error:
                         batch_had_error = True
                         if raw_result:
@@ -355,6 +403,12 @@ class ClaudeSession:
                                 "kind": "usage_limit",
                                 "content": limit_content or "usage limit",
                             }
+                        elif context_limit_seen:
+                            yield {
+                                "type": "error",
+                                "kind": "context_limit",
+                                "content": context_limit_content or "context limit",
+                            }
                         else:
                             if not batch_had_error:
                                 self.usage_limit_active = False
@@ -364,7 +418,7 @@ class ClaudeSession:
                     if not limit_seen:
                         yield {"type": "turn_done"}
                 elif isinstance(msg, StreamEvent):
-                    if limit_seen:
+                    if limit_seen or context_limit_seen:
                         continue
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
@@ -372,6 +426,19 @@ class ClaudeSession:
                         if delta.get("type") == "text_delta":
                             yield {"type": "text_delta", "content": delta.get("text", "")}
                 elif isinstance(msg, SystemMessage):
+                    if msg.subtype == "init":
+                        commands = msg.data.get("slash_commands")
+                        if isinstance(commands, list):
+                            self.slash_commands = [str(command) for command in commands]
+                    elif msg.subtype == "compact_boundary":
+                        metadata = msg.data.get("compact_metadata") or {}
+                        trigger = metadata.get("trigger") or msg.data.get("trigger")
+                        self.native_compact_violation = True
+                        logger.critical(
+                            "Unexpected native compact boundary: trigger=%s metadata=%s",
+                            trigger,
+                            metadata,
+                        )
                     logger.info(f"System: {msg.subtype}")
                 elif isinstance(msg, RateLimitEvent):
                     rl = msg.rate_limit_info
@@ -394,6 +461,12 @@ class ClaudeSession:
                 self._expected_results = 0
                 yield {"type": "error", "kind": "usage_limit", "content": err}
                 return
+            if is_context_limit(err):
+                self._connected = False
+                self._client = None
+                self._expected_results = 0
+                yield {"type": "error", "kind": "context_limit", "content": err}
+                return
             if self.session_id and ("No conversation found" in err or "exit code 1" in err):
                 logger.warning(
                     "Session %s failed (%s), invalidating and retrying",
@@ -413,6 +486,106 @@ class ClaudeSession:
         finally:
             if self._is_processing:
                 async with self._query_lock:
+                    self._is_processing = False
+
+    async def run_native_manual_compact(self, instructions: str) -> dict:
+        """Run the SDK /compact escape hatch and fully drain its terminal result."""
+        owns_query = False
+        try:
+            await self._ensure_connected(preserve_session=True)
+            if self.slash_commands is not None and not any(
+                command.split(maxsplit=1)[0].lstrip("/") == "compact"
+                for command in self.slash_commands
+            ):
+                return {"ok": False, "reason": "compact_not_advertised"}
+
+            async with self._query_lock:
+                if self._is_processing:
+                    return {"ok": False, "reason": "session_busy"}
+                await self._client.query(f"/compact {instructions}".strip())
+                self._expected_results = 1
+                self._is_processing = True
+                owns_query = True
+
+            manual_boundary = False
+            pre_tokens = None
+            terminal_seen = False
+            terminal_error = False
+            limit_seen = False
+            context_seen = False
+
+            async for msg in self._client.receive_messages():
+                if isinstance(msg, SystemMessage):
+                    if msg.subtype == "init":
+                        commands = msg.data.get("slash_commands")
+                        if isinstance(commands, list):
+                            self.slash_commands = [
+                                str(command) for command in commands
+                            ]
+                    elif msg.subtype == "compact_boundary":
+                        metadata = msg.data.get("compact_metadata") or {}
+                        trigger = metadata.get("trigger") or msg.data.get("trigger")
+                        if trigger == "manual":
+                            manual_boundary = True
+                            pre_tokens = metadata.get("pre_tokens")
+                        else:
+                            self.native_compact_violation = True
+                            logger.critical(
+                                "Unexpected compact boundary during manual recovery: %s",
+                                metadata,
+                            )
+                elif isinstance(msg, AssistantMessage):
+                    error = getattr(msg, "error", None)
+                    if error in {"rate_limit", "billing_error"}:
+                        limit_seen = True
+                    elif error in {"context_limit", "prompt_too_long"}:
+                        context_seen = True
+                elif isinstance(msg, RateLimitEvent):
+                    if msg.rate_limit_info.status == "rejected":
+                        limit_seen = True
+                elif isinstance(msg, ResultMessage):
+                    terminal_seen = True
+                    raw = str(msg.result or "")
+                    limit_seen = (
+                        limit_seen
+                        or getattr(msg, "api_error_status", None) == 429
+                        or usage_limit_reset(raw) is not None
+                    )
+                    context_seen = context_seen or is_context_limit(raw)
+                    terminal_error = bool(msg.is_error)
+                    if getattr(msg, "session_id", None):
+                        self.session_id = msg.session_id
+                        self._save_session()
+                    break
+
+            if not terminal_seen:
+                return {"ok": False, "reason": "missing_terminal_result"}
+            if limit_seen:
+                self.usage_limit_active = True
+                return {"ok": False, "reason": "usage_limit"}
+            if context_seen:
+                return {"ok": False, "reason": "context_limit"}
+            if terminal_error:
+                return {"ok": False, "reason": "terminal_error"}
+            if not manual_boundary:
+                return {"ok": False, "reason": "missing_manual_boundary"}
+            return {
+                "ok": True,
+                "trigger": "manual",
+                "pre_tokens": pre_tokens,
+            }
+        except asyncio.CancelledError:
+            if owns_query:
+                self.reconnect()
+            raise
+        except Exception as exc:
+            logger.warning("Native manual compact failed: %s", exc)
+            self.reconnect()
+            return {"ok": False, "reason": "native_error"}
+        finally:
+            if owns_query:
+                async with self._query_lock:
+                    self._expected_results = 0
                     self._is_processing = False
 
     async def inject(self, text: str) -> bool:
@@ -446,7 +619,18 @@ class ClaudeSession:
             except Exception as e:
                 logger.error(f"Interrupt error: {e}")
 
-    async def get_context_usage(self) -> Optional[dict]:
+    async def get_context_usage(
+        self,
+        *,
+        refresh: bool = False,
+        preserve_session: bool = False,
+    ) -> Optional[dict]:
+        if refresh:
+            try:
+                await self._ensure_connected(preserve_session=preserve_session)
+            except Exception as exc:
+                logger.warning("get_context_usage refresh failed: %s", exc)
+                return None
         if self._client and self._connected:
             try:
                 result = await self._client.get_context_usage()

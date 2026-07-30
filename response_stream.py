@@ -10,7 +10,10 @@ from aiogram import types
 from aiogram.exceptions import TelegramRetryAfter
 
 import config as _config
-from claude_session import usage_limit_reset as _session_limit_reset
+from claude_session import (
+    is_context_limit as _is_context_limit,
+    usage_limit_reset as _session_limit_reset,
+)
 from config import MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
 from telegram_io import (
     _send_safe,
@@ -255,6 +258,49 @@ async def _ask_inner(message, prompt, cid, typer):
         last_edit_text = ""
         terminal_handled = True
 
+    async def _handle_context_limit() -> None:
+        nonlocal parts, has_deltas, current_msg_id, last_edit_time
+        nonlocal last_edit_text, terminal_handled
+
+        notice = (
+            _t_cfg(message, "context_limit")
+            if message is not None
+            else STRINGS["ru"]["context_limit"]
+        )
+        await _finalize_status()
+        parts.clear()
+        has_deltas = False
+
+        delivered = False
+        if current_msg_id is not None:
+            try:
+                await _bot.edit_message_text(
+                    notice, chat_id=cid, message_id=current_msg_id, parse_mode=None
+                )
+                finalized.append(current_msg_id)
+                delivered = True
+            except Exception as edit_error:
+                logger.warning(
+                    f"Chat {cid}: context terminal edit failed: {edit_error}"
+                )
+                try:
+                    await _bot.delete_message(cid, current_msg_id)
+                except Exception:
+                    pass
+
+        if not delivered:
+            if message is not None:
+                sent = await _send_safe(message, notice)
+            else:
+                sent = await _bot.send_message(cid, notice, parse_mode=None)
+            if sent:
+                finalized.append(sent.message_id)
+
+        current_msg_id = None
+        last_edit_time = 0.0
+        last_edit_text = ""
+        terminal_handled = True
+
     CHUNK_TIMEOUT_TEXT = 120
     CHUNK_TIMEOUT_TOOL = 300
 
@@ -342,6 +388,12 @@ async def _ask_inner(message, prompt, cid, typer):
                         logger.warning(f"Chat {cid}: session limit hit, NOT retrying: {err}")
                         await _handle_usage_limit(err)
                         break
+                    if chunk.get("kind") == "context_limit" or _is_context_limit(err):
+                        logger.warning(
+                            f"Chat {cid}: context full, NOT retrying automatic request"
+                        )
+                        await _handle_context_limit()
+                        break
                     if "session" in err.lower() or "process" in err.lower():
                         logger.warning(f"Session error, reconnecting: {err}")
                         _get_session(cid).reconnect()
@@ -377,6 +429,12 @@ async def _ask_inner(message, prompt, cid, typer):
             if reset is not None:
                 logger.warning(f"Chat {cid}: session limit (exception), NOT retrying: {e}")
                 await _handle_usage_limit(str(e))
+                break
+            if _is_context_limit(str(e)):
+                logger.warning(
+                    f"Chat {cid}: context full (exception), NOT retrying"
+                )
+                await _handle_context_limit()
                 break
             logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {type(e).__name__}: {e}", exc_info=True)
             retries += 1

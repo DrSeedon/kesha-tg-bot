@@ -16,7 +16,6 @@ from aiogram.enums import ParseMode
 
 from config import (
     ALLOWED,
-    AUTO_COMPACT_PCT,
     DEBOUNCE_SEC,
     GREET_FLAG,
     MODEL,
@@ -134,6 +133,8 @@ async def main():
 
     _singleton_lock_fp = _acquire_singleton_lock()
     BOT_START_TIME = time.time()
+    from message_log import get_db as _msg_db
+    activity_store = _msg_db()
 
     registry = ChatRegistry(
         bot=bot,
@@ -141,12 +142,11 @@ async def main():
         system_prompt=_system_prompt,
         model=MODEL,
         debounce_sec=DEBOUNCE_SEC,
-        auto_compact_pct=AUTO_COMPACT_PCT,
         ask_fn=_rs._ask,
         set_current_chat_fn=set_current_chat,
         get_lazy_block_fn=_reminders.get_lazy_block_for_prompt,
         compact_session_fn=_compact.compact_session,
-        maybe_auto_compact_fn=_compact.maybe_auto_compact,
+        activity_store=activity_store,
         work_dir=WORK_DIR,
     )
 
@@ -154,6 +154,7 @@ async def main():
     _rs.set_registry(registry)
     _handlers.set_registry(registry)
     _handlers.set_uptime_fn(uptime_str)
+    await registry.start_auto_compact()
 
     # Register all handlers
     _handlers.register(dp)
@@ -184,8 +185,6 @@ async def main():
             finally:
                 rag_queue.task_done()
     asyncio.create_task(_rag_worker())
-
-    from message_log import get_db as _msg_db
 
     def _enqueue_index(mid, cid, role, c):
         loop.call_soon_threadsafe(rag_queue.put_nowait, (mid, cid, role, c))

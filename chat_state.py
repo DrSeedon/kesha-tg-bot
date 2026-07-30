@@ -3,33 +3,52 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from config import (
+    AUTO_COMPACT_IDLE,
+    AUTO_COMPACT_MIN_CONTEXT_PCT,
+    AUTO_COMPACT_TZ,
+    AUTO_COMPACT_WINDOW_END,
+    AUTO_COMPACT_WINDOW_START,
+)
+from message_log import ActivityPersistenceError
+
 if TYPE_CHECKING:
     from aiogram import Bot, types
     from claude_session import ClaudeSession
+    from message_log import MessageLog
 
 logger = logging.getLogger("kesha")
 
 TRANSCRIPTION_WAIT_MAX = 30  # seconds to wait for pending transcriptions before proceeding
 
-# Preventive compact — compact before an inevitable cold-start to make it cheap (research:
-# docs/tasks/cache-compact). At idle >T min the user has ~likely left; cache TTL=60min → cold-start
-# is coming; compact NOW (warm cache, read 0.1×) shrinks ctx to a summary so the eventual cold-start
-# re-reads ~1% instead of 40-80%. Saves 4-9× limit-burn on the wake-up turn.
-#
-# FIXED 55min, not adaptive-by-hour: false-compact rate (user returns <60min, ctx wasted) falls
-# monotonically with T — 50min=15.9%, 55min=7.5%, 59min=0.9% (measured, 1211 gaps). Later = fewer
-# wasted compacts. 55 is the sweet spot: 7.5% false + a 5-min margin to run the compact before the
-# 60-min TTL evicts the cache. (59 gives 0.9% but zero margin → risky.) Adaptive-by-hour saves only
-# ~$0.78/mo — noise — so a single constant wins on simplicity.
-# breakeven = 19.4% ctx: compact shrinks to ~4% (measured, not 1%), so re-reading that 4% on the
-# cold-start eats the saving below ~19%. Gate at 20% (just above breakeven) → only compact when it pays.
-PREVENTIVE_COMPACT_MIN_CTX = 20.0
-PREVENTIVE_IDLE_MINUTES = 55        # fire compact after this much user-idle time
-KRSK_UTC_OFFSET = 7                 # Krasnoyarsk — for the log line's local hour
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _is_auto_compact_night(now_utc: datetime) -> bool:
+    local_time = now_utc.astimezone(AUTO_COMPACT_TZ).time().replace(tzinfo=None)
+    return (
+        local_time >= AUTO_COMPACT_WINDOW_START
+        or local_time < AUTO_COMPACT_WINDOW_END
+    )
+
+
+def _seconds_until_night(now_utc: datetime) -> float:
+    local = now_utc.astimezone(AUTO_COMPACT_TZ)
+    if _is_auto_compact_night(now_utc):
+        return 0.0
+    target = datetime.combine(
+        local.date(),
+        AUTO_COMPACT_WINDOW_START,
+        tzinfo=AUTO_COMPACT_TZ,
+    )
+    return max(0.0, (target.astimezone(timezone.utc) - now_utc).total_seconds())
 
 
 class ChatPhase(StrEnum):
@@ -71,24 +90,22 @@ class ChatState:
         session: "ClaudeSession",
         bot: "Bot",
         debounce_sec: int,
-        auto_compact_pct: float,
         ask_fn,            # async ask_fn(message_or_none, prompt, chat_id)
         set_current_chat_fn,  # set_current_chat(chat_id)
         get_lazy_block_fn,    # get_lazy_block_for_prompt(chat_id) -> str
         compact_session_fn,   # async compact_session(session, notify) -> dict
-        maybe_auto_compact_fn,  # async maybe_auto_compact(session, threshold, notify) -> dict|None
+        activity_store: "MessageLog",
         work_dir: str,
     ):
         self.chat_id = chat_id
         self.session = session
         self.bot = bot
         self.debounce_sec = debounce_sec
-        self.auto_compact_pct = auto_compact_pct
         self._ask_fn = ask_fn
         self._set_current_chat = set_current_chat_fn
         self._get_lazy_block = get_lazy_block_fn
         self._compact_session_fn = compact_session_fn
-        self._maybe_auto_compact_fn = maybe_auto_compact_fn
+        self._activity_store = activity_store
         self._work_dir = work_dir
 
         self.phase: ChatPhase = ChatPhase.IDLE
@@ -104,7 +121,8 @@ class ChatState:
         self.media_generation: int = 0
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
-        self._preventive_task: asyncio.Task | None = None  # preventive-compact idle timer
+        self._auto_compact_task: asyncio.Task | None = None
+        self._compact_started: bool = False
         self._lock = asyncio.Lock()
         self._shutdown: bool = False
 
@@ -117,9 +135,11 @@ class ChatState:
 
     async def accept_entry(self, entry: PendingEntry) -> None:
         """Enqueue a new user/reminder entry. Arms debounce or injects if already processing."""
+        self._cancel_auto_compact()
+        self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
-            if self._shutdown: return
-            self._arm_preventive_timer()  # any incoming message pushes the idle-compact deadline back
+            if self._shutdown:
+                raise RuntimeError("chat is shutting down")
             if entry.source == "user" and entry.message_id:
                 self.last_user_message_id = entry.message_id
 
@@ -153,21 +173,25 @@ class ChatState:
             logger.warning(f"Chat {self.chat_id}: inject failed, requeuing")
             await self._requeue_after_failed_inject([entry])
 
-    async def transcription_started(self) -> tuple[int, int]:
-        """Call before starting an async transcription. Returns (generation, media_generation) snapshot."""
+    async def media_started(self) -> tuple[int, int]:
+        """Persist activity before starting asynchronous media work."""
+        self._cancel_auto_compact()
+        self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
-            if self._shutdown: return (self.generation, self.media_generation)
+            if self._shutdown:
+                raise RuntimeError("chat is shutting down")
             self.pending_transcriptions += 1
             return (self.generation, self.media_generation)
 
-    async def transcription_finished(
+    async def media_finished(
         self,
         entry: PendingEntry | None,
         generation: int,
         media_generation: int,
     ) -> None:
-        """Call after transcription completes. Discards stale results if /clear happened."""
+        """Complete media work and admit its prepared entry without a second activity write."""
         ready_batch: list[PendingEntry] | None = None
+        finish_idle = False
         async with self._lock:
             if self._shutdown:
                 self.pending_transcriptions = max(0, self.pending_transcriptions - 1)
@@ -202,6 +226,8 @@ class ChatState:
                 elif self.phase == ChatPhase.IDLE and self.pending:
                     await self._arm_debounce()
                     return
+                elif self.phase == ChatPhase.IDLE:
+                    finish_idle = True
 
         if inject_entry is not None:
             ok = await self.session.inject(inject_entry.prompt)
@@ -212,6 +238,8 @@ class ChatState:
                 await self._requeue_after_failed_inject([inject_entry])
         elif ready_batch:
             await self._start_processing(ready_batch)
+        elif finish_idle:
+            await self._drain_or_idle()
 
     async def request_stop(self) -> bool:
         """Request stop of current processing. Returns True if there was something to stop."""
@@ -228,6 +256,8 @@ class ChatState:
 
     async def request_clear(self) -> bool:
         """Clear session. Rejected during PROCESSING/COMPACTING/STOPPING. Returns True if cleared."""
+        self._cancel_auto_compact()
+        self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown: return False
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.COMPACTING, ChatPhase.STOPPING):
@@ -251,10 +281,17 @@ class ChatState:
 
         # I/O outside lock
         await self.session.reset_async()
+        try:
+            self._activity_store.finish_activity(self.chat_id)
+        except ActivityPersistenceError as exc:
+            logger.error(f"Chat {self.chat_id}: clear completion persistence failed: {exc}")
         return True
 
     async def request_compact(self, automatic: bool = False) -> bool:
         """Request compaction; deferred requests preserve manual-over-automatic provenance."""
+        if not automatic:
+            self._cancel_auto_compact()
+            self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
                 return False
@@ -262,6 +299,9 @@ class ChatState:
                 logger.info(f"Chat {self.chat_id}: automatic compact skipped (usage limit)")
                 return True
             if self.phase == ChatPhase.COMPACTING:
+                if not automatic and self.compact_requested_automatic:
+                    self.compact_requested = True
+                    self.compact_requested_automatic = False
                 return True
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.STOPPING):
                 if not self.compact_requested:
@@ -294,6 +334,8 @@ class ChatState:
 
     async def run_urgent_prompt(self, prompt: str) -> None:
         """Run a reminder/urgent prompt. Injects if processing, starts new turn immediately if idle."""
+        self._cancel_auto_compact()
+        self._activity_store.begin_activity(self.chat_id)
         entry = PendingEntry(
             prompt=prompt,
             message_id=0,
@@ -304,7 +346,8 @@ class ChatState:
         start_now = False
         inject_prompt = entry.prompt
         async with self._lock:
-            if self._shutdown: return
+            if self._shutdown:
+                raise RuntimeError("chat is shutting down")
             if self.phase == ChatPhase.PROCESSING:
                 pass  # will inject below
             elif self.phase in (ChatPhase.STOPPING, ChatPhase.COMPACTING):
@@ -416,45 +459,148 @@ class ChatState:
         """Kick off _run_batch as a tracked task."""
         self._processing_task = asyncio.create_task(self._run_batch(batch))
 
-    def _arm_preventive_timer(self) -> None:
-        """(Re)arm the preventive-compact idle timer. Called on EVERY incoming message so a fresh
-        message pushes the deadline back. Cheap: cancel + recreate. Not persistent (restart = re-arm)."""
-        if self._shutdown:
+    def _cancel_auto_compact(self) -> None:
+        if self.phase == ChatPhase.COMPACTING and self._compact_started:
             return
-        if self._preventive_task and not self._preventive_task.done():
-            self._preventive_task.cancel()
-        self._preventive_task = asyncio.create_task(self._on_preventive_elapsed())
+        task = self._auto_compact_task
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        self._auto_compact_task = None
 
-    async def _on_preventive_elapsed(self) -> None:
-        """After PREVENTIVE_IDLE_MINUTES of no new message → compact so the inevitable cold-start
-        is cheap. Skips if ctx below threshold or bot is busy (request_compact defers/no-ops safely)."""
+    def _arm_auto_compact(self) -> None:
+        self._cancel_auto_compact()
+        if self._shutdown or not self.session.session_id:
+            return
         try:
-            await asyncio.sleep(PREVENTIVE_IDLE_MINUTES * 60)
+            row = self._activity_store.get_activity(self.chat_id)
+        except Exception as exc:
+            logger.error(f"Chat {self.chat_id}: activity read failed: {exc}")
+            return
+        if (
+            not row
+            or not row["quiescent"]
+            or row["auto_attempted_for_utc"] == row["last_activity_utc"]
+        ):
+            return
+        self._auto_compact_task = asyncio.create_task(
+            self._run_auto_compact_scheduler()
+        )
+
+    async def _run_auto_compact_scheduler(self) -> None:
+        try:
+            while not self._shutdown:
+                row = self._activity_store.get_activity(self.chat_id)
+                if (
+                    not row
+                    or not row["quiescent"]
+                    or row["auto_attempted_for_utc"] == row["last_activity_utc"]
+                ):
+                    return
+                last_activity = datetime.fromisoformat(row["last_activity_utc"])
+                now = _utc_now()
+                idle_delay = (
+                    last_activity + AUTO_COMPACT_IDLE - now
+                ).total_seconds()
+                delay = max(0.0, idle_delay)
+                if delay == 0 and not _is_auto_compact_night(now):
+                    delay = _seconds_until_night(now)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                await self._reserve_automatic_probe(row["last_activity_utc"])
+                return
         except asyncio.CancelledError:
             return
-        if self._shutdown:
-            return
-        if getattr(self.session, "usage_limit_active", False):
-            logger.info(f"Chat {self.chat_id}: preventive compact skipped (usage limit)")
-            return
-        # ctx gate — compact only worth it above breakeven
+        except Exception as exc:
+            logger.error(
+                f"Chat {self.chat_id}: auto-compact scheduler failed: {exc}",
+                exc_info=True,
+            )
+        finally:
+            if self._auto_compact_task is asyncio.current_task():
+                self._auto_compact_task = None
+
+    async def _reserve_automatic_probe(self, last_activity_utc: str) -> None:
+        async with self._lock:
+            row = self._activity_store.get_activity(self.chat_id)
+            eligible = (
+                row
+                and row["last_activity_utc"] == last_activity_utc
+                and row["quiescent"]
+                and row["auto_attempted_for_utc"] is None
+                and self.phase == ChatPhase.IDLE
+                and not self.pending
+                and not self.deferred
+                and self.pending_transcriptions == 0
+                and not self.compact_requested
+                and _is_auto_compact_night(_utc_now())
+                and not getattr(self.session, "usage_limit_active", False)
+            )
+            if not eligible:
+                return
+            if not self._activity_store.claim_auto_attempt(
+                self.chat_id, last_activity_utc
+            ):
+                return
+            self.compact_requested = True
+            self.compact_requested_automatic = True
+            self._compact_started = False
+            self.phase = ChatPhase.COMPACTING
+
         try:
-            usage = await self.session.get_context_usage()
-            ctx_pct = usage.get("percentage", 0) if usage else 0
-        except Exception as e:
-            logger.warning(f"Chat {self.chat_id}: preventive compact ctx check failed: {e}")
-            return
-        if ctx_pct < PREVENTIVE_COMPACT_MIN_CTX:
-            logger.info(f"Chat {self.chat_id}: preventive compact skipped (ctx {ctx_pct:.0f}% < {PREVENTIVE_COMPACT_MIN_CTX:.0f}%)")
-            return
-        # busy check is advisory — request_compact() re-checks phase under lock and defers/no-ops
-        if self.is_busy:
-            logger.info(f"Chat {self.chat_id}: preventive compact skipped (busy: {self.phase})")
-            return
-        from datetime import datetime, timezone, timedelta
-        hour = (datetime.now(timezone.utc) + timedelta(hours=KRSK_UTC_OFFSET)).hour
-        logger.info(f"Chat {self.chat_id}: preventive compact (idle {PREVENTIVE_IDLE_MINUTES}min, ctx {ctx_pct:.0f}%, hour {hour})")
-        await self.request_compact(automatic=True)
+            usage = await self.session.get_context_usage(
+                refresh=True,
+                preserve_session=True,
+            )
+        except asyncio.CancelledError:
+            async with self._lock:
+                if self.compact_requested_automatic:
+                    self.compact_requested = False
+                    self.compact_requested_automatic = False
+            await asyncio.shield(self._drain_or_idle(record_activity=False))
+            raise
+        except Exception as exc:
+            logger.error(f"Chat {self.chat_id}: context probe failed: {exc}")
+            usage = None
+        pct = usage.get("percentage") if usage else None
+
+        start_compact = False
+        automatic = True
+        async with self._lock:
+            row = self._activity_store.get_activity(self.chat_id)
+            manual = self.compact_requested and not self.compact_requested_automatic
+            runtime_work = bool(
+                self.pending
+                or self.deferred
+                or self.pending_transcriptions
+            )
+            activity_changed = bool(
+                not row
+                or not row["quiescent"]
+                or row["last_activity_utc"] != last_activity_utc
+            )
+            automatic_eligible = (
+                not runtime_work
+                and not activity_changed
+                and _is_auto_compact_night(_utc_now())
+                and not getattr(self.session, "usage_limit_active", False)
+                and pct is not None
+                and pct >= AUTO_COMPACT_MIN_CONTEXT_PCT
+            )
+            if manual and not runtime_work:
+                start_compact = True
+                automatic = False
+            elif automatic_eligible:
+                start_compact = True
+            elif not manual:
+                self.compact_requested = False
+                self.compact_requested_automatic = False
+
+        if start_compact:
+            self._compact_started = True
+            await self._do_compact(automatic=automatic)
+        else:
+            await self._drain_or_idle(record_activity=False)
 
     async def _run_batch(self, batch: list[PendingEntry]) -> None:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
@@ -538,9 +684,6 @@ class ChatState:
                 except Exception as e:
                     logger.error(f"Chat {self.chat_id}: mark_lazy_delivered failed: {e}")
 
-            # Auto-compact after response
-            await self._maybe_auto_compact()
-
         except Exception as e:
             logger.error(f"Chat {self.chat_id} batch error: {e}", exc_info=True)
             try:
@@ -605,48 +748,6 @@ class ChatState:
 
         return notify
 
-    async def _maybe_auto_compact(self) -> None:
-        """Run threshold auto-compact unless the last terminal turn hit a usage limit."""
-        if self.auto_compact_pct <= 0:
-            return
-        if getattr(self.session, "usage_limit_active", False):
-            logger.info(f"Chat {self.chat_id}: auto-compact skipped (usage limit)")
-            return
-        usage = await self.session.get_context_usage()
-        pct = usage.get("percentage", 0) if usage else 0
-        if pct < self.auto_compact_pct:
-            logger.info(
-                f"Chat {self.chat_id}: auto-compact skip "
-                f"({pct:.0f}% < {self.auto_compact_pct:.0f}%)"
-            )
-            return
-        logger.info(
-            f"Chat {self.chat_id}: auto-compact triggered "
-            f"({pct:.0f}% >= {self.auto_compact_pct:.0f}%)"
-        )
-        async with self._lock:
-            self.phase = ChatPhase.COMPACTING
-        try:
-            result = await self._maybe_auto_compact_fn(
-                self.session,
-                self.auto_compact_pct,
-                notify=self._make_compact_notifier(),
-            )
-            if result and result.get("ok"):
-                logger.info(
-                    f"Chat {self.chat_id}: auto-compact ok, "
-                    f"{result.get('before_pct', 0):.1f}% → "
-                    f"{result.get('after_pct', 0):.1f}%"
-                )
-            elif result:
-                logger.info(f"Chat {self.chat_id}: auto-compact skipped ({result})")
-        except Exception as e:
-            logger.error(f"Chat {self.chat_id}: auto-compact failed: {e}", exc_info=True)
-        finally:
-            async with self._lock:
-                if self.phase == ChatPhase.COMPACTING:
-                    self.phase = ChatPhase.PROCESSING  # restore — _finish_processing sets IDLE
-
     async def _do_compact(self, automatic: bool = False) -> None:
         """Execute a compact request outside the state lock."""
         try:
@@ -658,6 +759,7 @@ class ChatState:
             result = await self._compact_session_fn(
                 self.session,
                 notify=self._make_compact_notifier(),
+                allow_native_recovery=not automatic,
             )
             if result and result.get("ok"):
                 logger.info(
@@ -671,16 +773,19 @@ class ChatState:
             async with self._lock:
                 self.compact_requested = False
                 self.compact_requested_automatic = False
-            await self._drain_or_idle()
+                self._compact_started = False
+            await self._drain_or_idle(record_activity=not automatic)
 
-    async def _drain_or_idle(self) -> None:
+    async def _drain_or_idle(self, *, record_activity: bool = True) -> None:
         """Atomically: if deferred exists → PROCESSING + drain, else → IDLE. No IDLE window."""
+        merged: list[PendingEntry] | None = None
+        arm_auto = False
         async with self._lock:
             if self._shutdown:
                 self.phase = ChatPhase.IDLE
                 return
             if self.deferred:
-                merged: list[PendingEntry] = []
+                merged = []
                 for b in self.deferred:
                     merged.extend(b)
                 self.deferred.clear()
@@ -692,17 +797,29 @@ class ChatState:
                     prev = self.phase
                     self.phase = ChatPhase.IDLE
                     logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [drain_empty]")
-                    return
+                    merged = None
             elif self.pending:
                 self.phase = ChatPhase.IDLE
                 await self._arm_debounce()
                 return
             else:
+                if record_activity:
+                    try:
+                        self._activity_store.finish_activity(self.chat_id)
+                    except ActivityPersistenceError as exc:
+                        logger.error(
+                            f"Chat {self.chat_id}: completion persistence failed: {exc}"
+                        )
+                        self.phase = ChatPhase.IDLE
+                        return
                 prev = self.phase
                 self.phase = ChatPhase.IDLE
                 logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [idle]")
-                return
-        await self._start_processing(merged)
+                arm_auto = record_activity
+        if merged:
+            await self._start_processing(merged)
+        elif arm_auto:
+            self._arm_auto_compact()
 
 
 
@@ -716,12 +833,11 @@ class ChatRegistry:
         system_prompt: str,
         model: str,
         debounce_sec: int,
-        auto_compact_pct: float,
         ask_fn,
         set_current_chat_fn,
         get_lazy_block_fn,
         compact_session_fn,
-        maybe_auto_compact_fn,
+        activity_store: "MessageLog",
         work_dir: str,
     ):
         self._chats: dict[int, ChatState] = {}
@@ -730,12 +846,11 @@ class ChatRegistry:
         self._system_prompt = system_prompt
         self._model = model
         self._debounce_sec = debounce_sec
-        self._auto_compact_pct = auto_compact_pct
         self._ask_fn = ask_fn
         self._set_current_chat = set_current_chat_fn
         self._get_lazy_block = get_lazy_block_fn
         self._compact_session_fn = compact_session_fn
-        self._maybe_auto_compact_fn = maybe_auto_compact_fn
+        self._activity_store = activity_store
         self._work_dir = work_dir
 
     def get(self, chat_id: int) -> ChatState:
@@ -755,16 +870,23 @@ class ChatRegistry:
                 session=session,
                 bot=self._bot,
                 debounce_sec=self._debounce_sec,
-                auto_compact_pct=self._auto_compact_pct,
                 ask_fn=self._ask_fn,
                 set_current_chat_fn=self._set_current_chat,
                 get_lazy_block_fn=self._get_lazy_block,
                 compact_session_fn=self._compact_session_fn,
-                maybe_auto_compact_fn=self._maybe_auto_compact_fn,
+                activity_store=self._activity_store,
                 work_dir=self._work_dir,
             )
             logger.info(f"ChatRegistry: created ChatState for chat {chat_id}")
         return self._chats[chat_id]
+
+    async def start_auto_compact(self) -> None:
+        """Restore one scheduler per durable quiescent chat after a process restart."""
+        for chat_id in self._activity_store.list_quiescent_chat_ids():
+            session_file = Path(__file__).parent / "storage" / "sessions" / str(chat_id)
+            if not session_file.exists() or not session_file.read_text().strip():
+                continue
+            self.get(chat_id)._arm_auto_compact()
 
     async def shutdown(self) -> None:
         tasks = []
@@ -776,9 +898,9 @@ class ChatRegistry:
             if chat._processing_task and not chat._processing_task.done():
                 chat._processing_task.cancel()
                 tasks.append(chat._processing_task)
-            if chat._preventive_task and not chat._preventive_task.done():
-                chat._preventive_task.cancel()
-                tasks.append(chat._preventive_task)
+            if chat._auto_compact_task and not chat._auto_compact_task.done():
+                chat._auto_compact_task.cancel()
+                tasks.append(chat._auto_compact_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for chat in self._chats.values():

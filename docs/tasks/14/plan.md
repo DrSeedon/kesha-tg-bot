@@ -1,6 +1,7 @@
 # Task #14 — Phase 2 plan: night-only automatic compact
 
-**Status:** plan only; no implementation or production changes
+**Status:** revised plan after live native-recovery falsification; production
+unchanged, implementation delta awaits approval
 **Accepted research:** `docs/tasks/14/research.md`
 **Target runtime:** Python asyncio/aiogram, `claude-agent-sdk==0.2.128`,
 bundled Claude Code `2.1.220`, single-node Contabo
@@ -22,7 +23,9 @@ automatic compact =
 Claude Code native auto-compaction will be disabled at the SDK subprocess
 boundary. The old immediate 95% path and preventive timer will become one
 restart-safe per-chat scheduler. Manual `/compact` will remain available at any
-time and retain task #13's transactional SID/limit behavior.
+time and retain task #13's transactional SID/limit behavior. A measured
+absolute daytime admission reserve prevents ordinary turns from consuming the
+headroom needed by that custom transaction.
 
 ## Assumptions and decisions
 
@@ -47,6 +50,12 @@ time and retain task #13's transactional SID/limit behavior.
    file diffs. Open-world fabrication/bloat cannot be proven by a parser, so
    every live output also receives a source-ledger audit. Both are hard
    promotion gates.
+6. **The supported recovery is prevention, not SDK slash commands.** Exact
+   runtime measurement found no `compact_boundary(trigger="manual")` after
+   Agent SDK `query("/compact ...")`. `run_native_manual_compact` is removed.
+   The measured prompt delta is 1,622 tokens and declared maximum output is
+   64,000; the manual floor is 80,000 remaining tokens and normal-turn
+   admission requires 208,000 plus the assembled input's UTF-8 byte length.
 
 ## Runtime design
 
@@ -175,7 +184,7 @@ one.
 - Remove `compact.maybe_auto_compact()` and its constructor/wiring dependency.
 - After a response, `_run_batch()` never checks a threshold or compacts.
   Returning to quiescent `IDLE` only persists the completion timestamp.
-- `/clear` and successful manual compact re-arm/disarm from the next real
+- `/clear` and any successful custom compact re-arm/disarm from the next real
   activity cycle; neither leaves a stale automatic request.
 - `ChatRegistry.start_auto_compact()` enumerates `chat_activity` chat IDs that
   have numeric session files, creates their states, and arms only rows with
@@ -188,7 +197,7 @@ On migration, existing sessions have no `chat_activity` row and therefore do
 not auto-compact until their first successful post-upgrade activity cycle. This
 is deliberately backward-compatible and fail-closed.
 
-### SDK ownership and daytime hard-limit result
+### SDK ownership and daytime admission reserve
 
 `ClaudeSession._make_options()` supplies:
 
@@ -202,9 +211,7 @@ are not copied or hardcoded.
 `ClaudeSession.send_message()` gains two narrow normalizations:
 
 - An unsolicited `SystemMessage(subtype="compact_boundary", trigger="auto")`
-  logs a critical invariant violation with trigger metadata. An explicitly
-  awaited manual boundary from the recovery primitive below is expected and
-  scoped to that call.
+  logs a critical invariant violation with trigger metadata.
 - official hard-context variants (`Prompt is too long`,
   `Context exceeds ... token limit`, and the matching terminal result/status)
   yield one terminal `{"type":"error","kind":"context_limit",...}` and are never
@@ -223,39 +230,117 @@ UI discipline as task #13:
 
 No automatic compact is called from this error branch.
 
-### Full-context manual recovery
+`ClaudeSession.run_native_manual_compact()` is deleted. The exact target
+runtime advertised `compact` but produced no manual boundary when the string
+was submitted through Agent SDK; a terminal Result alone is not proof that
+context was reduced.
 
-The ordinary/manual path remains task #13's custom
-summary → validated handoff → candidate session → atomic SID commit. It does
-not switch to native compaction pre-emptively.
+Before every non-command LLM batch, `ChatState._run_batch()` assembles the
+exact prompt and calls the flat
+`ClaudeSession.check_context_reserve(combined)` helper:
 
-If and only if the first summary request of a manual `/compact` terminates with
-`kind="context_limit"`, use Claude Code's documented SDK slash-command escape
-hatch:
+```python
+await self._ensure_connected(preserve_session=True)
+usage = await self._client.get_context_usage()  # uncached control response
+remaining = usage["maxTokens"] - usage["totalTokens"]
+required = 208_000 + len(combined.encode("utf-8"))
+```
 
-1. `ClaudeSession.run_native_manual_compact(instructions)` sends
-   `/compact <instructions>` directly through the current persistent client,
-   reconnecting/resuming with the same preserve-session rule if the preceding
-   hard-context error dropped the transport. It drains the response and
-   succeeds only after both
-   `compact_boundary(trigger="manual")` and a non-error terminal Result.
-2. `instructions` are the same accepted preservation/redaction contract, so
-   the unavoidable first-stage summary is focused on the same anchors.
-3. After the manual boundary frees context, retry the ordinary task #13 custom
-   summary transaction exactly once. Only a valid retry starts the candidate
-   and can atomically replace the SID.
-4. Limit/error/no-boundary leaves the durable SID untouched and terminalizes
-   progress once. If native compaction succeeded but the retry failed, keep the
-   same now-compacted SID, report one friendly partial-recovery outcome, and
-   never `/clear` or loop.
+The code shape does not let `get_context_usage()` erase the reason for a failed
+resume. `check_context_reserve()` first calls
+`_ensure_connected(preserve_session=True)` itself:
 
-`automatic=True` never enters this fallback. The slash command is allowed only
-for an explicit user `/compact`; therefore a daytime hard-context error cannot
-silently trigger compaction.
+- `No conversation found` returns typed `session_unavailable`, preserves the
+  in-memory and durable SID, performs zero query, and produces one static
+  `/clear` instruction;
+- other connect/control failures return transient `unknown`, preserve SID,
+  perform zero query, and produce one retry-later outcome without latching;
+- only after a successful preserved connection does it read current usage
+  directly from the client. It never uses `ClaudeSession._last_ctx_usage` or
+  the compatibility fallback in `get_context_usage()`.
 
-The primitive is not implemented through the generic `send_message()` error
-path: it owns one query/result drain, verifies the manual boundary, and cannot
-leave a stale terminal Result in the persistent receive queue.
+Thus a stale SID cannot loop forever behind the reserve turnstile, while a
+temporary usage failure is not mislabeled as disposable session state.
+
+The constants come from three exact-runtime measurements:
+
+```text
+COMPACT_PROMPT input delta = 1,622 tokens (3/3)
+model maxOutputTokens      = 64,000
+manual compact floor       = round_up((1,622 + 64,000) * 1.20) = 80,000
+normal-turn envelope       = 64,000 model + 64,000 agent/tool
+admission base             = 208,000
+```
+
+The same helper is called again in `response_stream._ask_inner()` immediately
+before every actual retry-query after a timeout/session/process failure. A
+retry that no longer has authoritative headroom ends with the static
+`/compact`-then-resend outcome and performs no second query. The first attempt
+remains visible in the session transcript; it is never hidden by silently
+spending the compact floor on another attempt.
+
+`ClaudeSession` itself is not allowed to own a hidden retry:
+
+- `send_message()` connects with `preserve_session=True`;
+- the existing `No conversation found` / broad `exit code 1` branch no longer
+  calls `_invalidate_session()` and no longer recursively calls
+  `send_message(text)`;
+- it yields one typed terminal `session_unavailable` error with the same durable
+  SID, and `response_stream` tells the user once that only explicit `/clear`
+  can start over;
+- no internal path issues a second query. Every permitted retry remains visible
+  to the guarded `response_stream` owner.
+
+This intentionally trades automatic recovery from a stale SID for explicit,
+non-destructive recovery. A generic exit code is not evidence that the
+conversation is disposable.
+
+The byte length is a safe upper bound for the assembled input token count and
+avoids a second tokenizer dependency. The guard requires the exact numeric
+fields, matching `maxTokens/rawMaxTokens`, positive totals, and
+`isAutoCompactEnabled is False`; missing/malformed/failed usage fails closed
+for that batch. It also requires model `claude-opus-5[1m]`. The measured
+`64_000` is a named invariant, not a free magic value:
+
+- deployment runs one isolated exact-runtime Result and requires
+  `model_usage["claude-opus-5[1m]"]["maxOutputTokens"] == 64_000`;
+- `ClaudeSession.send_message()` stores the same field from every later
+  terminal Result; any observed mismatch makes subsequent reserve checks
+  unknown/fail-closed;
+- a new/cleared session has no Result yet, so it may use the deployment-verified
+  constant only while `get_context_usage()` reports the exact expected model,
+  1M max, and auto-compact disabled.
+
+If `remaining < required`, the batch never reaches `session.query()`. It
+receives one static localized terminal message instructing the user to run
+`/compact` and then resend. The batch is not retained only in volatile memory:
+the explicit terminal outcome is the retry contract across restart. A
+`ChatState._context_reserve_blocked` then prevents repeated context probes
+until any successful custom compact or `/clear`; subsequent rejected batches
+still receive their one terminal outcome. The latch is set only by a confirmed
+numeric reserve breach or an observed terminal `context_limit`. A transient
+unknown/malformed usage response sends one static “could not verify, retry”
+outcome but does not latch, so a later batch can recover without unnecessary
+compact.
+
+Entries arriving during `PROCESSING` are deferred instead of injected. After
+the current Result they form a new batch and cross the same authoritative
+preflight boundary. This removes the usage-snapshot/injection race without a
+new scheduler or state machine.
+
+Manual `/compact` bypasses normal-turn admission and remains exactly task #13's
+custom summary → validated handoff → candidate session → atomic SID commit.
+It must start while at least the 80,000-token floor remains. A legacy session
+already below that floor, unknown usage, limit, or hard-context error preserves
+the SID and ends with one explicit limitation; it never resets, retries, or
+accepts a fake native compact.
+
+Exact-runtime measurement already showed that a newly connected session with
+`session_id is None` returns a nonzero authoritative usage snapshot before its
+first query (`totalTokens` 9,428–9,530 in the three reserve runs). `/clear →
+first message` therefore follows the normal guard. A zero/None response rejects
+that single batch without setting the reserve latch; a later message probes
+again and cannot become permanently blocked by an empty cache.
 
 ### Handoff prompt and runtime guard
 
@@ -325,6 +410,9 @@ tests stay authoritative.
 - Do not change task #13's `_SessionReplacement`, commit point, cancellation,
   limit latch, or progress terminalization.
 - Manual `/compact` remains time-independent.
+- Plain bot commands that do not invoke Claude bypass the admission guard.
+- Any successful custom compact (manual or night automatic) and `/clear` clear
+  the reserve latch; failed compact leaves it set.
 - New strings are additive in Russian and English.
 
 ## Compact prompt evaluation
@@ -334,8 +422,9 @@ tests stay authoritative.
 - `tests/fixtures/compact_summary_cases.json` — ten synthetic fixture
   definitions:
   decision reversal; durable preference vs one-off; exact file states; command
-  evidence; pending blocker; temporal state; recent correction; large-output
-  pressure; unresolved conflict; secret/idempotent pre-save.
+  evidence; pending blocker; temporal state; recent correction;
+  reserve/admission/manual recovery; unresolved conflict; secret/idempotent
+  pre-save.
 - `tests/compact_summary_scorer.py` — pure deterministic scorer shared by tests
   and the live runner.
 - `tests/test_compact_prompt.py` — schema/scorer unit tests, prompt section
@@ -377,11 +466,12 @@ Each run uses:
 - the exact production `COMPACT_PROMPT`;
 - file tools confined to the temporary fixture tree.
 
-The three `large-output pressure` runs are not ordinary short prompts: each
-must first reproduce the target runtime's hard-context rejection and then run
-the explicit manual native-boundary → custom transactional retry path. Thus
-the required 30 runs include three real recovery generations rather than
-claiming recovery from a mocked event sequence alone.
+The three reserve-recovery runs use a real temporary SDK session and the exact
+target usage response shape. Each proves that a synthetic below-threshold
+normal batch performs zero query/SID mutation, then invokes the real custom
+manual compact while measured headroom remains, validates the handoff, commits
+a new temporary SID, and resumes one post-compact control turn. No native slash
+command or hard-context inflation is used.
 
 Evidence artifact records timestamp, model, SDK/CLI versions, fixture/run IDs,
 summary hash, deterministic category results, file-diff hash, and failure
@@ -400,25 +490,29 @@ Promotion requires:
 - zero raw secrets;
 - zero non-idempotent/unrelated file changes.
 
+The failed v1 checkpoint remains immutable evidence of the falsified
+architecture. The revised run uses seed `task-14-compact-v2` and a new v2
+artifact; no completed v1 cell is overwritten or counted.
+
 If OAuth quota/rate limit interrupts the 30 runs, record completed run IDs and
-the normalized blocker and mark evaluation **INCOMPLETE/FAILED**. This always
-blocks service promotion. If the exact target SDK/CLI is unavailable before
-merge, the code may be merged only with explicit orchestrator approval and the
-gate remains visibly pending for T4; the production process is not restarted
-until the isolated target-runtime run completes. Resume after quota reset from
-only the missing independent runs. Do not reduce three runs, remove a fixture,
-or weaken any threshold.
+the normalized blocker and mark evaluation **INCOMPLETE/FAILED**. Only 529 or
+explicit overload receives bounded exponential backoff with deterministic
+case/run identity; retry attempts never count as independent samples. Resume
+only missing/incomplete v2 cells. This always blocks promotion. Do not reduce
+three runs, remove a fixture, or weaken any threshold.
 
 ## Tests and verification
 
 ### Narrow tests per ticket
 
 1. T1:
-   `pytest -q tests/test_claude_session_limit.py tests/test_response_limit.py`
+   `pytest -q tests/test_claude_session_limit.py tests/test_response_limit.py
+   tests/test_preventive_compact.py`
 2. T2:
    `pytest -q tests/test_chat_activity.py tests/test_preventive_compact.py`
 3. T3:
-   `pytest -q tests/test_compact_prompt.py tests/test_compact_limit.py`
+   `pytest -q tests/test_compact_prompt.py tests/test_compact_limit.py
+   tests/test_compact_evaluator.py`
 
 Then:
 
@@ -459,12 +553,39 @@ not converted into a skipped test.
 - manual `/compact` during the reserved probe with context `<20%` flips sticky
   provenance and executes exactly one manual transaction;
 - unsolicited/automatic native `compact_boundary` is observable as an
-  invariant violation; an explicitly awaited manual recovery boundary is not;
+  invariant violation;
 - hard-context errors produce one friendly outcome in both user-message and
   reminder paths, without raw text, retry, `empty`, or `📋`.
-- simulated hard limit → explicit manual `/compact` → native manual boundary →
-  retried validated handoff commits a new SID; missing boundary/error/limit
-  drains the terminal Result and preserves the durable SID.
+- usage at `remaining == required` admits exactly once; one token below rejects
+  before user logging/Claude query and preserves SID/context;
+- every timeout/session/process retry rechecks authoritative remaining context;
+  below-threshold/unknown retry performs zero second query and emits one static
+  terminal outcome;
+- `No conversation found` and broad `exit code 1` perform zero recursive query,
+  zero SID-file mutation, and one typed terminal outcome; only explicit
+  `/clear` may discard that SID;
+- missing/malformed/zero usage fails closed; a latched near-full session is not
+  probed repeatedly until any successful custom compact or `/clear`;
+- previous valid `_last_ctx_usage` plus a fresh zero control response rejects
+  the batch with zero query; cached usage can never authorize admission;
+- stale-SID failure during the preflight resume returns one typed `/clear`
+  terminal, zero query, and unchanged SID; it is distinct from transient
+  unknown usage;
+- `/clear → first message` with a fresh nonzero target-runtime snapshot admits;
+  an initial zero/None snapshot rejects once without latching and a later valid
+  snapshot admits;
+- processing-time arrivals are deferred and independently preflighted after the
+  current Result; no injection races the usage snapshot;
+- rejected user/reminder/inbox/media batches each receive one static terminal
+  retry contract and are not claimed as processed by Claude;
+- manual `/compact` bypasses normal admission, succeeds at the measured floor,
+  commits a new SID, clears the latch, and never calls native `/compact`;
+- a successful night automatic custom compact also clears a daytime reserve
+  latch;
+- deployment and terminal Result parsing require measured
+  `maxOutputTokens == 64_000`; mismatch fails subsequent admission closed;
+- a legacy already-hard-full session returns one explicit limitation, preserves
+  SID/session file, and performs no reset/retry/native slash acceptance.
 
 ## Rollback-safe deployment order
 
@@ -485,17 +606,17 @@ production before merge approval.
 6. Run the isolated 30-generation prompt gate from a temporary CWD and
    temporary session files. A quota/rate-limit/incomplete/failing result blocks
    restart and restores the checkout to the recorded HEAD.
-7. Verify the three target-runtime `large-output pressure` evidence records:
-   `/compact` was advertised in `system/init`, a normal prompt first returned
-   the recorded hard-context variant, bot recovery observed
-   `compact_boundary(trigger="manual")`, and the retried validated handoff
-   committed a different candidate SID. Each record includes SDK/CLI/model,
-   pre-boundary tokens, normalized error, boundary metadata, old/new temporary
-   SID hashes, and result. Quota/rate/cost/incomplete status blocks promotion;
-   do not substitute the user's session or weaken this gate.
+7. Verify the three target-runtime reserve-recovery records: exact
+   `totalTokens/maxTokens/rawMaxTokens/maxOutputTokens`, rejected normal-turn
+   query count zero, unchanged pre-compact temporary SID hash, successful
+   custom handoff validation/commit, changed candidate SID hash, and successful
+   post-compact control turn. Quota/rate/cost/incomplete status blocks
+   promotion; do not substitute the user's session or weaken this gate.
 8. Run an isolated OAuth SDK control smoke with `DISABLE_AUTO_COMPACT=1`;
-   require `get_context_usage()["isAutoCompactEnabled"] is False`. Use no bot
-   session file and no cog-second-brain content.
+   require `get_context_usage()["isAutoCompactEnabled"] is False`, exact
+   `maxTokens/rawMaxTokens/model`, and terminal
+   `model_usage.maxOutputTokens == 64_000`. Use no bot session file and no
+   cog-second-brain content.
 9. Only after all gates pass, perform one controlled
    `systemctl restart kesha-bot-vps`.
 10. Verify `active/running`, startup model `claude-opus-5`, no traceback/SQLite
@@ -503,8 +624,9 @@ production before merge approval.
    unchanged.
 11. Run one isolated normal OAuth request and resume using temporary session
     state. Do not force real compact/quota on the user's active session.
-12. Verify fixed-window configuration through a quota-free production-checkout
-    boundary smoke and inspect logs for zero unexpected `compact_boundary`.
+12. Verify fixed-window and reserve configuration through quota-free
+    production-checkout boundary tests and inspect logs for zero unexpected
+    `compact_boundary`.
 
 Rollback on any post-restart failure:
 
@@ -526,18 +648,20 @@ Rollback on any post-restart failure:
 - No Messages API migration.
 - No change to model, OAuth, proxy, task #13 session transaction, or manual
   compact semantics.
+- No PTY/subprocess automation of interactive Claude Code slash commands.
 
 ## Tickets
 
-### T1 — Own compaction at the SDK boundary and recover cleanly at daytime hard limit
+### T1 — Own compaction and preserve daytime custom-summary headroom
 
 - Files:
-  `claude_session.py`, `response_stream.py`, `config.py`,
-  `tests/test_claude_session_limit.py`, `tests/test_response_limit.py`
+  `claude_session.py`, `chat_state.py`, `response_stream.py`, `config.py`,
+  `tests/test_claude_session_limit.py`, `tests/test_preventive_compact.py`,
+  `tests/test_response_limit.py`
 - Vertical outcome:
-  every Claude subprocess has native auto-compaction disabled, native boundary
-  violations are observable, and a daytime full context ends in one friendly
-  manual-`/compact` Telegram outcome without retry/reset.
+  every subprocess has native auto-compaction disabled; every normal LLM batch
+  is authoritatively preflighted while enough custom-summary headroom remains;
+  insufficient/unknown headroom ends once without query/reset.
 - AC:
   - `_make_options().env["DISABLE_AUTO_COMPACT"] == "1"` without replacing
     unrelated inherited environment;
@@ -546,8 +670,30 @@ Rollback on any post-restart failure:
   - user and reminder Telegram paths replace raw partial text with exactly one
     localized `/compact` instruction; no raw stack/error, `empty`, or `📋`;
   - unsolicited/automatic native `compact_boundary` is logged as an invariant
-    violation; `run_native_manual_compact()` accepts only an explicitly awaited
-    manual boundary plus successful terminal Result and fully drains failures;
+    violation; `run_native_manual_compact()` does not exist;
+  - authoritative usage exposes matching positive max/current values and
+    `isAutoCompactEnabled=false`; malformed/failed usage rejects before query;
+  - reserve admission reads the uncached client control response; a prior valid
+    cache plus current zero rejects with zero query;
+  - preflight distinguishes stale resume from transient unknown:
+    `No conversation found` gives one `/clear` terminal, zero query, and
+    unchanged SID/session file;
+  - admission uses `208_000 + len(combined.encode("utf-8"))`, with exact
+    threshold/below-threshold tests and unchanged SID/context;
+  - every actual retry-query repeats the reserve helper; failure performs zero
+    retry query and terminalizes once;
+  - `_ensure_connected`/`send_message` preserve an existing SID and never
+    invalidate/recursively retry on `No conversation found` or `exit code 1`;
+    tests assert one query and unchanged durable SID;
+  - entries during processing are deferred rather than injected, then
+    independently preflighted; no message disappears without a terminal retry
+    instruction;
+  - confirmed reserve breach/context-limit latches without repeated probes and
+    is cleared by any successful custom compact or `/clear`; unknown usage
+    fails one batch without latching; `/clear → first message` is covered on
+    the exact runtime; plain commands remain available;
+  - exact model/max/raw/auto invariants and measured
+    `maxOutputTokens == 64_000` are required; a later mismatch fails closed;
   - existing task #13 usage-limit tests remain green.
 - blocked-by: none
 
@@ -598,7 +744,8 @@ Rollback on any post-restart failure:
   `tests/compact_summary_scorer.py`,
   `tests/test_compact_prompt.py`,
   `scripts/evaluate_compact_prompt.py`,
-  `docs/tasks/14/compact-eval.json`,
+  `docs/tasks/14/compact-eval.json` (immutable failed v1),
+  `docs/tasks/14/compact-eval-v2.json` (revised promotion gate),
   `docs/tasks/14/report.md`
 - Vertical outcome:
   successful compact commits only a structurally valid, globally
@@ -611,15 +758,14 @@ Rollback on any post-restart failure:
   - missing/out-of-order top-level sections fail before candidate start and
     preserve the original SID/progress terminalization; section-like text in
     `RECENT VERBATIM` is treated as payload;
-  - manual custom-summary `context_limit` invokes one native
-    `/compact <accepted instructions>`, requires a manual boundary, retries the
-    task #13 validated transaction once, and commits a new SID on success;
-    automatic compact never uses the native fallback;
-  - native failure preserves the old SID; native success plus retry failure
-    preserves the same compacted SID, reports one explicit partial outcome, and
-    does not clear/retry;
+  - manual custom summary is the only compact implementation; context
+    limit/usage/error preserves the old SID and never invokes a native slash
+    command;
   - all ten deterministic fixtures enforce exact anchors, forbidden claims,
     redacted recent messages, and exact/idempotent file diffs;
+  - the former hard-context fixture is replaced by
+    reserve-reject → custom-manual-compact → candidate-resume recovery;
+    3/3 records prove zero rejected query and successful transactional resume;
   - three independent live generations per fixture complete: 30/30
     deterministic passes, 30/30 source-ledger audits, zero fabrication, zero
     raw secrets, zero unrelated/duplicate writes;
@@ -636,16 +782,17 @@ Rollback on any post-restart failure:
   `docs/tasks/14/report.md` plus production state only after merge approval
 - Vertical outcome:
   the already-merged implementation is promoted only after package, prompt,
-  native-disable, service, OAuth, session-hash, and rollback gates pass.
+  native-disable, reserve, service, OAuth, session-hash, and rollback gates
+  pass.
 - AC:
   - pre-deploy snapshot preserves HEAD, `.env`, dirty diff, DB/WAL/SHM,
     package versions, service state, and session hashes;
   - production SDK/CLI are exactly 0.2.128/2.1.220;
   - isolated context usage reports `isAutoCompactEnabled=false`;
+  - isolated terminal model usage reports `maxOutputTokens=64_000`;
   - prompt live gate is complete before restart;
-  - target-runtime hard-context recovery records the rejection, manual
-    boundary, and successful candidate SID replacement using only temporary
-    state;
+  - target-runtime reserve recovery records zero rejected normal query and
+    successful custom candidate SID replacement using only temporary state;
   - service is `active/running`, logs `claude-opus-5`, and has no startup,
     migration, or invariant error;
   - isolated OAuth request/resume succeeds without touching user sessions;

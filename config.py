@@ -3,9 +3,10 @@
 import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time as dt_time, timezone, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import types
 from dotenv import load_dotenv
@@ -20,7 +21,11 @@ DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
 DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
-AUTO_COMPACT_PCT = float(os.getenv("AUTO_COMPACT_PCT", "95"))
+AUTO_COMPACT_TZ = ZoneInfo("Asia/Krasnoyarsk")
+AUTO_COMPACT_WINDOW_START = dt_time(23, 0)
+AUTO_COMPACT_WINDOW_END = dt_time(8, 0)
+AUTO_COMPACT_IDLE = timedelta(minutes=55)
+AUTO_COMPACT_MIN_CONTEXT_PCT = 20.0
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
@@ -88,6 +93,8 @@ STRINGS = {
         "reconnecting": "⚠️ Переподключаюсь... (попытка {n})",
         "error_retry": "⚠️ Ошибка, перезапуск сессии (попытка {n})...",
         "session_limit": "⏳ Достигнут лимит сессии Claude{reset}. Жду сброса — напиши позже.",
+        "context_limit": "🧠 Контекст заполнен. Отправь /compact, чтобы продолжить без очистки.",
+        "activity_retry": "⚠️ Не удалось надёжно сохранить сообщение. Отправь его ещё раз.",
         "empty": "🤷 Пустой ответ",
         "voice_fail": "🎙️ Не удалось расшифровать голосовое.",
         "deepgram_error": "🎙️ Ошибка транскрипции: {err}",
@@ -140,6 +147,8 @@ STRINGS = {
         "reconnecting": "⚠️ Reconnecting... (attempt {n})",
         "error_retry": "⚠️ Error, restarting session (attempt {n})...",
         "session_limit": "⏳ Claude session limit reached{reset}. Waiting for reset — message me later.",
+        "context_limit": "🧠 Context is full. Send /compact to continue without clearing it.",
+        "activity_retry": "⚠️ Could not safely save the message. Please send it again.",
         "empty": "🤷 Empty response",
         "voice_fail": "🎙️ Could not transcribe voice message.",
         "deepgram_error": "🎙️ Transcription error: {err}",

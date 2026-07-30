@@ -15,6 +15,16 @@ class FakeSession:
         yield {"type": "error", "kind": "usage_limit", "content": RAW_LIMIT}
 
 
+class FakeContextSession:
+    async def send_message(self, prompt):
+        yield {"type": "text_delta", "content": "Prompt is too long"}
+        yield {
+            "type": "error",
+            "kind": "context_limit",
+            "content": "Prompt is too long",
+        }
+
+
 class FakeState:
     def __init__(self):
         self.session = FakeSession()
@@ -24,8 +34,10 @@ class FakeState:
 
 
 class FakeRegistry:
-    def __init__(self):
+    def __init__(self, session=None):
         self.state = FakeState()
+        if session is not None:
+            self.state.session = session
 
     def get(self, chat_id):
         return self.state
@@ -89,3 +101,26 @@ async def test_streamed_raw_limit_is_replaced_by_one_friendly_terminal_outcome(
     assert RAW_LIMIT not in final_text
     all_visible = [final_text]
     assert not any("Пустой ответ" in text or "📋" in text for text in all_visible)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reminder", [False, True])
+async def test_context_limit_is_one_manual_compact_outcome(monkeypatch, reminder):
+    bot = FakeBot()
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(FakeContextSession()))
+    message = None if reminder else FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    initial_messages = bot.sent if reminder else message.answers
+    assert len(initial_messages) == 1
+    assert initial_messages[0][1 if reminder else 0] == "Prompt is too long"
+    assert len(bot.edits) == 1
+    final_text = bot.edits[0][0]
+    assert "/compact" in final_text
+    assert "Prompt is too long" not in final_text
+    assert "📋" not in final_text
+    assert "Пустой ответ" not in final_text

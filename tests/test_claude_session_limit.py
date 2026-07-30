@@ -6,6 +6,7 @@ from claude_agent_sdk import (
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
+    SystemMessage,
     TextBlock,
 )
 
@@ -13,6 +14,7 @@ from claude_session import ClaudeSession
 
 
 RAW_LIMIT = "You've hit your monthly spend limit · resets 2:20pm (Europe/Berlin)"
+RAW_CONTEXT_LIMIT = "Prompt is too long"
 
 
 def result(*, error=False, text=None, status=None, sid="sid-new"):
@@ -47,7 +49,7 @@ def make_session(tmp_path):
     session._client = client
     session._connected = True
 
-    async def connected():
+    async def connected(**kwargs):
         return None
 
     session._ensure_connected = connected
@@ -259,3 +261,98 @@ async def test_allowed_other_scope_does_not_clear_rejection_but_successful_turn_
     await client.events.put(result(sid="sid-success"))
     await successful
     assert session.usage_limit_active is False
+
+
+def test_options_disable_native_auto_compact(tmp_path):
+    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+
+    options = session._make_options()
+
+    assert options.env["DISABLE_AUTO_COMPACT"] == "1"
+    assert "DISABLE_COMPACT" not in options.env
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Prompt is too long",
+        "Context exceeds the 1000000 token limit",
+        "context window exceeds the maximum token limit",
+    ],
+)
+async def test_context_limit_result_is_one_normalized_terminal_chunk(tmp_path, raw):
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(result(error=True, text=raw))
+
+    chunks = await task
+
+    assert chunks == [{"type": "error", "kind": "context_limit", "content": raw}]
+    assert session._expected_results == 0
+    assert session._is_processing is False
+    assert client.queries == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_native_manual_compact_requires_boundary_and_terminal_result(tmp_path):
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(session.run_native_manual_compact("preserve decisions"))
+    await asyncio.sleep(0)
+    await client.events.put(
+        SystemMessage(
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "manual", "pre_tokens": 999}},
+        )
+    )
+    await client.events.put(result(sid="sid-old"))
+
+    outcome = await task
+
+    assert outcome["ok"] is True
+    assert outcome["trigger"] == "manual"
+    assert outcome["pre_tokens"] == 999
+    assert client.queries == ["/compact preserve decisions"]
+    assert session._expected_results == 0
+    assert session._is_processing is False
+
+
+@pytest.mark.asyncio
+async def test_native_manual_compact_accepts_production_command_without_slash(tmp_path):
+    session, client = make_session(tmp_path)
+    session.slash_commands = ["clear", "compact", "context"]
+    task = asyncio.create_task(session.run_native_manual_compact("preserve decisions"))
+    await asyncio.sleep(0)
+    await client.events.put(
+        SystemMessage(
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "manual", "pre_tokens": 999}},
+        )
+    )
+    await client.events.put(result(sid="sid-old"))
+
+    outcome = await task
+
+    assert outcome["ok"] is True
+    assert client.queries == ["/compact preserve decisions"]
+
+
+@pytest.mark.asyncio
+async def test_native_manual_compact_rejects_missing_or_auto_boundary_but_drains(tmp_path):
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(session.run_native_manual_compact("preserve decisions"))
+    await asyncio.sleep(0)
+    await client.events.put(
+        SystemMessage(
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "auto"}},
+        )
+    )
+    await client.events.put(result(sid="sid-old"))
+
+    outcome = await task
+
+    assert outcome == {"ok": False, "reason": "missing_manual_boundary"}
+    assert session._expected_results == 0
+    assert session._is_processing is False
