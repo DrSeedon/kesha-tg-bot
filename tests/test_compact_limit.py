@@ -5,10 +5,30 @@ import pytest
 
 import claude_session
 from claude_session import ClaudeSession
-from compact import compact_session, maybe_auto_compact
+from compact import compact_session
 
 
 RAW_LIMIT = "You've hit your monthly spend limit · resets 2:20pm (Europe/Berlin)"
+VALID_SUMMARY = """OBJECTIVE
+- Continue safely.
+USER FACTS AND PREFERENCES
+- None.
+DECISIONS
+- Keep the session.
+FILES AND ARTIFACTS
+- None.
+COMMANDS AND TOOL OUTCOMES
+- None.
+PENDING AND BLOCKERS
+- None.
+TEMPORAL STATE
+- None.
+UNCERTAINTY AND CONFLICTS
+- None.
+RECENT VERBATIM
+- hi
+CONTINUATION
+- Wait."""
 
 
 class ScriptedSession(ClaudeSession):
@@ -90,7 +110,7 @@ async def test_preamble_limit_rolls_back_old_sid_and_sends_no_summary(tmp_path):
 
     session = ScriptedSession(
         path,
-        [[{"type": "text", "content": "summary"}], limited_candidate],
+        [[{"type": "text", "content": VALID_SUMMARY}], limited_candidate],
     )
     notices = Notices()
 
@@ -109,7 +129,7 @@ async def test_summary_retry_cannot_invalidate_persisted_source_sid(tmp_path):
     async def retried_without_source_context(session):
         session._invalidate_session()
         session.session_id = "sid-retry-without-context"
-        yield {"type": "text", "content": "summary from wrong session"}
+        yield {"type": "text", "content": VALID_SUMMARY}
 
     session = ScriptedSession(path, [retried_without_source_context])
     notices = Notices()
@@ -138,7 +158,7 @@ async def test_cancellation_before_commit_rolls_back_sid_and_terminalizes_progre
 
     session = ScriptedSession(
         path,
-        [[{"type": "text", "content": "summary"}], blocked_candidate],
+        [[{"type": "text", "content": VALID_SUMMARY}], blocked_candidate],
     )
     notices = Notices()
     task = asyncio.create_task(compact_session(session, notify=notices))
@@ -175,7 +195,7 @@ async def test_cancellation_after_commit_keeps_candidate_sid(tmp_path):
 
     session = ScriptedSession(
         path,
-        [[{"type": "text", "content": "summary"}], candidate],
+        [[{"type": "text", "content": VALID_SUMMARY}], candidate],
     )
     notices = BlockingNotices()
     task = asyncio.create_task(compact_session(session, notify=notices))
@@ -208,7 +228,7 @@ async def test_success_commits_sid_before_summary_notification(tmp_path):
 
     session = ScriptedSession(
         path,
-        [[{"type": "text", "content": "summary"}], candidate],
+        [[{"type": "text", "content": VALID_SUMMARY}], candidate],
     )
     notices = CommitCheckingNotices()
 
@@ -218,7 +238,7 @@ async def test_success_commits_sid_before_summary_notification(tmp_path):
         "ok": True,
         "before_pct": 29,
         "after_pct": 4,
-        "summary_chars": 7,
+        "summary_chars": len(VALID_SUMMARY),
     }
     assert path.read_text() == "sid-candidate"
     assert notices.items[0][1] is True
@@ -262,16 +282,3 @@ async def test_session_replacement_is_restart_atomic_across_all_commit_points(
     committed.session_id = "sid-candidate"
     committed.commit_session_replacement(transaction)
     assert ClaudeSession(cwd=".", session_file=path).session_id == "sid-candidate"
-
-
-@pytest.mark.asyncio
-async def test_maybe_auto_compact_latch_skips_context_and_summary():
-    class Latched:
-        usage_limit_active = True
-
-        async def get_context_usage(self):
-            raise AssertionError("context lookup must be skipped")
-
-    result = await maybe_auto_compact(Latched(), 95)
-
-    assert result == {"ok": False, "reason": "usage_limit", "skipped": True}

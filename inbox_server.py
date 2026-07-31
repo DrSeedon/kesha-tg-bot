@@ -4,6 +4,7 @@ import logging
 from aiohttp import web
 
 from config import ALLOWED, NOTIFY_CHAT
+from message_log import ActivityPersistenceError
 
 logger = logging.getLogger("kesha.inbox")
 
@@ -42,13 +43,6 @@ async def handle_inbox(request: web.Request) -> web.Response:
     if not _bot_ref or not _registry_ref:
         return web.json_response({"error": "bot not ready"}, status=503)
 
-    label = f"📬 [{sender}]"
-    tg_text = f"{label}\n{message}"
-    try:
-        await _bot_ref.send_message(chat_id, tg_text)
-    except Exception as e:
-        logger.error(f"TG send failed: {e}")
-
     from chat_state import PendingEntry
     entry = PendingEntry(
         prompt=f"[INBOX from {sender}] {message}",
@@ -59,9 +53,19 @@ async def handle_inbox(request: web.Request) -> web.Response:
     try:
         state = _registry_ref.get(chat_id)
         await state.accept_entry(entry)
+    except ActivityPersistenceError:
+        logger.error(f"Inbox activity admission failed for chat {chat_id}")
+        return web.json_response({"error": "message was not accepted; retry"}, status=503)
     except Exception as e:
         logger.error(f"Inject failed: {e}")
-        return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"error": "message was not accepted"}, status=500)
+
+    label = f"📬 [{sender}]"
+    tg_text = f"{label}\n{message}"
+    try:
+        await _bot_ref.send_message(chat_id, tg_text)
+    except Exception as e:
+        logger.error(f"TG send failed: {e}")
 
     logger.info(f"Inbox: {sender} → chat {chat_id} ({len(message)} chars)")
     return web.json_response({"ok": True})

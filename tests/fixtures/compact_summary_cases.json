@@ -1,0 +1,110 @@
+[
+  {
+    "id": "decision_reversal",
+    "context": "Synthetic transcript facts:\n- Goal: choose restart-safe activity storage; phase is implementation approved, not deployed.\n- Final decision: use one SQLite chat_activity table because conditional updates are atomic across restart.\n- Rejected alternative: JSON sidecar because concurrent replacement is harder to make atomic.\n- Earlier Redis suggestion was explicitly withdrawn.\nLast user messages, oldest to newest:\n1. Compare JSON and SQLite.\n2. Do not add Redis.\n3. Final choice: SQLite, but do not deploy yet.",
+    "required_anchors": ["restart-safe activity storage", "SQLite", "chat_activity", "JSON sidecar", "do not deploy yet"],
+    "forbidden_claims": ["Redis is the final choice", "deployed successfully"],
+    "recent_messages": ["Compare JSON and SQLite.", "Do not add Redis.", "Final choice: SQLite, but do not deploy yet."],
+    "allowed_exact_values": ["chat_activity"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "durable_preference",
+    "context": "Synthetic transcript facts:\n- Current goal: prepare the next response.\n- Durable user preference: concise Russian answers.\n- One-off instruction for the current response only: include one English sentence.\n- Do not turn the one-off instruction into a durable preference.\nLast user messages, oldest to newest:\n1. Обычно отвечай кратко по-русски.\n2. Только сейчас добавь одно предложение на английском.\n3. Потом снова отвечай по-русски.",
+    "required_anchors": ["concise Russian", "one-off", "current response only"],
+    "forbidden_claims": ["prefers English answers", "English is a durable preference"],
+    "recent_messages": ["Обычно отвечай кратко по-русски.", "Только сейчас добавь одно предложение на английском.", "Потом снова отвечай по-русски."],
+    "allowed_exact_values": [],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "exact_file_state",
+    "context": "Synthetic transcript facts:\n- Goal: finish scheduler configuration.\n- /workspace/app/config.py was changed: idle timeout 40 -> 55 minutes.\n- /workspace/app/config.py is committed in commit 7abc123 but not deployed.\n- /workspace/app/worker.py was read only and not changed.\nLast user messages, oldest to newest:\n1. Проверь оба файла.\n2. Таймаут должен быть 55 минут.\n3. Не деплой до моего подтверждения.",
+    "required_anchors": ["/workspace/app/config.py", "40", "55", "7abc123", "not deployed", "/workspace/app/worker.py", "read only"],
+    "forbidden_claims": ["worker.py was changed", "deployed to production"],
+    "recent_messages": ["Проверь оба файла.", "Таймаут должен быть 55 минут.", "Не деплой до моего подтверждения."],
+    "allowed_exact_values": ["/workspace/app/config.py", "/workspace/app/worker.py", "40", "55", "7abc123"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "command_evidence",
+    "context": "Synthetic transcript facts:\n- Goal: make the gate pass.\n- Exact command: pytest -q tests/test_gate.py\n- Exit status: 1.\n- Result: 2 failed, 18 passed.\n- The failure proves the cancellation branch is still broken; no fix has been applied.\nLast user messages, oldest to newest:\n1. Запусти узкий тест.\n2. Что именно упало?\n3. Не говори, что готово, пока тест красный.",
+    "required_anchors": ["pytest -q tests/test_gate.py", "Exit status", "1", "2 failed", "18 passed", "cancellation"],
+    "forbidden_claims": ["all tests passed", "fix has been applied"],
+    "recent_messages": ["Запусти узкий тест.", "Что именно упало?", "Не говори, что готово, пока тест красный."],
+    "allowed_exact_values": ["pytest -q tests/test_gate.py", "1", "2", "18"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "pending_blocker",
+    "context": "Synthetic transcript facts:\n- Goal: publish the release.\n- Implementation and tests are complete locally.\n- Blocker: deployment approval is missing.\n- Owner of the blocker: the user.\n- Next executable action: wait for the user's explicit approval, then deploy commit abc9001.\nLast user messages, oldest to newest:\n1. Код уже готов?\n2. Прод пока не трогай.\n3. Жди моего явного разрешения.",
+    "required_anchors": ["deployment approval", "user", "wait", "abc9001"],
+    "forbidden_claims": ["deployment completed", "no blockers"],
+    "recent_messages": ["Код уже готов?", "Прод пока не трогай.", "Жди моего явного разрешения."],
+    "allowed_exact_values": ["abc9001"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "temporal_state",
+    "context": "Synthetic transcript facts:\n- Goal: resume evaluation after quota reset.\n- As of 2026-07-30 07:45 Asia/Krasnoyarsk, the quota is exhausted.\n- Reset is scheduled for 2026-07-30 15:00 Asia/Krasnoyarsk.\n- The fact is time-sensitive and must retain the 'as of' qualifier.\nLast user messages, oldest to newest:\n1. Когда сброс?\n2. Укажи абсолютное время и пояс.\n3. После 15:00 продолжай только недостающие прогоны.",
+    "required_anchors": ["as of", "2026-07-30 07:45", "Asia/Krasnoyarsk", "2026-07-30 15:00", "missing runs"],
+    "forbidden_claims": ["quota is available now", "timezone is UTC"],
+    "recent_messages": ["Когда сброс?", "Укажи абсолютное время и пояс.", "После 15:00 продолжай только недостающие прогоны."],
+    "allowed_exact_values": ["2026-07-30 07:45", "2026-07-30 15:00", "15:00"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "recent_correction",
+    "context": "Synthetic transcript facts:\n- Goal: select the target model.\n- An old message mentioned Fable 5, but the user explicitly corrected it.\n- Final target is claude-opus-5. Fable 5 must not be used.\nLast user messages, oldest to newest:\n1. Сначала проверь Fable 5.\n2. КРИТИЧЕСКАЯ КОРРЕКЦИЯ: Fable не использовать.\n3. Продолжай именно с claude-opus-5.",
+    "required_anchors": ["claude-opus-5", "Fable 5 must not be used", "correction"],
+    "forbidden_claims": ["target is Fable 5", "use Fable"],
+    "recent_messages": ["Сначала проверь Fable 5.", "КРИТИЧЕСКАЯ КОРРЕКЦИЯ: Fable не использовать.", "Продолжай именно с claude-opus-5."],
+    "allowed_exact_values": ["claude-opus-5"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "reserve_manual_recovery",
+    "context": "Synthetic transcript facts:\n- Goal: preserve manual recovery headroom before a daytime turn can exhaust the 1M context.\n- Normal admission was rejected before query because the measured reserve was one token below the required threshold.\n- The exact user instruction is: preserve marker ALPHA-BEGIN and marker OMEGA-END, then use the custom transactional /compact flow.\n- After the compact commits a new session, verify that the candidate session resumes successfully.\n- Automatic recovery is forbidden outside the night window.\nLast user messages, oldest to newest:\n1. ALPHA-BEGIN: сохрани manual recovery headroom для 1M context; обычный turn отклонён.\n2. Выполни custom transactional /compact с сохранением старого SID до commit.\n3. OMEGA-END: проверь, что candidate session resumes; automatic recovery разрешён только в night window.",
+    "required_anchors": ["manual recovery headroom", "1M context", "ALPHA-BEGIN", "OMEGA-END", "custom transactional /compact", "candidate session resumes", "night window"],
+    "forbidden_claims": ["normal turn was admitted", "/clear is required", "automatic daytime compact is allowed"],
+    "recent_messages": ["ALPHA-BEGIN: сохрани manual recovery headroom для 1M context; обычный turn отклонён.", "Выполни custom transactional /compact с сохранением старого SID до commit.", "OMEGA-END: проверь, что candidate session resumes; automatic recovery разрешён только в night window."],
+    "allowed_exact_values": ["1M", "1,000,000", "/compact"],
+    "initial_files": {},
+    "expected_files": {},
+    "requires_reserve_recovery": true
+  },
+  {
+    "id": "unresolved_conflict",
+    "context": "Synthetic transcript facts:\n- Goal: choose the threshold, but evidence conflicts.\n- Measurement A reports 20 percent.\n- Measurement B reports 25 percent.\n- Neither source has been validated; no threshold decision is final.\n- Resolution step: rerun both measurements on the same dataset.\nLast user messages, oldest to newest:\n1. Первый замер дал 20 процентов.\n2. Второй дал 25 процентов.\n3. Не усредняй: сначала перепроверь на одном датасете.",
+    "required_anchors": ["20 percent", "25 percent", "conflict", "same dataset", "not final"],
+    "forbidden_claims": ["final threshold is 22.5", "sources agree"],
+    "recent_messages": ["Первый замер дал 20 процентов.", "Второй дал 25 процентов.", "Не усредняй: сначала перепроверь на одном датасете."],
+    "allowed_exact_values": ["20", "25"],
+    "initial_files": {},
+    "expected_files": {}
+  },
+  {
+    "id": "secret_idempotent_presave",
+    "context": "Synthetic transcript facts:\n- Goal: preserve the final database decision without leaking credentials.\n- Final durable decision: use SQLite. It is already recorded exactly once in notes/project.md.\n- Synthetic API credential: {{TOKEN}}.\n- Synthetic password assignment: password={{PASSWORD}}.\n- Never persist or reproduce either raw value; use typed redaction markers.\n- No file needs an update because the durable decision is already present.\nLast user messages, oldest to newest:\n1. Решение уже записано в notes/project.md.\n2. Не дублируй запись и не трогай unrelated.md.\n3. Секреты {{TOKEN}} и {{PASSWORD}} обязательно заредакть.",
+    "required_anchors": ["SQLite", "notes/project.md", "already recorded", "[REDACTED SECRET:"],
+    "forbidden_claims": ["file update required", "duplicate the decision"],
+    "recent_messages": ["Решение уже записано в notes/project.md.", "Не дублируй запись и не трогай unrelated.md.", "Секреты [REDACTED SECRET: token] и [REDACTED SECRET: password] обязательно заредакть."],
+    "allowed_exact_values": ["notes/project.md"],
+    "secret_placeholders": ["TOKEN", "PASSWORD"],
+    "initial_files": {
+      "notes/project.md": "# Project\n- Database: SQLite (final).\n",
+      "unrelated.md": "# Untouched\n"
+    },
+    "expected_files": {
+      "notes/project.md": "# Project\n- Database: SQLite (final).\n",
+      "unrelated.md": "# Untouched\n"
+    }
+  }
+]

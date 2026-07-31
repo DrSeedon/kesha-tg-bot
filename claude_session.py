@@ -27,12 +27,24 @@ from claude_agent_sdk import (
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path("./storage/sessions")
+EXPECTED_CONTEXT_MODEL = "claude-opus-5[1m]"
+EXPECTED_CONTEXT_TOKENS = 1_000_000
+EXPECTED_MAX_OUTPUT_TOKENS = 64_000
+MANUAL_COMPACT_FLOOR_TOKENS = 80_000
+NORMAL_TURN_RESERVE_TOKENS = 208_000
 
 _USAGE_LIMIT_RE = re.compile(
     r"(hit\s+your\s+.*limit|session\s+limit|usage\s+limit|monthly\s+spend\s+limit)",
     re.IGNORECASE,
 )
 _RESET_RE = re.compile(r"resets?\s+([^\n.)]+?(?:\([^)]+\))?)\s*$", re.IGNORECASE)
+_CONTEXT_LIMIT_RE = re.compile(
+    r"(prompt\s+is\s+too\s+long|"
+    r"context(?:\s+window)?\s+(?:exceeds?|exceeded|is\s+over|reached)"
+    r".{0,80}(?:token|limit)|"
+    r"maximum\s+context\s+(?:length|window))",
+    re.IGNORECASE,
+)
 
 
 def usage_limit_reset(err: str) -> str | None:
@@ -43,6 +55,11 @@ def usage_limit_reset(err: str) -> str | None:
     return f" (сброс {match.group(1).strip()})" if match else ""
 
 
+def is_context_limit(err: str) -> bool:
+    """Return whether Claude rejected the request because context is full."""
+    return bool(_CONTEXT_LIMIT_RE.search(err))
+
+
 @dataclass
 class _SessionReplacement:
     session_id: Optional[str]
@@ -50,6 +67,8 @@ class _SessionReplacement:
     last_ctx_usage: Optional[dict]
     client: Any
     connected: bool
+    max_output_tokens_valid: bool
+    last_max_output_tokens: Optional[int]
     candidate_started: bool = False
     committed: bool = False
 
@@ -85,6 +104,9 @@ class ClaudeSession:
         self._session_resumed = bool(self.session_id)
         self._query_lock = asyncio.Lock()
         self._session_replacement: Optional[_SessionReplacement] = None
+        self.slash_commands: Optional[list[str]] = None
+        self._max_output_tokens_valid = True
+        self.last_max_output_tokens: Optional[int] = None
 
     def _load_session(self) -> Optional[str]:
         if self._session_file.exists():
@@ -133,6 +155,8 @@ class ClaudeSession:
             last_ctx_usage=self._last_ctx_usage,
             client=self._client,
             connected=self._connected,
+            max_output_tokens_valid=self._max_output_tokens_valid,
+            last_max_output_tokens=self.last_max_output_tokens,
         )
         self._session_replacement = snapshot
         return snapshot
@@ -149,6 +173,8 @@ class ClaudeSession:
         self.session_id = None
         self._session_resumed = False
         self._last_ctx_usage = None
+        self._max_output_tokens_valid = True
+        self.last_max_output_tokens = None
 
     def commit_session_replacement(self, snapshot: _SessionReplacement) -> None:
         if self._session_replacement is not snapshot:
@@ -176,6 +202,8 @@ class ClaudeSession:
         self.session_id = snapshot.session_id
         self._session_resumed = snapshot.session_resumed
         self._last_ctx_usage = snapshot.last_ctx_usage
+        self._max_output_tokens_valid = snapshot.max_output_tokens_valid
+        self.last_max_output_tokens = snapshot.last_max_output_tokens
         self._session_replacement = None
         if source_unchanged:
             return
@@ -222,6 +250,7 @@ class ClaudeSession:
             permission_mode="default",
             can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
+            env={"DISABLE_AUTO_COMPACT": "1"},
         )
         if self.system_prompt:
             options.system_prompt = self.system_prompt
@@ -231,7 +260,7 @@ class ClaudeSession:
             options.resume = self.session_id
         return options
 
-    async def _ensure_connected(self):
+    async def _ensure_connected(self, *, preserve_session: bool = False):
         if self._client and self._connected:
             return
         if self._pending_disconnect is not None:
@@ -256,7 +285,11 @@ class ClaudeSession:
         try:
             await self._client.connect()
         except Exception as e:
-            if self.session_id and ("No conversation found" in str(e) or "exit code 1" in str(e)):
+            if (
+                not preserve_session
+                and self.session_id
+                and ("No conversation found" in str(e) or "exit code 1" in str(e))
+            ):
                 logger.warning("Session %s expired, invalidating", self.session_id[:8])
                 self._invalidate_session()
                 options = self._make_options()
@@ -271,12 +304,14 @@ class ClaudeSession:
         pending_limit: Optional[str] = None
         limit_seen = False
         limit_content = ""
+        context_limit_seen = False
+        context_limit_content = ""
         batch_had_error = False
         generic_errors: list[str] = []
 
         try:
             logger.info("send_message: ensuring connected...")
-            await self._ensure_connected()
+            await self._ensure_connected(preserve_session=True)
             logger.info("send_message: connected, sending query...")
             async with self._query_lock:
                 await self._client.query(text)
@@ -296,7 +331,22 @@ class ClaudeSession:
                         limit_content = limit_content or pending_limit
                         limit_seen = True
                         continue
-                    if limit_seen:
+                    raw_assistant = "\n".join(
+                        block.text for block in msg.content
+                        if isinstance(block, TextBlock) and block.text
+                    )
+                    if (
+                        assistant_error in {"context_limit", "prompt_too_long"}
+                        or is_context_limit(raw_assistant)
+                    ):
+                        context_limit_seen = True
+                        context_limit_content = (
+                            context_limit_content
+                            or raw_assistant
+                            or str(assistant_error)
+                        )
+                        continue
+                    if limit_seen or context_limit_seen:
                         continue
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
@@ -316,6 +366,24 @@ class ClaudeSession:
                         self.total_cost_usd += msg.total_cost_usd
                     if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
+                    if not msg.is_error:
+                        model_usage = getattr(msg, "model_usage", None) or {}
+                        expected_usage = model_usage.get(EXPECTED_CONTEXT_MODEL)
+                        observed_max_output = (
+                            expected_usage.get("maxOutputTokens")
+                            if isinstance(expected_usage, dict)
+                            else None
+                        )
+                        if observed_max_output == EXPECTED_MAX_OUTPUT_TOKENS:
+                            self.last_max_output_tokens = observed_max_output
+                        else:
+                            self._max_output_tokens_valid = False
+                            logger.error(
+                                "Unexpected terminal model usage: model=%s "
+                                "maxOutputTokens=%r",
+                                EXPECTED_CONTEXT_MODEL,
+                                observed_max_output,
+                            )
                     self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
                     self.last_num_turns = getattr(msg, "num_turns", 0) or 0
                     self.last_stop_reason = getattr(msg, "stop_reason", None)
@@ -332,10 +400,22 @@ class ClaudeSession:
                         or getattr(msg, "terminal_reason", None) == "blocking_limit"
                         or usage_limit_reset(raw_result) is not None
                     )
+                    result_is_context_limit = (
+                        not result_is_limit
+                        and (
+                            getattr(msg, "terminal_reason", None) == "context_limit"
+                            or is_context_limit(raw_result)
+                        )
+                    )
                     if result_is_limit:
                         limit_seen = True
                         limit_content = limit_content or pending_limit or raw_result or "usage limit"
                         self.usage_limit_active = True
+                    elif result_is_context_limit:
+                        context_limit_seen = True
+                        context_limit_content = (
+                            context_limit_content or raw_result or "context limit"
+                        )
                     elif msg.is_error:
                         batch_had_error = True
                         if raw_result:
@@ -355,6 +435,12 @@ class ClaudeSession:
                                 "kind": "usage_limit",
                                 "content": limit_content or "usage limit",
                             }
+                        elif context_limit_seen:
+                            yield {
+                                "type": "error",
+                                "kind": "context_limit",
+                                "content": context_limit_content or "context limit",
+                            }
                         else:
                             if not batch_had_error:
                                 self.usage_limit_active = False
@@ -364,7 +450,7 @@ class ClaudeSession:
                     if not limit_seen:
                         yield {"type": "turn_done"}
                 elif isinstance(msg, StreamEvent):
-                    if limit_seen:
+                    if limit_seen or context_limit_seen:
                         continue
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
@@ -372,6 +458,10 @@ class ClaudeSession:
                         if delta.get("type") == "text_delta":
                             yield {"type": "text_delta", "content": delta.get("text", "")}
                 elif isinstance(msg, SystemMessage):
+                    if msg.subtype == "init":
+                        commands = msg.data.get("slash_commands")
+                        if isinstance(commands, list):
+                            self.slash_commands = [str(command) for command in commands]
                     logger.info(f"System: {msg.subtype}")
                 elif isinstance(msg, RateLimitEvent):
                     rl = msg.rate_limit_info
@@ -394,16 +484,27 @@ class ClaudeSession:
                 self._expected_results = 0
                 yield {"type": "error", "kind": "usage_limit", "content": err}
                 return
-            if self.session_id and ("No conversation found" in err or "exit code 1" in err):
-                logger.warning(
-                    "Session %s failed (%s), invalidating and retrying",
-                    self.session_id[:8], type(e).__name__,
-                )
-                self._invalidate_session()
+            if is_context_limit(err):
                 self._connected = False
                 self._client = None
-                async for chunk in self.send_message(text):
-                    yield chunk
+                self._expected_results = 0
+                yield {"type": "error", "kind": "context_limit", "content": err}
+                return
+            if self.session_id and (
+                "No conversation found" in err or "exit code 1" in err
+            ):
+                logger.warning(
+                    "Session %s unavailable (%s); preserving for explicit /clear",
+                    self.session_id[:8], type(e).__name__,
+                )
+                self._connected = False
+                self._client = None
+                self._expected_results = 0
+                yield {
+                    "type": "error",
+                    "kind": "session_unavailable",
+                    "content": err,
+                }
                 return
             logger.error(f"SDK error: {e}", exc_info=True)
             self._connected = False
@@ -414,6 +515,87 @@ class ClaudeSession:
             if self._is_processing:
                 async with self._query_lock:
                     self._is_processing = False
+
+    async def check_context_reserve(
+        self,
+        combined: str = "",
+        *,
+        manual: bool = False,
+    ) -> dict:
+        """Fail closed unless a fresh control response proves enough headroom."""
+        required = (
+            MANUAL_COMPACT_FLOOR_TOKENS
+            if manual
+            else NORMAL_TURN_RESERVE_TOKENS + len(combined.encode("utf-8"))
+        )
+        try:
+            await self._ensure_connected(preserve_session=True)
+        except Exception as exc:
+            error = str(exc)
+            reason = (
+                "session_unavailable"
+                if self.session_id and "No conversation found" in error
+                else "unknown"
+            )
+            logger.warning("Context reserve connect failed (%s): %s", reason, exc)
+            return {"ok": False, "reason": reason, "required": required}
+
+        if not self._max_output_tokens_valid:
+            return {
+                "ok": False,
+                "reason": "runtime_invariant",
+                "required": required,
+            }
+
+        try:
+            usage = await self._client.get_context_usage()
+        except Exception as exc:
+            if self.session_id and "No conversation found" in str(exc):
+                return {
+                    "ok": False,
+                    "reason": "session_unavailable",
+                    "required": required,
+                }
+            logger.warning("Context reserve control request failed: %s", exc)
+            return {"ok": False, "reason": "unknown", "required": required}
+
+        if not isinstance(usage, dict):
+            return {"ok": False, "reason": "unknown", "required": required}
+        total = usage.get("totalTokens")
+        maximum = usage.get("maxTokens")
+        raw_maximum = usage.get("rawMaxTokens")
+        valid = (
+            type(total) is int
+            and total > 0
+            and maximum == EXPECTED_CONTEXT_TOKENS
+            and raw_maximum == EXPECTED_CONTEXT_TOKENS
+            and usage.get("model") == EXPECTED_CONTEXT_MODEL
+            and usage.get("isAutoCompactEnabled") is False
+        )
+        if not valid:
+            logger.error(
+                "Context reserve invariant failed: total=%r max=%r raw=%r "
+                "model=%r auto=%r",
+                total,
+                maximum,
+                raw_maximum,
+                usage.get("model"),
+                usage.get("isAutoCompactEnabled"),
+            )
+            return {
+                "ok": False,
+                "reason": "runtime_invariant",
+                "required": required,
+            }
+
+        remaining = maximum - total
+        return {
+            "ok": remaining >= required,
+            "reason": None if remaining >= required else "reserve",
+            "remaining": remaining,
+            "required": required,
+            "usage": usage,
+        }
 
     async def inject(self, text: str) -> bool:
         if not (self._client and self._connected and self._is_processing):
@@ -446,7 +628,18 @@ class ClaudeSession:
             except Exception as e:
                 logger.error(f"Interrupt error: {e}")
 
-    async def get_context_usage(self) -> Optional[dict]:
+    async def get_context_usage(
+        self,
+        *,
+        refresh: bool = False,
+        preserve_session: bool = False,
+    ) -> Optional[dict]:
+        if refresh:
+            try:
+                await self._ensure_connected(preserve_session=preserve_session)
+            except Exception as exc:
+                logger.warning("get_context_usage refresh failed: %s", exc)
+                return None
         if self._client and self._connected:
             try:
                 result = await self._client.get_context_usage()
@@ -476,6 +669,8 @@ class ClaudeSession:
         Use this when immediately calling send_message() on a new session."""
         self._invalidate_session()
         self._last_ctx_usage = None
+        self._max_output_tokens_valid = True
+        self.last_max_output_tokens = None
         self._connected = False
         old_client = self._client
         self._client = None
@@ -489,6 +684,8 @@ class ClaudeSession:
     def reset(self):
         self._invalidate_session()
         self._last_ctx_usage = None
+        self._max_output_tokens_valid = True
+        self.last_max_output_tokens = None
         self.reconnect()
         logger.info("Session reset (cleared session_id)")
 

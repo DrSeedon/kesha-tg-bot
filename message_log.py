@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -11,6 +12,10 @@ DB_PATH = Path("./storage/messages.db")
 
 # callable(message_id, chat_id, role, content) — set by bot.py for RAG indexing
 OnMessage = Callable[[int, int, str, str], None]
+
+
+class ActivityPersistenceError(RuntimeError):
+    """Durable conversation activity could not be recorded."""
 
 
 class MessageLog:
@@ -30,7 +35,95 @@ class MessageLog:
                 timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             );
             CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, timestamp);
+            CREATE TABLE IF NOT EXISTS chat_activity (
+                chat_id INTEGER PRIMARY KEY,
+                last_activity_utc TEXT NOT NULL,
+                quiescent INTEGER NOT NULL CHECK (quiescent IN (0, 1)),
+                auto_attempted_for_utc TEXT
+            );
         """)
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(chat_activity)")
+        }
+        if "auto_attempted_for_utc" not in columns:
+            self.conn.execute(
+                "ALTER TABLE chat_activity ADD COLUMN auto_attempted_for_utc TEXT"
+            )
+
+    @staticmethod
+    def _activity_time(now_utc: Optional[datetime]) -> str:
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("activity timestamp must be timezone-aware")
+        return now.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+    def begin_activity(self, chat_id: int, now_utc: Optional[datetime] = None) -> str:
+        timestamp = self._activity_time(now_utc)
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO chat_activity(
+                    chat_id, last_activity_utc, quiescent, auto_attempted_for_utc
+                ) VALUES(?, ?, 0, NULL)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    last_activity_utc=excluded.last_activity_utc,
+                    quiescent=0,
+                    auto_attempted_for_utc=NULL
+                """,
+                (chat_id, timestamp),
+            )
+        except sqlite3.Error as exc:
+            raise ActivityPersistenceError("activity admission write failed") from exc
+        return timestamp
+
+    def finish_activity(self, chat_id: int, now_utc: Optional[datetime] = None) -> str:
+        timestamp = self._activity_time(now_utc)
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO chat_activity(
+                    chat_id, last_activity_utc, quiescent, auto_attempted_for_utc
+                ) VALUES(?, ?, 1, NULL)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    last_activity_utc=excluded.last_activity_utc,
+                    quiescent=1,
+                    auto_attempted_for_utc=NULL
+                """,
+                (chat_id, timestamp),
+            )
+        except sqlite3.Error as exc:
+            raise ActivityPersistenceError("activity completion write failed") from exc
+        return timestamp
+
+    def claim_auto_attempt(self, chat_id: int, last_activity_utc: str) -> bool:
+        try:
+            cursor = self.conn.execute(
+                """
+                UPDATE chat_activity
+                SET auto_attempted_for_utc=last_activity_utc
+                WHERE chat_id=?
+                  AND last_activity_utc=?
+                  AND quiescent=1
+                  AND auto_attempted_for_utc IS NULL
+                """,
+                (chat_id, last_activity_utc),
+            )
+        except sqlite3.Error as exc:
+            raise ActivityPersistenceError("automatic compact claim failed") from exc
+        return cursor.rowcount == 1
+
+    def get_activity(self, chat_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM chat_activity WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+
+    def list_quiescent_chat_ids(self) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT chat_id FROM chat_activity WHERE quiescent=1"
+        ).fetchall()
+        return [int(row["chat_id"]) for row in rows]
 
     def set_on_message(self, cb: Optional[OnMessage]) -> None:
         """Late-bind RAG indexing callback (set from bot.py after event loop is up)."""
