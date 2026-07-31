@@ -228,6 +228,45 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 ### Открытые вопросы
 - **v2.6.0 задеплоено** на Contabo (2026-07-18). watchfiles установлен, бот рестартнут, preventive compact активен.
 
+## Session notes (2026-07-31) — клиент Александр: баны Claude + феасибилити Codex
+
+### #15 — гайд «от почты до оплаты» (docs/tasks/15/guide-alexander.md)
+Клиент словил 5 банов подряд. **Первичная причина — НЕ датацентровый IP** (это была рабочая гипотеза, опровергнута):
+РФ отсутствует в [Supported Regions](https://www.anthropic.com/supported-countries), ToS привязывает доступ к этой
+политике → VPN маскирует локацию, но не делает использование легитимным. Гарантий не существует в принципе.
+DC-IP = усилитель, не приговор: наш Кеша месяцами живёт на Contabo (DC, Франция). Убивает **стек** сигналов:
+неподдерживаемый регион + прыгающий VPN + покупная почта + платёж через минуты после регистрации + сразу бот.
+
+- **Agent SDK на подписке ЛЕГИТИМЕН, доплачивать не надо.** Анонс «с 15.06.2026 отдельный пул кредитов»
+  [отменён в день вступления в силу](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan):
+  «For now, nothing has changed: Claude Agent SDK, `claude -p` ... still draw from your subscription's usage limits».
+  Первый поиск уверенно выдал противоположное — спасло открытие первоисточника.
+- **Тариф:** `config.py:18` = Opus по умолчанию + AUTO_COMPACT_PCT=95 + превентивный компакт 55мин + `urgent_llm`
+  будит модель без юзера → лимит горит в тишине. Pro реалистичен только на Sonnet, база для Opus — Max 5x.
+- Codex-ревью НЕ проводилось (квота до 2026-08-05). Документ cross-LLM не проверялся.
+
+### #16 — Кеша на Codex/GPT (docs/tasks/16/research.md)
+**Технически РЕАЛЬНО: 9–14 чел-дней паритет / 4–6 дней «лайт».** Ранее клиенту сказали «у Кеши нет возможности
+работать через харнес Codex» — на сегодня это неверно, харнес есть.
+- Проверено живьём: `codex app-server --stdio` = JSON-RPC, **88 методов** (spikes/appserver_methods.txt).
+  Прямые аналоги всех сложных фич: `turn/steer`+`thread/inject_items` (inject), `turn/interrupt` (/stop),
+  `thread/compact/start`, `thread/resume`, `account/rateLimits/read`. Генерация НЕ проверена — квота 100%.
+- **Единственный архитектурный разрыв:** `create_sdk_mcp_server` (kesha_tools.py:512) — 16 тулов внутри процесса
+  бота, дёргают `bot` напрямую. У Codex MCP только внешний stdio → выносить в процесс + мост. 3–4 дня, самый риск.
+- Связано с SDK 3 файла из 14. Не трогаются: rag/reminders/media/message_log/telegram_io/tool_status/handlers (~55%).
+- **Рекомендация — форк-ветка (вариант B), НЕ общий слой:** общий слой требует обобщить compact-транзакцию
+  (claude_session.py:127-198) = трогать рабочего Claude-Кешу.
+- **БЛОКЕР ЮРИДИЧЕСКИЙ:** OpenAI ToS, «What you cannot do»: «Automatically or programmatically extract data or
+  Output». TG-бот 24/7 = ровно это. В родственных редакциях есть carve-out «except as permitted through the API» —
+  то есть API разрешён явно, подписка нет. Мейнтейнер openai/codex: «I'm an engineer, not a lawyer».
+  → Решение принимает клиент письменно ДО работ. Вариант C (OpenAI API) риска не несёт, но платится сверх подписки.
+
+### Открытое
+- Александру нужна реальная ссылка на репозиторий — в гайде плейсхолдер.
+- Гейт по #16: B (подписка, ToS-риск) или C (API) — ждёт решения клиента, воркер STOP на гейте, НЕ убивать.
+- Прежде чем тратить 2 недели на GPT — выяснить, за что банят Claude-аккаунт клиента. Если причина в регионе/оплате,
+  а не в Claude, GPT забанит так же.
+
 ## TODO
 
 См. [TODO.md](TODO.md)
