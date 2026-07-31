@@ -269,9 +269,118 @@ deployment check if the CLI reports otherwise.
 
 Disabling native auto-compact removes the last-resort safety net. Official
 documentation says a full context can then reject turns with
-`Prompt is too long`, recoverable through manual `/compact`.[4] For Kesha the
-correct product behavior is a single friendly message asking for `/compact`;
-silently violating the daytime rule is not an acceptable fallback.
+`Prompt is too long`.[4] The Phase 3 live experiment below refutes the earlier
+assumption that an Agent SDK `query("/compact ...")` is a supported recovery
+command. Kesha must preserve custom `/compact` headroom before admitting a
+daytime LLM turn rather than wait for the hard limit.
+
+## Phase 3 live falsification and reserve measurement (2026-07-30)
+
+### Native slash-command hypothesis — REFUTED
+
+Hypothesis: sending `/compact <instructions>` through the persistent Agent SDK
+client invokes Claude Code's native compactor because `system/init` advertises
+the command.
+
+Falsifier defined before acceptance: the exact target runtime must emit
+`SystemMessage(subtype="compact_boundary")` with `trigger="manual"` and then a
+successful terminal Result while preserving the temporary SID.
+
+Direct isolated OAuth measurement on `claude-agent-sdk==0.2.128`, bundled
+Claude Code `2.1.220`, and `claude-opus-5[1m]`:
+
+```text
+system/init slash_commands contains: compact
+query sent: /compact Preserve MANUAL-BOUNDARY-SMOKE.
+terminal Result: success
+compact_boundary(trigger=manual): absent
+bot outcome: missing_manual_boundary
+durable temporary SID: preserved
+```
+
+**REFUTED — direct measurement (evidence tier 1).** The advertised command name
+does not prove that a slash command is interpreted by Agent SDK `query()`.
+Accepting the terminal Result without the boundary would mistake an ordinary
+model response for context reduction. `run_native_manual_compact` and all
+boundary-dependent promotion cells must be removed.
+
+### Custom handoff reserve — CONFIRMED inputs
+
+Three isolated generations used the exact accepted `COMPACT_PROMPT` on the
+exact target runtime. Each measured `get_context_usage()` immediately before
+and after submitting the prompt, then read `ResultMessage.model_usage`:
+
+| Fixture | Before total | Prompt/input delta | Output tokens | maxTokens | maxOutputTokens | Auto compact |
+|---|---:|---:|---:|---:|---:|---|
+| `secret_idempotent_presave` | 9,530 | 1,622 | 1,470 | 1,000,000 | 64,000 | false |
+| `command_evidence` | 9,428 | 1,622 | 1,347 | 1,000,000 | 64,000 | false |
+| `temporal_state` | 9,470 | 1,622 | 1,436 | 1,000,000 | 64,000 | false |
+
+The observed minimum remaining context needed to submit the handoff while
+allowing the runtime's full declared output is
+`1,622 + 64,000 = 65,622` tokens. A 20% uncertainty margin gives 78,746.4;
+rounding upward defines an **80,000-token manual compact floor**.
+
+Admission cannot use that floor alone: a newly admitted turn can consume output
+before the next `/compact`. The conservative daytime admission requirement is:
+
+```text
+remaining = maxTokens - totalTokens
+required = 80,000 compact floor
+         + 64,000 one maximum model output
+         + 64,000 one additional agent/tool iteration envelope
+         + len(assembled_prompt.encode("utf-8")) token upper bound
+```
+
+The fixed base is therefore **208,000 remaining tokens**, plus the assembled
+input's UTF-8 byte length. The byte length is a conservative token upper bound,
+not a tokenizer estimate. This is an operational reserve, not a proof against
+an adversarial 25-iteration tool loop; eliminating that residual risk would
+require capping agent turns/tool output and would materially change Kesha's
+behavior. The guard therefore fails closed early and retains the existing
+terminal hard-limit handler as a last-resort non-mutating safety path.
+
+### Revised admission semantics
+
+- Every new LLM batch is preflighted from an authoritative connected
+  `get_context_usage()` response before `session.query()` or user-message
+  logging as an accepted Claude turn.
+- Processing-time arrivals are deferred, not injected, so every new input
+  crosses the same preflight boundary and cannot race an in-flight usage
+  snapshot.
+- Remaining context below `required` sends exactly one static friendly
+  instruction: run `/compact`, then resend. Unknown/malformed usage fails that
+  batch with one static retry-later outcome. The rejected batch is terminally
+  acknowledged rather than retained only in volatile memory, so restart cannot
+  silently lose supposedly queued work.
+- The rejected batch never reaches Claude, never changes SID/context, and does
+  not trigger automatic compact. A confirmed reserve breach or terminal
+  context limit sets an in-process reserve latch instead of repeatedly probing
+  a near-full session; transient unknown usage does not latch.
+- Every actual response-stream retry repeats the authoritative reserve check.
+  A timeout/session attempt may already exist in the transcript, but a second
+  query cannot consume the manual floor without a fresh pass.
+- The current `ClaudeSession.send_message()` has a separate recursive retry
+  that invalidates SID on `No conversation found` or broad `exit code 1`.
+  That bypasses the response owner and is removed in the revised plan:
+  existing SID is preserved, one typed terminal error is returned, and only
+  explicit `/clear` may discard it.
+- Reserve preflight must preserve the connect failure's type. A stale resume
+  (`No conversation found`) returns a dedicated `/clear` terminal before any
+  query, while unrelated control failure remains transient unknown/retry-later.
+  Both preserve the durable SID; neither can loop through hidden invalidation.
+- Manual `/compact` bypasses the admission guard and uses only task #13's
+  custom transactional summary while the 80,000-token floor remains.
+  `/clear` and successful compact clear the latch. A legacy session already
+  below the floor fails closed with one explicit limitation and preserves SID.
+- Plain bot commands that do not create an LLM turn remain available.
+- Any successful custom compact, including the night scheduler, clears the
+  reserve latch. `/clear` also clears it.
+- A fresh session is not special-cased around the guard: the exact runtime
+  measured nonzero usage before its first query. Zero/None fails one batch
+  without latching and a later valid snapshot can recover.
+- The fixed 64,000-token term is verified from target `model_usage` before
+  deployment and from later terminal Results; a mismatch fails closed.
 
 ## Recommended night/offline policy
 
@@ -605,6 +714,20 @@ Anthropic's “recall first, precision second” recommendation.[11]
     `IDLE` writes `quiescent=true`. Failed admission admits no unrecorded entry;
     crash/completion-write failure stays non-quiescent across restart and can
     never authorize compact.
+12. A daytime LLM batch calls authoritative context usage before
+    `session.query()`. Remaining tokens below
+    `208,000 + len(assembled_prompt.encode("utf-8"))` produces one static
+    terminal `/compact`-then-resend instruction. Unknown/malformed usage
+    produces one static retry-later outcome. Both perform zero session
+    mutation.
+13. Processing-time entries are deferred until they can cross the same
+    preflight boundary; no injection can race the reserve snapshot.
+14. Manual `/compact` is admitted at any time only through task #13's custom
+    transaction. Native `/compact` through Agent SDK is never attempted or
+    accepted.
+15. Admission uses the fresh uncached client control response. A prior valid
+    `_last_ctx_usage` plus current zero/invalid usage rejects with zero query;
+    cache never authorizes a turn.
 
 ### Summary quality
 
@@ -629,7 +752,7 @@ Anthropic's “recall first, precision second” recommendation.[11]
 | Inactivity only | Uses current timer | Still compacts during day | Reject |
 | Window only | Simple | Can compact active night conversation | Reject |
 | Periodic minute poll | Easy restart behavior | Repeated usage calls and loop/thrash surface | Reject |
-| Fixed window + inactivity + single one-shot scheduler + native auto disabled | One policy, testable races, small state surface | Daytime hard-limit errors require manual recovery | **Recommend** |
+| Fixed window + inactivity + single one-shot scheduler + native auto disabled + absolute admission reserve | One automatic policy, measured custom-summary headroom, no unsupported slash path | Early daytime turns can be rejected; arbitrary multi-tool growth remains residual risk | **Recommend** |
 | Migrate to Messages API server-side compaction | Native pause/recent-message features | Replaces current OAuth Agent SDK/persistent-session architecture | Reject for this MVP |
 
 ## Affected files for a later plan
@@ -661,8 +784,9 @@ table is explicitly part of the minimal restart-safe design.
 ## Risks and counter-evidence
 
 - **Hard-limit availability:** no daytime automatic safety net means turns can
-  fail before night. This is an intentional requirement tradeoff; manual
-  `/compact` and a friendly error are required.[4]
+  be rejected before night once the measured reserve is reached. This is an
+  intentional requirement tradeoff; manual `/compact` remains safe because
+  the guard acts before the 80,000-token compact floor.
 - **Offline is inferred:** inactivity cannot prove the user is asleep. The AND
   policy reduces but cannot eliminate this uncertainty.
 - **Historical data is not freshly reproducible:** the raw database/extractor
@@ -686,8 +810,10 @@ table is explicitly part of the minimal restart-safe design.
 
 1. **CONFIRMED — daytime compact currently has three possible owners.** Direct
    code inspection plus official SDK lifecycle docs.
-2. **CONFIRMED — `DISABLE_AUTO_COMPACT=1` preserves manual `/compact`.**
-   Current official primary documentation and binary/package measurements.
+2. **CONFIRMED — `DISABLE_AUTO_COMPACT=1` disables native automatic compact;
+   REFUTED — Agent SDK `query("/compact")` provides a verified manual native
+   boundary.** Current official primary documentation plus exact-runtime
+   direct measurement.
 3. **CONFIRMED — current custom compact is session-transactional after task
    #13, but semantic omissions remain irreversible for active context.** Direct
    code inspection and official session behavior.
@@ -703,6 +829,9 @@ table is explicitly part of the minimal restart-safe design.
    multi-run fixture suite before implementation confidence becomes confirmed.
 8. **REFUTED — “91% assistant-last means zero information loss.”** That
    historical label does not measure handoff recall.
+9. **CONFIRMED — the accepted prompt needs 1,622 input tokens and the target
+   runtime declares 64,000 maximum output tokens.** Three exact-runtime direct
+   measurements; 80,000 tokens is the rounded 20%-margin compact floor.
 
 ## Sources
 

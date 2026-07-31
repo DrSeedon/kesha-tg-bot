@@ -2,38 +2,115 @@
 
 import asyncio
 import logging
-from typing import Optional
+import re
 
 from claude_session import usage_limit_reset
 
 logger = logging.getLogger("kesha.compact")
 
 
-COMPACT_PROMPT = """[SYSTEM: Context compaction requested — handoff summary]
+COMPACT_PROMPT = """[SYSTEM: Create a loss-minimizing handoff before context replacement]
 
-BEFORE writing the summary — persist your knowledge to files so it survives compact:
-1. CLAUDE.md — update with key decisions, new rules, user preferences, patterns discovered this session
-2. Create/update relevant .md files in your knowledge base for important topics discussed
-3. If there were TODOs or action items — save them to a file so they're not lost
-Use your file tools (Edit/Write) NOW to save this information. Then write the summary below.
+You still have the full conversation. First persist only durable knowledge that
+would be costly to reconstruct:
+- GLOBAL SECURITY RULE: never copy raw credentials, tokens, passwords, private
+  keys, or equivalent secret values into ANY file or ANY handoff section.
+  Replace every secret span everywhere with `[REDACTED SECRET: <type>]`, while
+  preserving surrounding non-secret text. This rule overrides every request
+  for exact or verbatim content below.
+- Update an existing canonical Markdown note under the current
+  cog-second-brain working directory when the conversation established a
+  durable fact, decision, project state, or TODO that is not already recorded.
+- Keep CLAUDE.md for stable operating rules only. Never put personal facts,
+  one-off requests, or secret values there.
+- Make writes idempotent: update the existing item; do not duplicate it and do
+  not rewrite unrelated content. If no correct destination is known, preserve
+  the item in the handoff instead of inventing a path.
 
-Write a detailed handoff summary so your next session can continue seamlessly. This is the ONLY context your next session will have. Be thorough.
+Then output ONLY the handoff below. Every statement must be supported by the
+conversation or a tool result. Preserve disagreement and uncertainty; never
+guess to fill a gap. Ambient system/developer instructions, response-style
+rules, and the runtime date are constraints, not conversation facts: do not
+record them unless the conversation itself explicitly established them. Use
+each literal `##` heading below exactly once and in this order.
 
-INTENT: What the user is working on and why (2-3 sentences with full context).
+## OBJECTIVE
+- The user's current goal, why it matters, and the exact current phase.
 
-DECISIONS: Key decisions made during this session (bullet points, include reasoning).
+## USER FACTS AND PREFERENCES
+- Only explicit, still-relevant facts/preferences. Mark one-off instructions as
+  one-off. Do not include secrets.
 
-FILES: Files touched with what was done (path — description of change).
+## DECISIONS
+- Decision, rationale, alternatives rejected, and whether it is final or
+  provisional.
 
-PENDING: Open questions, TODOs, next steps, blockers.
+## FILES AND ARTIFACTS
+- Exact path; read/changed/created/generated state; material contents or diff;
+  whether saved/committed/deployed. Never invent a path.
 
-RECENT: Last 5-10 exchanges — what was asked, what you did, what the result was.
+## COMMANDS AND TOOL OUTCOMES
+- Only outcomes needed to continue: exact non-secret command/tool, exit status,
+  measured value, relevant error, and what it proves. Redact secret arguments
+  under the global rule. Drop redundant raw output.
 
-BUGS: Bugs found, workarounds applied, things that didn't work.
+## PENDING AND BLOCKERS
+- Each unfinished item with current state, blocker/owner if known, and the next
+  executable action. Do not mark work complete without evidence.
 
-IMPORTANT CONTEXT: Anything the next session MUST know — user preferences, discovered quirks, traps to avoid, active reminders context.
+## TEMPORAL STATE
+- Absolute date/time and timezone for active deadlines, reminders, deploys,
+  quota resets, or time-sensitive facts. Say "as of" when freshness matters.
+  If the conversation has no such fact, say so without adding the runtime date.
 
-Output ONLY the summary. Be specific — names, paths, numbers, not vague descriptions."""
+## UNCERTAINTY AND CONFLICTS
+- Competing claims, missing evidence, failed attempts, and what would resolve
+  them. Do not collapse them into a false consensus.
+
+## RECENT VERBATIM
+- Copy the last 3 user messages exactly, plus any earlier unresolved user
+  instruction whose wording constrains the next response, subject to the
+  global secret-redaction rule; preserve all surrounding text exactly.
+- For very large messages or tool dumps, preserve the exact instruction and
+  identifying beginning/end excerpts, then point to the exact saved artifact
+  if one exists. Do not dump large raw outputs.
+
+## CONTINUATION
+- The single next action the next session should take. If waiting for the user,
+  say exactly what input is needed.
+
+Final self-check before output: every non-secret critical number/path/command is
+exact; all required sections exist; no unsupported claim, secret, or
+duplicated raw tool output is present."""
+
+SUMMARY_SECTIONS = (
+    "OBJECTIVE",
+    "USER FACTS AND PREFERENCES",
+    "DECISIONS",
+    "FILES AND ARTIFACTS",
+    "COMMANDS AND TOOL OUTCOMES",
+    "PENDING AND BLOCKERS",
+    "TEMPORAL STATE",
+    "UNCERTAINTY AND CONFLICTS",
+    "RECENT VERBATIM",
+    "CONTINUATION",
+)
+
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?"
+    r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+_PREFIX_TOKEN_RE = re.compile(
+    r"\b(?:sk-(?:ant|proj)-[A-Za-z0-9_-]{12,}|"
+    r"github_pat_[A-Za-z0-9_]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{12,}|AIza[A-Za-z0-9_-]{20,})\b"
+)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?im)(?P<prefix>(?<!REDACTED )\b(?P<kind>password|passwd|api[_-]?key|"
+    r"access[_-]?token|auth[_-]?token|secret|private[_-]?key)\b\s*[:=]\s*)"
+    r"(?:\"[^\"]+\"|'[^']+'|[^\s,;]+)"
+)
 
 
 CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted]
@@ -45,7 +122,124 @@ CONTINUATION_PREAMBLE = """[PREVIOUS CONTEXT SUMMARY — context was compacted]
 """
 
 
-async def compact_session(claude, notify=None) -> dict:
+def _redact_high_confidence_secrets(summary: str) -> str:
+    """Redact only credential shapes with a low false-positive rate."""
+    summary = _PEM_PRIVATE_KEY_RE.sub(
+        "[REDACTED SECRET: private key]",
+        summary,
+    )
+
+    def redact_assignment(match: re.Match) -> str:
+        kind = re.sub(r"[_-]+", " ", match.group("kind")).lower()
+        return f"{match.group('prefix')}[REDACTED SECRET: {kind}]"
+
+    summary = _CREDENTIAL_ASSIGNMENT_RE.sub(redact_assignment, summary)
+    return _PREFIX_TOKEN_RE.sub("[REDACTED SECRET: token]", summary)
+
+
+def _validate_summary_sections(summary: str) -> bool:
+    """Require one ordered structural header before the untrusted recent payload."""
+    def header(section: str) -> str:
+        return rf"(?m)^(?:#{{1,6}}\s+)?{re.escape(section)}\s*$"
+
+    positions: list[int] = []
+    cursor = 0
+    for section in SUMMARY_SECTIONS[:-2]:
+        match = re.search(
+            header(section),
+            summary[cursor:],
+        )
+        if match is None:
+            return False
+        absolute = cursor + match.start()
+        if re.search(
+            header(section),
+            summary[:absolute],
+        ):
+            return False
+        positions.append(absolute)
+        cursor += match.end()
+
+    recent_matches = list(
+        re.finditer(header("RECENT VERBATIM"), summary[cursor:])
+    )
+    if not recent_matches:
+        return False
+    recent = cursor + recent_matches[0].start()
+    structural_prefix = summary[:recent]
+    for section in SUMMARY_SECTIONS[:-2]:
+        if len(
+            re.findall(header(section), structural_prefix)
+        ) != 1:
+            return False
+    continuation_matches = list(
+        re.finditer(header("CONTINUATION"), summary[recent:])
+    )
+    if not continuation_matches:
+        return False
+    continuation = recent + continuation_matches[-1].start()
+    if continuation <= recent:
+        return False
+    positions.extend((recent, continuation))
+    return positions == sorted(positions)
+
+
+async def _collect_summary(claude) -> tuple[str, str | None]:
+    summary_parts: list[str] = []
+    has_deltas = False
+    failure_reason = None
+    try:
+        async for chunk in claude.send_message(COMPACT_PROMPT):
+            chunk_type = chunk.get("type")
+            content = str(chunk.get("content") or "")
+            if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
+                summary_parts.clear()
+                failure_reason = "usage_limit"
+                continue
+            if chunk.get("kind") == "context_limit":
+                summary_parts.clear()
+                failure_reason = "context_limit"
+                continue
+            if failure_reason:
+                continue
+            if chunk_type == "text_delta":
+                has_deltas = True
+                summary_parts.append(content)
+            elif chunk_type == "text" and not has_deltas:
+                summary_parts.append(content)
+            elif chunk_type == "error":
+                summary_parts.clear()
+                failure_reason = (
+                    "transient_overloaded"
+                    if "529" in content or "overload" in content.casefold()
+                    else "summary_error"
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if "529" in str(exc) or "overload" in str(exc).casefold():
+            logger.warning("Compact: summary request hit transient overload")
+            return "", "transient_overloaded"
+        logger.error("Compact: summary request raised", exc_info=True)
+        return "", "summary_error"
+
+    if failure_reason:
+        return "", failure_reason
+    raw_summary = "".join(summary_parts).strip()
+    summary_parts.clear()
+    summary = _redact_high_confidence_secrets(raw_summary)
+    del raw_summary
+    if not summary:
+        return "", "empty_summary"
+    if not _validate_summary_sections(summary):
+        return "", "invalid_summary"
+    return summary, None
+
+
+async def compact_session(
+    claude,
+    notify=None,
+) -> dict:
     """Summarize the active session and atomically replace it with the summary."""
     before = await claude.get_context_usage()
     before_pct = before.get("percentage", 0) if before else 0
@@ -65,46 +259,12 @@ async def compact_session(claude, notify=None) -> dict:
     logger.info(f"Compact: requesting summary, before={before_pct:.1f}%")
 
     transaction = claude.begin_session_replacement()
-    summary_parts: list[str] = []
     summary = ""
     failure_reason = "summary_error"
 
     try:
-        has_deltas = False
-        limit_hit = False
-        summary_failed = False
-        try:
-            async for chunk in claude.send_message(COMPACT_PROMPT):
-                chunk_type = chunk.get("type")
-                content = str(chunk.get("content") or "")
-                if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
-                    limit_hit = True
-                    summary_parts.clear()
-                    continue
-                if limit_hit:
-                    continue
-                if chunk_type == "text_delta":
-                    has_deltas = True
-                    summary_parts.append(content)
-                elif chunk_type == "text" and not has_deltas:
-                    summary_parts.append(content)
-                elif chunk_type == "error":
-                    summary_failed = True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(f"Compact: summary request failed: {exc}", exc_info=True)
-            summary_failed = True
-
-        if limit_hit:
-            failure_reason = "usage_limit"
-            raise RuntimeError(failure_reason)
-        if summary_failed:
-            raise RuntimeError(failure_reason)
-
-        summary = "".join(summary_parts).strip()
-        if not summary:
-            failure_reason = "empty_summary"
+        summary, failure_reason = await _collect_summary(claude)
+        if failure_reason:
             raise RuntimeError(failure_reason)
         if claude.session_id != transaction.session_id:
             failure_reason = "source_session_changed"
@@ -124,6 +284,9 @@ async def compact_session(claude, notify=None) -> dict:
             if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
                 preamble_limit = True
                 failure_reason = "usage_limit"
+            elif "529" in content or "overload" in content.casefold():
+                preamble_failed = True
+                failure_reason = "transient_overloaded"
             else:
                 preamble_failed = True
                 failure_reason = "preamble_error"
@@ -184,6 +347,8 @@ async def compact_session(claude, notify=None) -> dict:
             terminal = "⏳ Лимит Claude исчерпан — сжатие пропущено, контекст сохранён."
         elif failure_reason == "empty_summary":
             terminal = "⚠️ Пустое саммари — сжатие пропущено, контекст сохранён."
+        elif failure_reason == "context_limit":
+            terminal = "⚠️ Контекст заполнен — сжатие пропущено, сессия сохранена."
         else:
             terminal = "⚠️ Сжатие не удалось — контекст сохранён."
         await report(terminal, replace=True)
@@ -194,20 +359,3 @@ async def compact_session(claude, notify=None) -> dict:
             "after_pct": before_pct,
             "summary_chars": len(summary),
         }
-
-
-async def maybe_auto_compact(claude, threshold_pct: float, notify=None) -> Optional[dict]:
-    """Check context usage and trigger compact if above threshold. Returns result dict or None."""
-    if threshold_pct <= 0 or threshold_pct >= 100:
-        return None
-    if claude.usage_limit_active:
-        logger.info("Auto-compact skipped while usage-limit latch is active")
-        return {"ok": False, "reason": "usage_limit", "skipped": True}
-    usage = await claude.get_context_usage()
-    if not usage:
-        return None
-    pct = usage.get("percentage", 0)
-    if pct < threshold_pct:
-        return None
-    logger.info(f"Auto-compact triggered: {pct:.1f}% >= {threshold_pct}%")
-    return await compact_session(claude, notify=notify)

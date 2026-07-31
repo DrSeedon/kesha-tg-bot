@@ -27,6 +27,7 @@ from media import (
     media_count,
     transcribe,
 )
+from message_log import ActivityPersistenceError
 from telegram_io import (
     _send_safe,
     extract_caption_with_urls,
@@ -68,7 +69,7 @@ async def _deny_once(msg: types.Message):
         await _send_safe(msg, t(msg, "no_access", uid=uid))
 
 
-async def enqueue(msg: types.Message, prompt: str):
+async def enqueue(msg: types.Message, prompt: str, *, media=None):
     """Enqueue a user message into the ChatState pipeline."""
     chat_id = msg.chat.id
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
@@ -99,7 +100,26 @@ async def enqueue(msg: types.Message, prompt: str):
         source="user",
         reply_target=chat_id,
     )
-    await _registry.get(chat_id).accept_entry(entry)
+    try:
+        if media is None:
+            await _registry.get(chat_id).accept_entry(entry)
+        else:
+            state, generation, media_generation = media
+            await state.media_finished(entry, generation, media_generation)
+    except ActivityPersistenceError:
+        logger.error(f"Chat {chat_id}: activity admission failed")
+        await _send_safe(msg, t(msg, "activity_retry"))
+
+
+async def _start_media(msg: types.Message):
+    state = _registry.get(msg.chat.id)
+    try:
+        generation, media_generation = await state.media_started()
+    except ActivityPersistenceError:
+        logger.error(f"Chat {msg.chat.id}: media activity admission failed")
+        await _send_safe(msg, t(msg, "activity_retry"))
+        return None
+    return state, generation, media_generation
 
 
 # --- Command handlers ---
@@ -162,7 +182,11 @@ async def h_clear(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     cid = msg.chat.id
-    cleared = await _registry.get(cid).request_clear()
+    try:
+        cleared = await _registry.get(cid).request_clear()
+    except ActivityPersistenceError:
+        await _send_safe(msg, t(msg, "activity_retry"))
+        return
     if not cleared:
         await _send_safe(msg, t(msg, "clear_busy"))
         return
@@ -175,10 +199,17 @@ async def h_compact(msg: types.Message):
     cid = msg.chat.id
     cs = _registry.get(cid)
     if cs.is_busy:
-        await cs.request_compact()
+        try:
+            await cs.request_compact()
+        except ActivityPersistenceError:
+            await _send_safe(msg, t(msg, "activity_retry"))
+            return
         await _send_safe(msg, "⏳ Сейчас идёт обработка, сжатие запланировано после.")
         return
-    await cs.request_compact()
+    try:
+        await cs.request_compact()
+    except ActivityPersistenceError:
+        await _send_safe(msg, t(msg, "activity_retry"))
 
 
 async def h_ping(msg: types.Message):
@@ -249,17 +280,19 @@ async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     chat_id = msg.chat.id
-    cs = _registry.get(chat_id)
+    media = await _start_media(msg)
+    if media is None:
+        return
+    cs, gen, media_gen = media
     path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
     if not path:
-        await enqueue(msg, "[voice: файл слишком большой]")
+        await enqueue(msg, "[voice: файл слишком большой]", media=media)
         return
     from config import DEEPGRAM as _DG
     if not _DG:
-        await enqueue(msg, f"[voice: {path}]")
+        await enqueue(msg, f"[voice: {path}]", media=media)
         return
 
-    gen, media_gen = await cs.transcription_started()
     await _bot.send_chat_action(chat_id, ChatAction.TYPING)
     try:
         text, err = await transcribe(path, msg.voice.file_unique_id or "")
@@ -276,7 +309,7 @@ async def h_voice(msg: types.Message):
             prompt=full_prompt, message_id=msg.message_id, message=msg,
             source="user", reply_target=chat_id,
         )
-        await cs.transcription_finished(fallback_entry, gen, media_gen)
+        await cs.media_finished(fallback_entry, gen, media_gen)
         return
 
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[voice: {path} | {text}]"
@@ -287,13 +320,16 @@ async def h_voice(msg: types.Message):
         source="user",
         reply_target=chat_id,
     )
-    await cs.transcription_finished(entry, gen, media_gen)
+    await cs.media_finished(entry, gen, media_gen)
 
 
 @media_group_handler
 async def h_media_album(messages: list[types.Message]):
     if not allowed(messages[0].from_user.id):
         return await _deny_once(messages[0])
+    media = await _start_media(messages[0])
+    if media is None:
+        return
     parts = []
     for m in messages:
         if m.photo:
@@ -322,33 +358,38 @@ async def h_media_album(messages: list[types.Message]):
             break
     fwd = forward_meta(messages[0])
     media_block = "\n".join(parts)
-    await enqueue(messages[0], f"{fwd}{media_block}{caption}")
+    await enqueue(messages[0], f"{fwd}{media_block}{caption}", media=media)
 
 
 async def h_photo(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    media = await _start_media(msg)
+    if media is None:
+        return
     path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg), msg.photo[-1].file_unique_id)
     caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
-    await enqueue(msg, f"{tag}{caption}")
+    await enqueue(msg, f"{tag}{caption}", media=media)
 
 
 async def h_video_note(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     chat_id = msg.chat.id
-    cs = _registry.get(chat_id)
+    media = await _start_media(msg)
+    if media is None:
+        return
+    cs, gen, media_gen = media
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if not path:
-        await enqueue(msg, "[video_note: файл слишком большой]")
+        await enqueue(msg, "[video_note: файл слишком большой]", media=media)
         return
     from config import DEEPGRAM as _DG
     if not _DG:
-        await enqueue(msg, f"[video_note: {path}]")
+        await enqueue(msg, f"[video_note: {path}]", media=media)
         return
 
-    gen, media_gen = await cs.transcription_started()
     audio_path = path.replace(".mp4", ".oga")
     p = await asyncio.create_subprocess_exec(
         "ffmpeg", "-i", path, "-vn", "-acodec", "libopus", "-y", audio_path,
@@ -370,7 +411,7 @@ async def h_video_note(msg: types.Message):
                 source="user",
                 reply_target=chat_id,
             )
-            await cs.transcription_finished(entry, gen, media_gen)
+            await cs.media_finished(entry, gen, media_gen)
             return
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[video_note: {path}]"
     fallback_entry = PendingEntry(
@@ -380,18 +421,21 @@ async def h_video_note(msg: types.Message):
         source="user",
         reply_target=chat_id,
     )
-    await cs.transcription_finished(fallback_entry, gen, media_gen)
+    await cs.media_finished(fallback_entry, gen, media_gen)
 
 
 async def h_document(msg: types.Message):
     if not allowed(msg.from_user.id):
+        return
+    media = await _start_media(msg)
+    if media is None:
         return
     doc = msg.document
     ext = os.path.splitext(doc.file_name or "file")[1] or ".bin"
     path = await download_file(doc.file_id, doc.file_name or _media_name("doc", ext, msg), doc.file_unique_id)
     caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[document: {path} ({doc.file_name})]" if path else f"[document: файл слишком большой ({doc.file_name})]"
-    await enqueue(msg, f"{tag}{caption}")
+    await enqueue(msg, f"{tag}{caption}", media=media)
 
 
 async def h_sticker(msg: types.Message):
@@ -404,20 +448,26 @@ async def h_sticker(msg: types.Message):
 async def h_video(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    media = await _start_media(msg)
+    if media is None:
+        return
     path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg), msg.video.file_unique_id)
     caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
-    await enqueue(msg, f"{tag}{caption}")
+    await enqueue(msg, f"{tag}{caption}", media=media)
 
 
 async def h_audio(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    media = await _start_media(msg)
+    if media is None:
+        return
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
     name = msg.audio.file_name or _media_name("audio", ext, msg)
     path = await download_file(msg.audio.file_id, name, msg.audio.file_unique_id)
     tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
-    await enqueue(msg, tag)
+    await enqueue(msg, tag, media=media)
 
 
 async def h_text(msg: types.Message):
