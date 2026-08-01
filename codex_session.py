@@ -762,21 +762,48 @@ class CodexSession:
                 {"threadId": self.session_id},
                 timeout=COMPACT_TIMEOUT_SECONDS,
             )
-            # Compaction ends the same way a turn does; drain until it settles.
+            # Measured event order (docs/tasks/16/spikes/compact_events.txt):
+            # compact/start first INTERRUPTS any running turn, which emits its
+            # own turn/completed{status:interrupted}, and only then opens a
+            # SECOND turn carrying the contextCompaction item. Breaking on the
+            # first turn/completed therefore returns before compaction has
+            # begun — the bug this replaces.
+            compaction_item: str | None = None
             while True:
                 msg = await self._notifications.get()
                 method = msg.get("method") or ""
                 params = msg.get("params") or {}
+
                 if method == "thread/tokenUsage/updated":
                     self._absorb_usage(params.get("tokenUsage") or {})
                     continue
-                if method in ("turn/completed", "thread/compact/completed"):
-                    break
                 if method == "_process/exited":
                     raise RuntimeError("Codex app-server exited during compact")
+
+                item = params.get("item") or {}
+                if item.get("type") == "contextCompaction":
+                    if method == "item/started":
+                        compaction_item = str(item.get("id") or "")
+                        continue
+                    if method == "item/completed":
+                        break
+                # A turn/completed only ends the wait once the compaction item
+                # has actually finished; the interrupt's own completion and the
+                # compaction turn's opening are both passed over.
+                if method == "turn/completed" and compaction_item is None:
+                    if (params.get("turn") or {}).get("status") == "interrupted":
+                        continue
+                if method == "thread/compact/completed":
+                    break
+
+        # Context size is only knowable from the NEXT turn's inputTokens: the
+        # usage notifications during compaction still carry the pre-compaction
+        # totals, so this deliberately reports what is known rather than
+        # inventing a post-compaction figure.
         return {
             "context_tokens": self._context_tokens,
             "max_tokens": self._context_window,
+            "measured_after": False,
         }
 
     # ---------- lifecycle ----------

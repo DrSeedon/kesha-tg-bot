@@ -1,0 +1,18 @@
+last usage before compact: {"totalTokens": 18844, "inputTokens": 18780, "cachedInputTokens": 18176, "cacheWriteInputTokens": 0, "outputTokens": 64, "reasoningOutputTokens": 0}
+
+--- thread/compact/start ---
+immediate result: {}
+
+events after compact request:
+  thread/tokenUsage/updated: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turnId": "019fbd0b-566d-7890-bd76-01eb5aa34fa7", "tokenUsage": {"total": {"totalTokens": 37393, "inputTokens": 37232, "cachedInputTokens": 29184, "cacheWriteInputToke
+  account/rateLimits/updated: {"rateLimits": {"limitId": "codex", "limitName": null, "primary": {"usedPercent": 98, "windowDurationMins": 10080, "resetsAt": 1786168425}, "secondary": null, "credits": {"hasCredits": false, "unlimited": false, "balance
+  thread/status/changed: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "status": {"type": "idle"}}
+  turn/completed: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turn": {"id": "019fbd0b-566d-7890-bd76-01eb5aa34fa7", "items": [], "itemsView": "notLoaded", "status": "interrupted", "error": null, "startedAt": 1785583064, "complet
+  thread/status/changed: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "status": {"type": "active", "activeFlags": []}}
+  turn/started: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turn": {"id": "019fbd0b-5a58-7a50-817a-088113368377", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": null, "startedAt": 1785583065, "complete
+  item/started: {"item": {"type": "contextCompaction", "id": "019fbd0b-5a6b-7ac2-87b7-82a2d9f649e1"}, "threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turnId": "019fbd0b-5a58-7a50-817a-088113368377", "startedAtMs": 1785583065707}
+  thread/tokenUsage/updated: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turnId": "019fbd0b-5a58-7a50-817a-088113368377", "tokenUsage": {"total": {"totalTokens": 37393, "inputTokens": 37232, "cachedInputTokens": 29184, "cacheWriteInputToke
+  account/rateLimits/updated: {"rateLimits": {"limitId": "codex", "limitName": null, "primary": {"usedPercent": 98, "windowDurationMins": 10080, "resetsAt": 1786168425}, "secondary": null, "credits": {"hasCredits": false, "unlimited": false, "balance
+  item/completed: {"item": {"type": "contextCompaction", "id": "019fbd0b-5a6b-7ac2-87b7-82a2d9f649e1"}, "threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turnId": "019fbd0b-5a58-7a50-817a-088113368377", "completedAtMs": 1785583076079}
+  thread/status/changed: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "status": {"type": "idle"}}
+  turn/completed: {"threadId": "019fbd0b-0b83-78d1-96be-2bfb382dac47", "turn": {"id": "019fbd0b-5a58-7a50-817a-088113368377", "items": [], "itemsView": "notLoaded", "status": "completed", "error": null, "startedAt": 1785583065, "completed

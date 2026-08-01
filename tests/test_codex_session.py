@@ -445,6 +445,68 @@ async def _collect(agen):
     return [chunk async for chunk in agen]
 
 
+def test_compact_waits_past_the_interrupt_for_the_real_compaction(tmp_path):
+    """compact/start interrupts the running turn BEFORE compacting.
+
+    Measured order (docs/tasks/16/spikes/compact_events.txt): an interrupted
+    turn/completed arrives first, then a second turn carrying the
+    contextCompaction item. Returning on the first turn/completed would report
+    success before compaction had begun — which is exactly what it did, and
+    why a live thread's context never shrank.
+    """
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()  # is_alive without a real process
+    order: list[str] = []
+
+    async def fake_request(method, params, **kwargs):
+        order.append(method)
+        for event in (
+            # the interrupt of the in-flight turn
+            {"method": "turn/completed", "params": {
+                "turnId": "T1", "turn": {"id": "T1", "status": "interrupted"}}},
+            # the compaction turn
+            {"method": "turn/started", "params": {"turnId": "T2"}},
+            {"method": "item/started", "params": {
+                "turnId": "T2", "item": {"type": "contextCompaction", "id": "c1"}}},
+            {"method": "item/completed", "params": {
+                "turnId": "T2", "item": {"type": "contextCompaction", "id": "c1"}}},
+        ):
+            session._notifications.put_nowait(event)
+        return {}
+
+    session._request = fake_request
+    result = asyncio.run(session.compact_context())
+
+    assert order == ["thread/compact/start"]
+    assert result["max_tokens"] == DEFAULT_CONTEXT_WINDOW
+    # The queue must be drained through the compaction item, not abandoned at
+    # the interrupt — anything left would bleed into the next turn.
+    assert session._notifications.qsize() == 0
+
+
+def test_compact_does_not_claim_a_post_compaction_measurement(tmp_path):
+    """Usage during compaction still reports pre-compaction totals.
+
+    Reporting them as the new context size would be the same lie the dashboard
+    told in Orchestra (aggregate usage rendered as current context).
+    """
+    session = make_session(tmp_path)
+    session.session_id = "t"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+
+    async def fake_request(method, params, **kwargs):
+        session._notifications.put_nowait({"method": "item/completed", "params": {
+            "item": {"type": "contextCompaction", "id": "c1"}}})
+        return {}
+
+    session._request = fake_request
+    result = asyncio.run(session.compact_context())
+    assert result["measured_after"] is False
+
+
 def test_process_exit_ends_the_stream(tmp_path):
     session = make_session(tmp_path)
     chunks = asyncio.run(drive(session, [{"method": "_process/exited", "params": {}}]))

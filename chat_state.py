@@ -675,6 +675,19 @@ class ChatState:
         self._cancel_auto_compact()
         if self._shutdown or not self.session.session_id:
             return
+        if self._native_compact:
+            # The preventive timer (#14) fires after 55 min idle to compact
+            # while the prompt cache is still warm — calibrated against Claude's
+            # 60-minute cache TTL. Codex's TTL is ~30 min with a 10x cold
+            # penalty, and precompacting there DESTROYS the cache key
+            # (measured in Orchestra, docs: "precompact only for Claude"), so
+            # the timer would pay the cost and get none of the benefit.
+            # Disabled deliberately, not by omission; manual /compact still works.
+            logger.debug(
+                f"Chat {self.chat_id}: preventive compact timer off "
+                f"({self.runtime_id} compacts natively)"
+            )
+            return
         try:
             row = self._activity_store.get_activity(self.chat_id)
         except Exception as exc:
@@ -979,6 +992,60 @@ class ChatState:
 
         return notify
 
+    @property
+    def _native_compact(self) -> bool:
+        """Does this runtime compact itself?
+
+        Declared by the backend, not inferred from its name — a runtime that
+        lies here fails at construction (runtime_registry checks capabilities
+        against the registry).
+        """
+        caps = getattr(type(self.session), "CAPABILITIES", None)
+        return bool(getattr(caps, "native_compact", False))
+
+    async def _do_native_compact(self) -> dict:
+        """Compaction owned by the runtime (Codex `thread/compact/start`).
+
+        Kesha's own transaction is Claude-only by design: it asks the model for
+        a summary, screens that text for garbage and atomically swaps the
+        session. None of that is possible here — Codex compacts internally and
+        hands back no summary text to inspect, and the thread id survives, so
+        there is nothing to replace.
+        """
+        notify = self._make_compact_notifier()
+        before = await self.session.get_context_usage()
+        before_pct = (before or {}).get("percentage", 0) or 0
+        await notify(
+            STRINGS["ru"]["compact_native_start"].format(
+                runtime=self.runtime_id, before=before_pct
+            ),
+            replace=True,
+        )
+        try:
+            result = await self.session.compact_context()
+        except Exception as exc:
+            logger.error(f"Chat {self.chat_id}: native compact failed: {exc}")
+            await notify(
+                STRINGS["ru"]["compact_native_failed"].format(error=str(exc)[:200]),
+                replace=True,
+            )
+            return {"ok": False, "reason": "native_compact_failed"}
+
+        after = await self.session.get_context_usage()
+        after_pct = (after or {}).get("percentage", 0) or 0
+        tokens = (result or {}).get("context_tokens")
+        await notify(
+            STRINGS["ru"]["compact_native_done"].format(
+                runtime=self.runtime_id,
+                before=before_pct,
+                after=after_pct,
+                tokens=tokens if tokens is not None else "?",
+            ),
+            replace=True,
+        )
+        return {"ok": True, "before_pct": before_pct, "after_pct": after_pct,
+                "native": True}
+
     async def _do_compact(self, automatic: bool = False) -> None:
         """Execute one custom compact request outside the state lock."""
         result = None
@@ -1013,10 +1080,13 @@ class ChatState:
                         parse_mode=None,
                     )
                     return
-            result = await self._compact_session_fn(
-                self.session,
-                notify=self._make_compact_notifier(),
-            )
+            if self._native_compact:
+                result = await self._do_native_compact()
+            else:
+                result = await self._compact_session_fn(
+                    self.session,
+                    notify=self._make_compact_notifier(),
+                )
             if result and result.get("ok"):
                 async with self._lock:
                     self._context_reserve_blocked = False
