@@ -3,7 +3,9 @@
 import asyncio
 import contextlib
 import json
-import time
+import math
+import re
+from time import monotonic
 from typing import Optional
 
 from aiogram import types
@@ -22,10 +24,62 @@ from telegram_io import (
 )
 from tool_status import ToolStatusTracker
 
-STREAM_EDIT_INTERVAL = 1.0  # TG edit limit ~20/min → 1s safe minimum
+CHAT_EDIT_INTERVAL = 3.1  # keep all live bubbles below Telegram's ~20 edits/min ceiling
+STREAM_FLOOD_SEND_INTERVAL = 3.0
 
 _bot = None
 _registry = None
+
+
+def _retry_after(error: Exception) -> Optional[int]:
+    retry_after = getattr(error, "retry_after", None)
+    if retry_after is not None:
+        return int(retry_after)
+    err = str(error)
+    if "Flood control" not in err and "retry after" not in err.lower():
+        return None
+    match = re.search(r"retry after (\d+)", err, re.IGNORECASE)
+    return int(match.group(1)) if match else 30
+
+
+class _ChatEditBudgetBot:
+    def __init__(self, bot):
+        self._bot = bot
+        self._lock = asyncio.Lock()
+        self._next_edit_at = 0.0
+        self.flood_until = 0.0
+
+    def edit_ready(self, now: float) -> bool:
+        return (
+            not self._lock.locked()
+            and now >= self._next_edit_at
+            and now >= self.flood_until
+        )
+
+    async def send_message(self, *args, **kwargs):
+        return await self._bot.send_message(*args, **kwargs)
+
+    async def delete_message(self, *args, **kwargs):
+        return await self._bot.delete_message(*args, **kwargs)
+
+    async def edit_message_text(self, *args, **kwargs):
+        async with self._lock:
+            now = monotonic()
+            if now < self.flood_until:
+                wait = max(1, math.ceil(self.flood_until - now))
+                raise RuntimeError(f"Flood control active, retry after {wait}")
+            delay = self._next_edit_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+                now = monotonic()
+            self._next_edit_at = now + CHAT_EDIT_INTERVAL
+            try:
+                return await self._bot.edit_message_text(*args, **kwargs)
+            except Exception as e:
+                wait = _retry_after(e)
+                if wait is not None:
+                    self.flood_until = now + wait + 1
+                raise
 
 
 def set_bot(bot_instance) -> None:
@@ -71,13 +125,13 @@ async def _stop_typer(typer: asyncio.Task) -> None:
 
 async def _ask_inner(message, prompt, cid, typer):
     retries = 0
+    edit_bot = _ChatEditBudgetBot(_bot)
 
     parts: list[str] = []
     has_deltas = False
     current_msg_id: Optional[int] = None  # ID of the live message being edited
     last_edit_time = 0.0
     last_edit_text = ""
-    edit_flood_until = 0.0
     finalized: list[int] = []
     terminal_handled = False
 
@@ -88,49 +142,73 @@ async def _ask_inner(message, prompt, cid, typer):
             return await message.answer(text, **kwargs)
         return await _bot.send_message(cid, text, **kwargs)
 
+    async def _replace_live_message(text: str, now: float, **kwargs) -> bool:
+        nonlocal current_msg_id, last_edit_time, last_edit_text
+        old_msg_id = current_msg_id
+        visible_text = text[:TG_MSG_LIMIT]
+        last_edit_time = now
+        try:
+            m = await _answer(visible_text, **kwargs)
+        except Exception as e:
+            logger.debug(f"Flood fallback send failed: {e}")
+            return False
+        if not m:
+            return False
+        current_msg_id = m.message_id
+        last_edit_text = visible_text
+        if old_msg_id is not None and old_msg_id != current_msg_id:
+            try:
+                await _bot.delete_message(cid, old_msg_id)
+            except Exception as e:
+                logger.debug(f"Flood fallback cleanup failed: {e}")
+        return True
+
     async def _edit_update():
-        nonlocal current_msg_id, last_edit_time, last_edit_text, edit_flood_until
+        nonlocal current_msg_id, last_edit_time, last_edit_text
         text = "".join(parts)
         if not text:
             return
-        now = time.time()
+        visible_text = text[:TG_MSG_LIMIT]
+        now = monotonic()
 
         # First chunk — send immediately without throttle
         if current_msg_id is None:
             try:
-                m = await _answer(text[:TG_MSG_LIMIT], parse_mode=None)
+                m = await _answer(visible_text, parse_mode=None)
                 if m:
                     current_msg_id = m.message_id
-                    last_edit_text = text
+                    last_edit_text = visible_text
                     last_edit_time = now
             except Exception as e:
                 logger.debug(f"Edit stream: initial send failed: {e}")
             return
 
         # Subsequent edits — apply throttle and flood control
-        if now < edit_flood_until:
+        if now < edit_bot.flood_until:
+            if (
+                (now - last_edit_time) >= STREAM_FLOOD_SEND_INTERVAL
+                and visible_text != last_edit_text
+            ):
+                await _replace_live_message(text, now, parse_mode=None)
             return
-        if (now - last_edit_time) < STREAM_EDIT_INTERVAL:
+        if not edit_bot.edit_ready(now):
             return
-        if text == last_edit_text:
+        if visible_text == last_edit_text:
             return
 
         try:
-            await _bot.edit_message_text(
-                text[:TG_MSG_LIMIT], chat_id=cid, message_id=current_msg_id, parse_mode=None
+            await edit_bot.edit_message_text(
+                visible_text, chat_id=cid, message_id=current_msg_id, parse_mode=None
             )
-            last_edit_text = text
+            last_edit_text = visible_text
             last_edit_time = now
         except Exception as e:
-            err = str(e)
-            if "Flood control" in err or "retry after" in err.lower():
-                import re
-                m = re.search(r'retry after (\d+)', err, re.IGNORECASE)
-                wait_sec = int(m.group(1)) if m else 30
-                edit_flood_until = now + wait_sec + 1
-                logger.info(f"Edit flood control, pausing updates for {wait_sec}s")
-            elif "message is not modified" in err:
-                last_edit_text = text
+            wait_sec = _retry_after(e)
+            if wait_sec is not None:
+                logger.info(f"Edit flood control, using send fallback for {wait_sec}s")
+                await _replace_live_message(text, now, parse_mode=None)
+            elif "message is not modified" in str(e):
+                last_edit_text = visible_text
                 last_edit_time = now
             else:
                 logger.debug(f"Edit update error: {e}")
@@ -155,10 +233,22 @@ async def _ask_inner(message, prompt, cid, typer):
             ent_dicts = [e.to_dict() for e in chunk_ents] if chunk_ents else None
 
             if i == 0 and current_msg_id is not None:
+                if chunk_text == last_edit_text and not ent_dicts:
+                    finalized.append(current_msg_id)
+                    continue
+                if monotonic() < edit_bot.flood_until:
+                    if await _replace_live_message(
+                        chunk_text,
+                        monotonic(),
+                        parse_mode=None,
+                        entities=ent_dicts,
+                    ):
+                        finalized.append(current_msg_id)
+                        continue
                 # Final edit of the live message
                 for attempt in range(3):
                     try:
-                        await _bot.edit_message_text(
+                        await edit_bot.edit_message_text(
                             chunk_text, chat_id=cid, message_id=current_msg_id,
                             parse_mode=None, entities=ent_dicts
                         )
@@ -233,7 +323,7 @@ async def _ask_inner(message, prompt, cid, typer):
         delivered = False
         if current_msg_id is not None:
             try:
-                await _bot.edit_message_text(
+                await edit_bot.edit_message_text(
                     notice, chat_id=cid, message_id=current_msg_id, parse_mode=None
                 )
                 finalized.append(current_msg_id)
@@ -280,7 +370,7 @@ async def _ask_inner(message, prompt, cid, typer):
         delivered = False
         if current_msg_id is not None:
             try:
-                await _bot.edit_message_text(
+                await edit_bot.edit_message_text(
                     notice, chat_id=cid, message_id=current_msg_id, parse_mode=None
                 )
                 finalized.append(current_msg_id)
@@ -399,7 +489,7 @@ async def _ask_inner(message, prompt, cid, typer):
                     if parts:
                         await _finalize_text_block()
                     if status is None:
-                        status = ToolStatusTracker(_bot, message, cid)
+                        status = ToolStatusTracker(edit_bot, message, cid)
                     try:
                         _ti_short = json.dumps(tool_input, ensure_ascii=False)[:400]
                     except Exception:
