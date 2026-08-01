@@ -134,3 +134,69 @@ def test_issue_session_is_unforgeable():
     b = issue_session(1001)
     assert a != b, "sessions must not be guessable from the chat id"
     assert str(1001) not in a
+
+
+# --- Session lifetime: a handle reaches the model, so it must not be immortal ---
+
+
+@pytest.mark.asyncio
+async def test_live_session_is_accepted(bridge):
+    resp = await _call(bridge, "whoami", {}, session=issue_session(1001))
+    assert resp.status == 200
+    assert _body(resp)["result"]["chat"] == 1001
+
+
+@pytest.mark.asyncio
+async def test_expired_session_is_rejected(bridge):
+    """Model transcripts flow into RAG; an eternal handle would be indexed."""
+    from tool_bridge import issue_session as issue
+
+    handle = issue(1001, ttl=-1)
+    resp = await _call(bridge, "whoami", {}, session=handle)
+    assert resp.status == 401
+    assert bridge.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_revoked_session_is_rejected(bridge):
+    from tool_bridge import revoke_session
+
+    handle = issue_session(1001)
+    revoke_session(handle)
+    resp = await _call(bridge, "whoami", {}, session=handle)
+    assert resp.status == 401
+    assert bridge.delivered == []
+
+
+def test_expired_handles_are_purged_not_just_hidden():
+    """Rejecting on read is not enough — the dict must not grow forever.
+
+    Every issue() purges first, so expired handles never accumulate: 500 dead
+    sessions collapse to the one live handle instead of growing without bound
+    (measured before TTL: 40 -> 1040 entries).
+    """
+    from tool_bridge import _SESSIONS, issue_session as issue
+
+    _SESSIONS.clear()
+    for _ in range(500):
+        issue(1001, ttl=-1)
+    assert len(_SESSIONS) <= 1, "expired sessions accumulated"
+
+    live = issue(1001)
+    assert live in _SESSIONS
+    assert len(_SESSIONS) == 1
+
+
+def test_session_chat_drops_expired_entry():
+    from tool_bridge import _SESSIONS, session_chat, issue_session as issue
+
+    _SESSIONS.clear()
+    handle = issue(1001, ttl=-1)
+    assert session_chat(handle) is None
+    assert handle not in _SESSIONS
+
+
+def test_default_ttl_is_bounded():
+    from tool_bridge import SESSION_TTL_SECONDS
+
+    assert 0 < SESSION_TTL_SECONDS <= 3600

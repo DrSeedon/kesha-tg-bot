@@ -23,6 +23,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -37,12 +38,17 @@ TOKEN_ENV = "KESHA_BRIDGE_TOKEN"
 _TOKEN_HEADER = "X-Kesha-Bridge-Token"
 _SESSION_HEADER = "X-Kesha-Bridge-Session"
 
-# Server-issued session -> chat it acts on. The caller receives an opaque handle
-# and cannot derive or forge another chat's session from it.
-_SESSIONS: dict[str, int] = {}
+# Server-issued session -> (chat it acts on, expiry). The caller receives an
+# opaque handle and cannot derive or forge another chat's session from it.
+_SESSIONS: dict[str, tuple[int, float]] = {}
+
+# A handle reaches the model: Codex sees the headers of its own requests, and
+# model history flows into RAG and compact summaries. An immortal handle in the
+# transcript is therefore an immortal handle in a search index — so they expire.
+SESSION_TTL_SECONDS = 3600
 
 
-def issue_session(chat_id: int) -> str:
+def issue_session(chat_id: int, ttl: float = SESSION_TTL_SECONDS) -> str:
     """Bind a fresh opaque session handle to a chat, server-side.
 
     Addressing must ride the transport, not a process global: with two users a
@@ -50,17 +56,33 @@ def issue_session(chat_id: int) -> str:
     handle is random so the caller cannot construct a session for a chat it was
     not given.
     """
+    _purge_expired()
     handle = secrets.token_urlsafe(24)
-    _SESSIONS[handle] = chat_id
+    _SESSIONS[handle] = (chat_id, time.monotonic() + ttl)
     return handle
 
 
 def revoke_session(handle: str) -> None:
+    """Drop a handle immediately — called when a turn finishes."""
     _SESSIONS.pop(handle, None)
 
 
+def _purge_expired() -> None:
+    now = time.monotonic()
+    for handle in [h for h, (_, exp) in _SESSIONS.items() if exp <= now]:
+        del _SESSIONS[handle]
+
+
 def session_chat(handle: str) -> int | None:
-    return _SESSIONS.get(handle)
+    entry = _SESSIONS.get(handle)
+    if entry is None:
+        return None
+    chat_id, expires_at = entry
+    if expires_at <= time.monotonic():
+        del _SESSIONS[handle]
+        logger.info("bridge: session expired")
+        return None
+    return chat_id
 
 ToolHandler = Callable[[dict], Awaitable[dict]]
 
