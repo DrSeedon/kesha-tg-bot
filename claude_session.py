@@ -250,6 +250,8 @@ class ClaudeSession:
             permission_mode="default",
             can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
+            thinking={"type": "adaptive"},
+            effort="high",
             env={"DISABLE_AUTO_COMPACT": "1"},
         )
         if self.system_prompt:
