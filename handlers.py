@@ -212,6 +212,83 @@ async def h_compact(msg: types.Message):
         await _send_safe(msg, t(msg, "activity_retry"))
 
 
+async def h_runtime(msg: types.Message):
+    """Show or switch the chat's runtime. Everyone in ALLOWED may use it.
+
+    Deliberately not owner-gated: the project has no owner concept, only
+    ALLOWED, and adding a second authorization class for one command would be a
+    new way to do access control. The shared-budget concern is answered by
+    visibility instead — every switch announces itself in the chat.
+    """
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+
+    cs = _registry.get(msg.chat.id)
+    available = list_runtimes()
+    target = (msg.text or "").split(maxsplit=1)
+    argument = target[1].strip().lower() if len(target) > 1 else ""
+
+    if not argument:
+        quota = await _runtime_quota_line(msg, cs)
+        other = next((r for r in available if r != cs.runtime_id), cs.runtime_id)
+        await _send_safe(msg, t(
+            msg, "runtime_status",
+            current=cs.runtime_id,
+            model=getattr(cs.session, "model", "?"),
+            available=", ".join(available),
+            quota=quota,
+            other=other,
+        ))
+        return
+
+    result = await cs.switch_runtime(argument)
+    if result["ok"]:
+        handoff = t(msg, "runtime_handoff_ok" if result.get("handoff")
+                    else "runtime_handoff_none")
+        await _send_safe(msg, t(
+            msg, "runtime_switched",
+            previous=result["previous"],
+            current=result["runtime"],
+            model=result.get("model") or "?",
+            handoff=handoff,
+        ))
+        return
+
+    reason = result.get("reason")
+    if reason == "same":
+        await _send_safe(msg, t(msg, "runtime_same", current=cs.runtime_id))
+    elif reason == "unknown":
+        await _send_safe(msg, t(msg, "runtime_unknown", runtime=argument,
+                                available=", ".join(available)))
+    elif reason == "busy":
+        await _send_safe(msg, t(msg, "runtime_busy"))
+    else:
+        await _send_safe(msg, t(
+            msg, "runtime_failed",
+            runtime=argument,
+            error=str(result.get("error") or reason)[:300],
+            fallback=result.get("fallback") or cs.runtime_id,
+        ))
+
+
+async def _runtime_quota_line(msg: types.Message, cs) -> str:
+    """Render the runtime's quota, refreshing it when the backend can."""
+    reader = getattr(cs.session, "read_quota", None)
+    if callable(reader) and not cs.is_busy:
+        try:
+            await asyncio.wait_for(reader(), timeout=30)
+        except Exception as exc:
+            logger.debug(f"quota refresh failed: {exc}")
+    summary = getattr(cs.session, "quota_summary", None)
+    data = summary() if callable(summary) else None
+    if not data:
+        return t(msg, "runtime_quota_unknown")
+    return t(msg, "runtime_quota",
+             used=data.get("used_percent"),
+             reset=data.get("resets_human") or "?")
+
+
 async def h_ping(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
@@ -494,6 +571,7 @@ COMMANDS_RU = [
     BotCommand(command="status", description="Подробный статус"),
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
+    BotCommand(command="runtime", description="Рантайм и лимит (Claude/Codex)"),
     BotCommand(command="ping", description="Проверить сессию"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
@@ -506,6 +584,7 @@ COMMANDS_EN = [
     BotCommand(command="status", description="Detailed status"),
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
+    BotCommand(command="runtime", description="Runtime and quota (Claude/Codex)"),
     BotCommand(command="ping", description="Check session"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
@@ -554,6 +633,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_status, Command("status"))
     dp.message.register(h_clear, Command("clear"))
     dp.message.register(h_compact, Command("compact"))
+    dp.message.register(h_runtime, Command("runtime"))
     dp.message.register(h_ping, Command("ping"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))

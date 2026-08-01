@@ -722,6 +722,33 @@ class CodexSession:
                 return self._last_ctx_usage
         return self._last_ctx_usage
 
+    async def read_quota(self) -> Optional[dict]:
+        """Ask the app-server for the current subscription limits.
+
+        Cheap and side-effect free, so it doubles as the readiness probe when
+        switching runtimes: a process that starts but cannot answer this is not
+        actually usable, and announcing a switch to it would strand the user.
+        """
+        await self._connect()
+        limits = await self._request("account/rateLimits/read", {}, timeout=30)
+        rate = limits.get("rateLimits") or limits
+        if rate:
+            self._absorb_rate_limits(rate)
+        return rate or None
+
+    def quota_summary(self) -> Optional[dict]:
+        """Normalized quota view: percent used and when it resets."""
+        primary = (self.rate_limit or {}).get("primary") or {}
+        used = primary.get("usedPercent")
+        if used is None:
+            return None
+        return {
+            "used_percent": used,
+            "resets_at": primary.get("resetsAt"),
+            "resets_human": _format_reset(primary.get("resetsAt")),
+            "plan": (self.rate_limit or {}).get("planType"),
+        }
+
     async def compact_context(self) -> dict:
         """Native Codex compaction — keeps the thread id."""
         await self._connect()

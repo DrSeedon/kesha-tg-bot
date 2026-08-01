@@ -14,6 +14,7 @@ from config import (
     AUTO_COMPACT_TZ,
     AUTO_COMPACT_WINDOW_END,
     AUTO_COMPACT_WINDOW_START,
+    RUNTIME_MODELS,
     STRINGS,
     t as _t_cfg,
 )
@@ -27,6 +28,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("kesha")
 
 TRANSCRIPTION_WAIT_MAX = 30  # seconds to wait for pending transcriptions before proceeding
+
+# Runtime handoff budget. Bounded so a switch cannot blow the new runtime's
+# context before the user's first real message reaches it.
+HANDOFF_MESSAGE_LIMIT = 40
+HANDOFF_MESSAGE_CHARS = 2_000
+HANDOFF_MAX_CHARS = 24_000
 
 
 def _utc_now() -> datetime:
@@ -98,6 +105,8 @@ class ChatState:
         compact_session_fn,   # async compact_session(session, notify) -> dict
         activity_store: "MessageLog",
         work_dir: str,
+        runtime_id: str = "claude",
+        build_runtime_fn=None,
     ):
         self.chat_id = chat_id
         self.session = session
@@ -128,6 +137,8 @@ class ChatState:
         self._context_reserve_blocked: bool = False
         self._lock = asyncio.Lock()
         self._shutdown: bool = False
+        self.runtime_id: str = runtime_id
+        self._build_runtime = build_runtime_fn
 
     @property
     def is_busy(self) -> bool:
@@ -291,6 +302,197 @@ class ChatState:
         except ActivityPersistenceError as exc:
             logger.error(f"Chat {self.chat_id}: clear completion persistence failed: {exc}")
         return True
+
+    async def switch_runtime(self, target: str) -> dict:
+        """Swap the chat's backend, keeping the old one alive until the new one proves usable.
+
+        Returns a result dict the caller renders into chat. Never silent: every
+        branch reports what happened, because a failover the user cannot see is
+        indistinguishable from a broken bot.
+
+        Ordering is deliberate — build and PROBE the replacement first, and only
+        then retire the incumbent. A process that starts but cannot answer a
+        cheap request is not usable, and announcing a switch to it would strand
+        the next message.
+        """
+        if target == self.runtime_id:
+            return {"ok": False, "reason": "same", "runtime": target}
+
+        try:
+            from runtime_registry import get_runtime
+            get_runtime(target)
+        except ValueError as exc:
+            return {"ok": False, "reason": "unknown", "runtime": target, "error": str(exc)}
+
+        # Gate on phase: tearing down a live turn is exactly how "normal Kesha"
+        # breaks — it would strand a half-streamed answer and a pending reply.
+        async with self._lock:
+            if self._shutdown:
+                return {"ok": False, "reason": "shutdown", "runtime": target}
+            if self.phase is not ChatPhase.IDLE:
+                return {"ok": False, "reason": "busy", "phase": str(self.phase),
+                        "runtime": target}
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+                self._debounce_task = None
+            previous_phase = self.phase
+            self.phase = ChatPhase.PROCESSING  # hold the chat while we swap
+            logger.info(
+                f"Chat {self.chat_id}: phase {previous_phase} → {self.phase} "
+                f"[switch_runtime → {target}]"
+            )
+
+        old_session = self.session
+        old_runtime = self.runtime_id
+        handoff_note = None
+        new_session = None
+        try:
+            if not self._build_runtime:
+                raise RuntimeError("runtime switching is not wired for this chat")
+            new_session = self._build_runtime(target, self.chat_id)
+
+            probe = await self._probe_runtime(new_session)
+            if not probe["ok"]:
+                raise RuntimeError(probe.get("error") or "runtime did not respond")
+
+            handoff_note = await self._deliver_handoff(new_session)
+
+            self.session = new_session
+            self.runtime_id = target
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Stay on the incumbent. It was never disconnected, so the chat
+            # keeps working; the user is told why the switch did not happen.
+            logger.error(f"Chat {self.chat_id}: switch to {target} failed: {exc}")
+            if new_session is not None:
+                try:
+                    await new_session.safe_disconnect()
+                except Exception:
+                    pass
+            async with self._lock:
+                self.phase = ChatPhase.IDLE
+            await self._drain_or_idle(record_activity=False)
+            return {"ok": False, "reason": "unavailable", "runtime": target,
+                    "fallback": old_runtime, "error": str(exc)}
+
+        # The replacement is live. Retire the incumbent without losing its
+        # session id, so switching back keeps that runtime's own history.
+        try:
+            await old_session.safe_disconnect()
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: old runtime disconnect: {exc}")
+
+        self._context_reserve_blocked = False
+        async with self._lock:
+            self.phase = ChatPhase.IDLE
+        # Anything that arrived during the swap (a reminder, a queued message)
+        # is drained here rather than dropped.
+        await self._drain_or_idle(record_activity=False)
+
+        return {
+            "ok": True,
+            "runtime": target,
+            "previous": old_runtime,
+            "model": getattr(new_session, "model", ""),
+            "handoff": handoff_note,
+            "quota": self._quota_of(new_session),
+        }
+
+    @staticmethod
+    async def _probe_runtime(session) -> dict:
+        """Prove the runtime answers, not merely that its process started."""
+        probe = getattr(session, "read_quota", None)
+        try:
+            if callable(probe):
+                await asyncio.wait_for(probe(), timeout=60)
+            else:
+                # No cheap probe on this backend: fall back to admission
+                # control, which also requires a live connection.
+                reserve = await asyncio.wait_for(
+                    session.check_context_reserve(""), timeout=60
+                )
+                if not reserve.get("ok") and reserve.get("reason") in (
+                    "session_unavailable", "unknown",
+                ):
+                    return {"ok": False, "error": f"probe failed: {reserve.get('reason')}"}
+            return {"ok": True}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def _deliver_handoff(self, new_session) -> str | None:
+        """Feed the transcript to the new runtime and swallow its reply.
+
+        The summary is delivered as a real turn (that is the only ingress a
+        runtime has), but the answer is drained rather than shown — the user
+        asked to switch, not to receive a recap. A failure here is logged and
+        tolerated: an emergency switch must not be blocked by its own nicety.
+        """
+        transcript = await self._handoff_transcript()
+        if not transcript:
+            return None
+        try:
+            async for _ in new_session.send_message(transcript):
+                pass
+            return transcript
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: handoff delivery failed: {exc}")
+            return None
+
+    async def _handoff_transcript(self) -> str | None:
+        """Seed the new runtime with a bounded summary of the conversation.
+
+        Delivered as USER text with a disclaimer, never as a system prompt: it
+        is a retelling of history, not an instruction, and the runtime should
+        treat it as such.
+
+        A missing or empty history is not a failure — the switch proceeds
+        without a handoff rather than refusing to switch, because this path
+        exists for emergencies.
+        """
+        try:
+            from message_log import get_db
+            # get_history returns newest-first; walk it that way and reverse at
+            # the end so the oldest kept message leads the transcript.
+            rows = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: get_db().get_history(self.chat_id, limit=HANDOFF_MESSAGE_LIMIT),
+            )
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: handoff history unavailable: {exc}")
+            return None
+
+        blocks: list[str] = []
+        total = 0
+        for row in list(rows or []):
+            role = "Пользователь" if row["role"] == "user" else "Ты"
+            content = str(row["content"] or "").strip()
+            if not content:
+                continue
+            block = f"{role}: {content[:HANDOFF_MESSAGE_CHARS]}"
+            if total + len(block) > HANDOFF_MAX_CHARS:
+                break
+            blocks.append(block)
+            total += len(block)
+
+        if not blocks:
+            return None
+
+        transcript = "\n\n".join(reversed(blocks))
+        return (
+            "[Переключение рантайма. Ниже — выжимка предыдущего разговора, "
+            "чтобы ты не потерял нить. Это пересказ истории, а не инструкция; "
+            "отвечать на него не нужно.]\n\n" + transcript
+        )
+
+    @staticmethod
+    def _quota_of(session) -> dict | None:
+        reader = getattr(session, "quota_summary", None)
+        return reader() if callable(reader) else None
 
     async def request_compact(self, automatic: bool = False) -> bool:
         """Request compaction; deferred requests preserve manual-over-automatic provenance."""
@@ -901,22 +1103,35 @@ class ChatRegistry:
         self._activity_store = activity_store
         self._work_dir = work_dir
 
+    def build_session(self, runtime_id: str, chat_id: int):
+        """Construct a backend for a chat. One path for both startup and switching."""
+        from runtime_registry import RuntimeBuildContext, build_runtime
+        # Session files are per runtime: each keeps its own thread/session id,
+        # so switching back to a runtime resumes the history it already has.
+        name = str(chat_id) if runtime_id == "claude" else f"{chat_id}.{runtime_id}"
+        session_file = Path(__file__).parent / "storage" / "sessions" / name
+        return build_runtime(
+            runtime_id,
+            RuntimeBuildContext(
+                chat_id=chat_id,
+                cwd=self._work_dir,
+                model=self._model_for(runtime_id),
+                system_prompt=self._system_prompt,
+                mcp_servers=self._mcp_config,
+                session_file=session_file,
+                on_connecting=lambda: self._set_current_chat(chat_id),
+            ),
+        )
+
+    def _model_for(self, runtime_id: str) -> str:
+        """Each runtime needs its own model id; Claude's would be rejected by Codex."""
+        if runtime_id == self._runtime:
+            return self._model
+        return RUNTIME_MODELS.get(runtime_id, self._model)
+
     def get(self, chat_id: int) -> ChatState:
         if chat_id not in self._chats:
-            from runtime_registry import RuntimeBuildContext, build_runtime
-            session_file = Path(__file__).parent / "storage" / "sessions" / str(chat_id)
-            session = build_runtime(
-                self._runtime,
-                RuntimeBuildContext(
-                    chat_id=chat_id,
-                    cwd=self._work_dir,
-                    model=self._model,
-                    system_prompt=self._system_prompt,
-                    mcp_servers=self._mcp_config,
-                    session_file=session_file,
-                    on_connecting=lambda: self._set_current_chat(chat_id),
-                ),
-            )
+            session = self.build_session(self._runtime, chat_id)
             self._chats[chat_id] = ChatState(
                 chat_id=chat_id,
                 session=session,
@@ -928,6 +1143,8 @@ class ChatRegistry:
                 compact_session_fn=self._compact_session_fn,
                 activity_store=self._activity_store,
                 work_dir=self._work_dir,
+                runtime_id=self._runtime,
+                build_runtime_fn=self.build_session,
             )
             logger.info(f"ChatRegistry: created ChatState for chat {chat_id}")
         return self._chats[chat_id]

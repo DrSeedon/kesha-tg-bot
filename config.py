@@ -18,6 +18,13 @@ ALLOWED = {int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip(
 WORK_DIR = os.getenv("WORK_DIR", ".")
 MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5")
 RUNTIME = os.getenv("KESHA_RUNTIME", "claude")
+
+# Model per runtime. Claude's id would be rejected by Codex and vice versa, so a
+# switch must carry its own. Verified live: gpt-5.1-codex-max is NOT available
+# on a ChatGPT subscription (HTTP 400); gpt-5.6-sol is.
+RUNTIME_MODELS = {
+    "codex": os.getenv("KESHA_CODEX_MODEL", "gpt-5.6-sol"),
+}
 DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
@@ -100,6 +107,16 @@ STRINGS = {
         "context_usage_limit": "🚧 Упёрлись в лимит плана Claude. Подожди сброса лимита и повтори — контекст тут ни при чём.",
         "context_runtime_invariant": "⚠️ Рантайм не совпал с ожидаемой конфигурацией (ждём {expected}: 1M контекст, 64k вывода, авто-компакт выключен). Сообщение не отправлено — проверь конфиг.",
         "session_unavailable": "⚠️ Сохранённая сессия недоступна. Отправь /clear, чтобы начать новую.",
+        "runtime_status": "🧩 Рантайм: *{current}* ({model})\nДоступны: {available}\n{quota}\nПереключить: `/runtime {other}`",
+        "runtime_quota": "📊 Лимит: {used}% использовано, сброс {reset}",
+        "runtime_quota_unknown": "📊 Лимит: неизвестен",
+        "runtime_switched": "🔄 Рантайм: *{previous}* → *{current}* ({model}).\n{handoff}",
+        "runtime_handoff_ok": "История передана выжимкой.",
+        "runtime_handoff_none": "История не передана (пустая или недоступна) — начинаю с чистого листа.",
+        "runtime_same": "🧩 Уже на *{current}*.",
+        "runtime_unknown": "⚠️ Неизвестный рантайм `{runtime}`. Доступны: {available}",
+        "runtime_busy": "⏳ Сейчас идёт обработка — переключение возможно только когда я свободен. Дождись ответа или отправь /stop.",
+        "runtime_failed": "⚠️ Не удалось переключиться на *{runtime}*: {error}\nОстаюсь на *{fallback}* — продолжаю работать.",
         "compact_floor": "⚠️ Для безопасного /compact уже не хватает свободного контекста. Сессия сохранена; доступен только /clear.",
         "activity_retry": "⚠️ Не удалось надёжно сохранить сообщение. Отправь его ещё раз.",
         "empty": "🤷 Пустой ответ",
@@ -160,6 +177,16 @@ STRINGS = {
         "context_usage_limit": "🚧 Hit the Claude plan limit. Wait for the limit to reset and resend — this is not a context problem.",
         "context_runtime_invariant": "⚠️ The runtime did not match the expected configuration (want {expected}: 1M context, 64k output, auto-compact off). Message not sent — check the config.",
         "session_unavailable": "⚠️ The saved session is unavailable. Send /clear to start a new one.",
+        "runtime_status": "🧩 Runtime: *{current}* ({model})\nAvailable: {available}\n{quota}\nSwitch: `/runtime {other}`",
+        "runtime_quota": "📊 Quota: {used}% used, resets {reset}",
+        "runtime_quota_unknown": "📊 Quota: unknown",
+        "runtime_switched": "🔄 Runtime: *{previous}* → *{current}* ({model}).\n{handoff}",
+        "runtime_handoff_ok": "History carried over as a summary.",
+        "runtime_handoff_none": "History not carried over (empty or unavailable) — starting fresh.",
+        "runtime_same": "🧩 Already on *{current}*.",
+        "runtime_unknown": "⚠️ Unknown runtime `{runtime}`. Available: {available}",
+        "runtime_busy": "⏳ A turn is in progress — switching is only possible when I am idle. Wait for the answer or send /stop.",
+        "runtime_failed": "⚠️ Could not switch to *{runtime}*: {error}\nStaying on *{fallback}* — still working.",
         "compact_floor": "⚠️ There is not enough free context for safe /compact. The session is preserved; only /clear remains available.",
         "activity_retry": "⚠️ Could not safely save the message. Please send it again.",
         "empty": "🤷 Empty response",
