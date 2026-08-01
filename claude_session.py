@@ -24,10 +24,26 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 
+from config import MODEL
+
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path("./storage/sessions")
-EXPECTED_CONTEXT_MODEL = "claude-opus-5[1m]"
+
+
+def resolve_context_model(model: str, use_1m: bool = True) -> str:
+    """Return the model name as the runtime reports it back in usage payloads.
+
+    Single source of truth for the `[1m]` suffix: `_make_options` and the
+    reserve invariant both go through here, so a config change cannot leave
+    them disagreeing.
+    """
+    if use_1m and "[1m]" not in model:
+        return f"{model}[1m]"
+    return model
+
+
+EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
 MANUAL_COMPACT_FLOOR_TOKENS = 80_000
@@ -167,6 +183,12 @@ class ClaudeSession:
         if self.session_id != snapshot.session_id:
             raise RuntimeError("source session changed during summary")
         snapshot.candidate_started = True
+        # Refresh the validation evidence: the source-summary request ran AFTER
+        # begin_session_replacement(), so it may have proven the runtime good or
+        # contradicted it. Rolling back to the pre-summary values would discard
+        # what we just learned about the source session.
+        snapshot.max_output_tokens_valid = self._max_output_tokens_valid
+        snapshot.last_max_output_tokens = self.last_max_output_tokens
         self._pending_disconnect = self._client or self._pending_disconnect
         self._client = None
         self._connected = False
@@ -202,8 +224,13 @@ class ClaudeSession:
         self.session_id = snapshot.session_id
         self._session_resumed = snapshot.session_resumed
         self._last_ctx_usage = snapshot.last_ctx_usage
-        self._max_output_tokens_valid = snapshot.max_output_tokens_valid
-        self.last_max_output_tokens = snapshot.last_max_output_tokens
+        if not source_unchanged:
+            # Only restore validation evidence when the candidate actually
+            # replaced the source. If the summary failed before the candidate
+            # started, the source client never changed and whatever it just
+            # taught us about the runtime is still the freshest truth.
+            self._max_output_tokens_valid = snapshot.max_output_tokens_valid
+            self.last_max_output_tokens = snapshot.last_max_output_tokens
         self._session_replacement = None
         if source_unchanged:
             return
@@ -239,10 +266,18 @@ class ClaudeSession:
         logger.info(f"can_use_tool auto-allow: {tool_name} input={_preview}")
         return PermissionResultAllow(updated_input=tool_input)
 
+    @property
+    def expected_context_model(self) -> str:
+        """The model name THIS session's runtime must report back.
+
+        Derived from the session's own model so a per-session override cannot
+        be validated against the global config model (which would reject every
+        message). `_make_options` builds the request from the same helper.
+        """
+        return resolve_context_model(self.model, self.use_1m)
+
     def _make_options(self) -> ClaudeAgentOptions:
-        model = self.model
-        if self.use_1m and "[1m]" not in model:
-            model = f"{model}[1m]"
+        model = resolve_context_model(self.model, self.use_1m)
         options = ClaudeAgentOptions(
             model=model,
             cwd=self.cwd,
@@ -368,22 +403,73 @@ class ClaudeSession:
                         self.total_cost_usd += msg.total_cost_usd
                     if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
-                    if not msg.is_error:
+
+                    # Classify a quota/short-circuit terminal BEFORE touching the
+                    # runtime invariant. Such a result may still carry a partial
+                    # usage map (e.g. only the auxiliary Haiku entry observed in
+                    # production), and reading that as "the expected model is
+                    # missing" would weld admission shut again.
+                    raw_result = str(msg.result or "")
+                    result_is_limit = (
+                        pending_limit is not None
+                        or limit_seen
+                        or getattr(msg, "api_error_status", None) == 429
+                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
+                        or usage_limit_reset(raw_result) is not None
+                    )
+                    # A context-limit short circuit is equally not evidence about
+                    # the runtime, and latching here would block the very
+                    # /compact the message tells the user to run.
+                    short_circuited = result_is_limit or (
+                        getattr(msg, "terminal_reason", None) == "context_limit"
+                        or is_context_limit(raw_result)
+                    )
+
+                    if not msg.is_error and not short_circuited:
                         model_usage = getattr(msg, "model_usage", None) or {}
-                        expected_usage = model_usage.get(EXPECTED_CONTEXT_MODEL)
+                        expected_usage = model_usage.get(self.expected_context_model)
                         observed_max_output = (
                             expected_usage.get("maxOutputTokens")
                             if isinstance(expected_usage, dict)
                             else None
                         )
                         if observed_max_output == EXPECTED_MAX_OUTPUT_TOKENS:
+                            # A proven-good payload also clears an earlier latch.
+                            # NOTE: this is reachable from an in-flight turn, a
+                            # compact, or after /clear — NOT from a fresh user
+                            # turn, which admission blocks first. A genuine
+                            # contradiction is therefore operator-recoverable by
+                            # /clear, by design: we do not spend a probe query
+                            # re-testing a runtime that already lied.
                             self.last_max_output_tokens = observed_max_output
+                            self._max_output_tokens_valid = True
+                        elif observed_max_output is None and not model_usage:
+                            # EMPTY usage is not evidence of a wrong runtime.
+                            # Usage-limit and other short-circuited results carry
+                            # no model_usage at all; latching here bricked
+                            # production until restart (2026-08-01).
+                            logger.warning(
+                                "Terminal result carried no usage for %s; "
+                                "runtime invariant left unchanged",
+                                self.expected_context_model,
+                            )
+                        elif observed_max_output is None:
+                            # Non-empty usage that omits the expected model IS
+                            # affirmative drift evidence — the runtime billed a
+                            # model we did not ask for.
+                            self._max_output_tokens_valid = False
+                            logger.error(
+                                "Terminal usage missing expected model %s; "
+                                "reported models=%r",
+                                self.expected_context_model,
+                                sorted(model_usage),
+                            )
                         else:
                             self._max_output_tokens_valid = False
                             logger.error(
                                 "Unexpected terminal model usage: model=%s "
                                 "maxOutputTokens=%r",
-                                EXPECTED_CONTEXT_MODEL,
+                                self.expected_context_model,
                                 observed_max_output,
                             )
                     self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
@@ -395,13 +481,6 @@ class ClaudeSession:
                         f"stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}"
                     )
 
-                    raw_result = str(msg.result or "")
-                    result_is_limit = (
-                        pending_limit is not None
-                        or getattr(msg, "api_error_status", None) == 429
-                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
-                        or usage_limit_reset(raw_result) is not None
-                    )
                     result_is_context_limit = (
                         not result_is_limit
                         and (
@@ -542,11 +621,23 @@ class ClaudeSession:
             logger.warning("Context reserve connect failed (%s): %s", reason, exc)
             return {"ok": False, "reason": reason, "required": required}
 
+        # NOTE: a stale usage_limit_active must NOT gate admission here. It is
+        # only cleared by a successful turn, so refusing before the query would
+        # deadlock the session until restart — the same trap the empty-usage
+        # latch caused. The limit is reported authoritatively by the attempt
+        # itself (#13 normalizes it into one terminal usage_limit outcome).
         if not self._max_output_tokens_valid:
+            logger.error(
+                "Context reserve blocked: last terminal usage contradicted "
+                "the runtime invariant (expected model=%s maxOutputTokens=%d)",
+                self.expected_context_model,
+                EXPECTED_MAX_OUTPUT_TOKENS,
+            )
             return {
                 "ok": False,
                 "reason": "runtime_invariant",
                 "required": required,
+                "expected_model": self.expected_context_model,
             }
 
         try:
@@ -571,7 +662,7 @@ class ClaudeSession:
             and total > 0
             and maximum == EXPECTED_CONTEXT_TOKENS
             and raw_maximum == EXPECTED_CONTEXT_TOKENS
-            and usage.get("model") == EXPECTED_CONTEXT_MODEL
+            and usage.get("model") == self.expected_context_model
             and usage.get("isAutoCompactEnabled") is False
         )
         if not valid:
@@ -588,6 +679,7 @@ class ClaudeSession:
                 "ok": False,
                 "reason": "runtime_invariant",
                 "required": required,
+                "expected_model": self.expected_context_model,
             }
 
         remaining = maximum - total

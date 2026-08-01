@@ -69,7 +69,14 @@ class QueueClient:
 
 
 def make_session(tmp_path):
-    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+    # Production wiring always passes config.MODEL (bot.py -> ChatRegistry),
+    # so tests must too — a fixture on a different model silently diverges
+    # from the invariant under test.
+    import config
+
+    session = ClaudeSession(
+        cwd=".", model=config.MODEL, session_file=tmp_path / "session"
+    )
     client = QueueClient()
     session._client = client
     session._connected = True
@@ -496,3 +503,254 @@ async def test_send_message_never_invalidates_or_recursively_retries_sid(
     assert client.queries == ["hello"]
     assert session.session_id == "sid-old"
     assert (tmp_path / "session").read_text() == "sid-old"
+
+
+def limit_result_without_model_usage(text=RAW_LIMIT):
+    """The exact shape production returned on 2026-08-01.
+
+    A plan-limit Result arrives with is_error=False and NO model_usage:
+    the limit notice replaces the usage payload. Absent usage must never be
+    read as proof that the runtime is wrong.
+    """
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="sid-new",
+        result=text,
+        api_error_status=None,
+        model_usage={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_result_does_not_latch_runtime_invariant(tmp_path):
+    """Production incident: a quota hit bricked the bot until restart.
+
+    The limit Result carries no model_usage, the old code latched
+    _max_output_tokens_valid=False, and every later message was rejected
+    with runtime_invariant forever.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(limit_result_without_model_usage())
+    await task
+
+    assert session.usage_limit_active is True
+    assert session._max_output_tokens_valid is True, (
+        "a usage limit is a temporary condition and must not latch the "
+        "runtime invariant"
+    )
+
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+
+    # Codex [blocking]: asserting only "not runtime_invariant" accepted a
+    # DIFFERENT permanent block. A quota hit must leave admission OPEN so the
+    # next turn can actually reach Claude and clear usage_limit_active.
+    assert outcome["ok"] is True, (
+        f"a stale usage limit must not gate admission (got {outcome!r}); "
+        "usage_limit_active is only cleared by a successful turn, so "
+        "refusing here deadlocks the session until restart"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_model_usage_on_plain_result_does_not_latch(tmp_path):
+    """Absent usage proves nothing about the runtime — only a contradiction does."""
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="",
+            api_error_status=None,
+            model_usage={},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True
+
+
+@pytest.mark.asyncio
+async def test_latch_clears_on_next_valid_usage(tmp_path):
+    """A contradicted invariant fails closed but is not a one-way door.
+
+    Recovery is operator-driven: /clear, a compact, or an in-flight turn can
+    supply a good payload. A fresh user turn cannot, because admission blocks
+    first — this test drives collect() directly for exactly that reason.
+    """
+    session, client = make_session(tmp_path)
+
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(result(max_output=32_000))
+    await task
+    assert session._max_output_tokens_valid is False
+
+    task = asyncio.create_task(collect(session, "second"))
+    await asyncio.sleep(0)
+    await client.events.put(result())
+    await task
+
+    assert session._max_output_tokens_valid is True, (
+        "a proven-good usage payload must clear the latch without a restart"
+    )
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+    assert outcome["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_reserve_admits_normal_message_on_real_config(tmp_path):
+    """Config-driven: the model actually deployed must pass the reserve.
+
+    The 167-test suite went green while production rejected every message,
+    because every reserve test built usage from EXPECTED_CONTEXT_MODEL
+    itself. This derives the runtime model from config.MODEL instead.
+    """
+    import config
+
+    session, client = make_session(tmp_path)
+    session.model = config.MODEL
+
+    resolved = session._make_options().model
+    assert resolved == EXPECTED_CONTEXT_MODEL, (
+        f"config.MODEL={config.MODEL!r} resolves to {resolved!r} but the "
+        f"reserve expects {EXPECTED_CONTEXT_MODEL!r} — these must be derived "
+        f"from one source, not kept in sync by hand"
+    )
+
+    client.context_usage = context_usage(10_000, model=resolved)
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["ok"] is True, f"normal message rejected: {outcome!r}"
+    assert outcome["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_usage_without_expected_model_latches(tmp_path):
+    """Non-empty usage naming only other models IS drift evidence.
+
+    Distinct from an empty payload: the runtime billed a model we did not ask
+    for, so fail-closed is correct here.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="hi",
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is False
+
+
+@pytest.mark.asyncio
+async def test_quota_result_with_partial_usage_does_not_latch(tmp_path):
+    """Codex round 2 [blocking]: a quota terminal may carry PARTIAL usage.
+
+    Production's model_usage really does contain an auxiliary Haiku entry
+    alongside the Opus one (measured live). A limit result carrying only that
+    auxiliary entry is non-empty but omits the expected model — classifying it
+    as drift would weld admission shut exactly like the original outage.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result=RAW_LIMIT,
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session.usage_limit_active is True
+    assert session._max_output_tokens_valid is True, (
+        "a positively identified quota result must never mutate the runtime "
+        "invariant, however partial its usage map"
+    )
+
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+    assert outcome["ok"] is True, f"admission must stay open: {outcome!r}"
+
+
+@pytest.mark.asyncio
+async def test_quota_result_via_429_status_does_not_latch(tmp_path):
+    """Same guarantee via the typed 429 path rather than the text detector."""
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="",
+            api_error_status=429,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True
+
+
+@pytest.mark.asyncio
+async def test_context_limit_result_with_partial_usage_does_not_latch(tmp_path):
+    """A context-limit short circuit must not latch either.
+
+    Latching here would block the very /compact the message tells the user to
+    run, turning a recoverable state into a dead end.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result=RAW_CONTEXT_LIMIT,
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True

@@ -352,6 +352,7 @@ async def _ask_inner(message, prompt, cid, typer):
         key: str = "context_limit",
         *,
         latch: bool = True,
+        **fmt,
     ) -> None:
         nonlocal parts, has_deltas, current_msg_id, last_edit_time
         nonlocal last_edit_text, terminal_handled
@@ -359,9 +360,9 @@ async def _ask_inner(message, prompt, cid, typer):
         if latch:
             await _registry.get(cid).mark_context_reserve_blocked()
         notice = (
-            _t_cfg(message, key)
+            _t_cfg(message, key, **fmt)
             if message is not None
-            else STRINGS["ru"][key]
+            else STRINGS["ru"][key].format(**fmt)
         )
         await _finalize_status()
         parts.clear()
@@ -408,13 +409,16 @@ async def _ask_inner(message, prompt, cid, typer):
             reserve = await _get_session(cid).check_context_reserve(prompt)
             if not reserve.get("ok"):
                 reason = reserve.get("reason")
-                key = (
-                    "context_reserve"
-                    if reason == "reserve"
-                    else "session_unavailable"
-                    if reason == "session_unavailable"
-                    else "context_unknown"
-                )
+                fmt = {}
+                if reason == "reserve":
+                    key = "context_reserve"
+                elif reason == "session_unavailable":
+                    key = "session_unavailable"
+                elif reason == "runtime_invariant":
+                    key = "context_runtime_invariant"
+                    fmt = {"expected": reserve.get("expected_model", "?")}
+                else:
+                    key = "context_unknown"
                 logger.warning(
                     "Chat %s: retry rejected before query (%s)",
                     cid,
@@ -423,6 +427,7 @@ async def _ask_inner(message, prompt, cid, typer):
                 await _handle_context_limit(
                     key,
                     latch=reason == "reserve",
+                    **fmt,
                 )
                 break
             if message is not None:

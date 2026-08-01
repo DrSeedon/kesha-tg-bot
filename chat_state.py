@@ -166,14 +166,19 @@ class ChatState:
         self,
         batch: list[PendingEntry],
         key: str,
+        **fmt,
     ) -> None:
         entry = batch[-1]
         if entry.message is not None:
-            await entry.message.answer(_t_cfg(entry.message, key), parse_mode=None)
+            # _t_cfg already applies .format(**kw) — pass fmt through instead of
+            # formatting a second time, or a message with placeholders raises.
+            await entry.message.answer(
+                _t_cfg(entry.message, key, **fmt), parse_mode=None
+            )
             return
         await self.bot.send_message(
             entry.reply_target or self.chat_id,
-            STRINGS["ru"][key],
+            STRINGS["ru"][key].format(**fmt),
             parse_mode=None,
         )
 
@@ -634,11 +639,17 @@ class ChatState:
                 reserve = await self.session.check_context_reserve(combined)
             if not reserve.get("ok"):
                 reason = reserve.get("reason")
+                fmt = {}
                 if reason == "reserve":
                     await self.mark_context_reserve_blocked()
                     key = "context_reserve"
                 elif reason == "session_unavailable":
                     key = "session_unavailable"
+                elif reason == "usage_limit":
+                    key = "context_usage_limit"
+                elif reason == "runtime_invariant":
+                    key = "context_runtime_invariant"
+                    fmt = {"expected": reserve.get("expected_model", "?")}
                 else:
                     key = "context_unknown"
                 logger.warning(
@@ -646,7 +657,7 @@ class ChatState:
                     self.chat_id,
                     reason,
                 )
-                await self._send_batch_terminal(batch, key)
+                await self._send_batch_terminal(batch, key, **fmt)
                 return
 
             previews = []
@@ -769,13 +780,16 @@ class ChatState:
                 reserve = await self.session.check_context_reserve(manual=True)
                 if not reserve.get("ok"):
                     reason = reserve.get("reason")
-                    key = (
-                        "compact_floor"
-                        if reason == "reserve"
-                        else "session_unavailable"
-                        if reason == "session_unavailable"
-                        else "context_unknown"
-                    )
+                    fmt = {}
+                    if reason == "reserve":
+                        key = "compact_floor"
+                    elif reason == "session_unavailable":
+                        key = "session_unavailable"
+                    elif reason == "runtime_invariant":
+                        key = "context_runtime_invariant"
+                        fmt = {"expected": reserve.get("expected_model", "?")}
+                    else:
+                        key = "context_unknown"
                     logger.warning(
                         "Chat %s: manual compact rejected before query (%s)",
                         self.chat_id,
@@ -783,7 +797,7 @@ class ChatState:
                     )
                     await self.bot.send_message(
                         self.chat_id,
-                        STRINGS["ru"][key],
+                        STRINGS["ru"][key].format(**fmt),
                         parse_mode=None,
                     )
                     return

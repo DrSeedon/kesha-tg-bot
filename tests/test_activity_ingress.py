@@ -213,3 +213,83 @@ async def test_ingress_during_processing_defers_without_blocking_the_stream():
     assert len(state.deferred) == 5, "every mid-turn arrival must be deferred"
     assert not state.pending, "mid-turn arrivals must not enter the active batch"
     assert ticks > before, "edit loop must keep running while ingress is admitted"
+
+
+@pytest.mark.asyncio
+async def test_runtime_invariant_message_renders_without_keyerror():
+    """Codex [blocking]: the localized string contains {expected}.
+
+    `config.t()` already calls .format(**kw), so passing the value through a
+    second .format() raised KeyError on the normal Telegram path — the users
+    saw a crash instead of the real reason.
+    """
+    from types import SimpleNamespace
+
+    import chat_state as cs
+    from chat_state import ChatState, PendingEntry
+
+    sent = []
+
+    class Msg:
+        from_user = SimpleNamespace(language_code="ru")
+
+        async def answer(self, text, **kwargs):
+            sent.append(text)
+            return SimpleNamespace(message_id=1)
+
+    state = ChatState(
+        chat_id=42,
+        session=MagicMock(),
+        bot=MagicMock(),
+        debounce_sec=3,
+        ask_fn=AsyncMock(),
+        set_current_chat_fn=MagicMock(),
+        get_lazy_block_fn=MagicMock(return_value=("", [], None)),
+        compact_session_fn=AsyncMock(),
+        activity_store=MagicMock(),
+        work_dir="/tmp",
+    )
+    entry = PendingEntry(prompt="x", message_id=1, message=Msg())
+
+    await state._send_batch_terminal(
+        [entry], "context_runtime_invariant", expected="claude-opus-5[1m]"
+    )
+
+    assert sent and "claude-opus-5[1m]" in sent[0], sent
+    assert "{expected}" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_plain_terminal_keys_still_render():
+    """Keys without placeholders must survive the shared format path."""
+    from types import SimpleNamespace
+
+    from chat_state import ChatState, PendingEntry
+
+    sent = []
+
+    class Msg:
+        from_user = SimpleNamespace(language_code="ru")
+
+        async def answer(self, text, **kwargs):
+            sent.append(text)
+            return SimpleNamespace(message_id=1)
+
+    state = ChatState(
+        chat_id=42,
+        session=MagicMock(),
+        bot=MagicMock(),
+        debounce_sec=3,
+        ask_fn=AsyncMock(),
+        set_current_chat_fn=MagicMock(),
+        get_lazy_block_fn=MagicMock(return_value=("", [], None)),
+        compact_session_fn=AsyncMock(),
+        activity_store=MagicMock(),
+        work_dir="/tmp",
+    )
+    entry = PendingEntry(prompt="x", message_id=1, message=Msg())
+
+    for key in ("context_reserve", "context_unknown", "context_usage_limit"):
+        await state._send_batch_terminal([entry], key)
+
+    assert len(sent) == 3
