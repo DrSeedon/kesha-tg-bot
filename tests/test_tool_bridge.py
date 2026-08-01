@@ -18,7 +18,7 @@ def bridge():
         return {"ok": True, "got": args}
 
     b = ToolBridge(token="secret-token", resolve_chat=lambda: 12345)
-    b.register("echo", echo)
+    b.register("echo", echo, allowed_args={"x", "msg"})
     b.calls = calls  # type: ignore[attr-defined]
     return b
 
@@ -80,13 +80,78 @@ async def test_non_ascii_token_does_not_crash(bridge):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", ["chat_id", "chatid", "CHAT_ID", "Chat"])
-async def test_caller_supplied_chat_id_is_rejected(bridge, key):
-    """The model must never choose the destination chat."""
+@pytest.mark.parametrize(
+    "key",
+    [
+        "chat_id",
+        "chatid",
+        "CHAT_ID",
+        "Chat",
+        "chatId",
+        "ChatId",
+        " chat_id",          # leading space
+        "chat_id ",          # trailing space
+        "chat-id",           # hyphen
+        "сhat_id",      # Cyrillic 'с' homoglyph
+        "chat_id​",     # zero-width space
+        "​chat_id",
+        "chat​_id",
+        "\tchat_id",
+        "unknown_key",       # anything unexpected, not just chat_id
+        "path",              # valid for another tool, not for this one
+    ],
+)
+async def test_unwhitelisted_argument_is_rejected(bridge, key):
+    """Whitelist beats blacklist: every spelling and every unexpected key is refused."""
     resp = await _post(bridge, {"tool": "echo", "args": {key: 999}})
     assert resp.status == 400
-    assert "may not supply" in _body(resp)["error"]
+    assert "not accepted" in _body(resp)["error"]
     assert bridge.calls == []
+
+
+@pytest.mark.asyncio
+async def test_chat_id_smuggled_alongside_valid_arg_is_rejected(bridge):
+    resp = await _post(bridge, {"tool": "echo", "args": {"x": 1, " chat_id": 999}})
+    assert resp.status == 400
+    assert bridge.calls == []
+
+
+@pytest.mark.asyncio
+async def test_handler_receives_normalized_keys(bridge):
+    """A handler must never see the caller's spelling — only canonical names."""
+    resp = await _post(bridge, {"tool": "echo", "args": {"MSG": "hi"}})
+    assert resp.status == 200
+    assert bridge.calls == [{"msg": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_after_normalization_is_rejected(bridge):
+    resp = await _post(bridge, {"tool": "echo", "args": {"msg": "a", "MSG": "b"}})
+    assert resp.status == 400
+    assert "duplicate" in _body(resp)["error"]
+    assert bridge.calls == []
+
+
+def test_tool_cannot_declare_non_ascii_argument(bridge):
+    with pytest.raises(ValueError, match="invalid argument"):
+        bridge.register("bad", lambda args: None, allowed_args={"пут"})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("chat_id", "chat_id"),
+        (" chat_id ", "chat_id"),
+        ("CHAT-ID", "chat_id"),
+        ("chat_id​", "chat_id"),
+        ("сhat_id", None),   # Cyrillic — never a valid name
+        (123, None),              # non-str key
+    ],
+)
+def test_normalize_arg_name(raw, expected):
+    from tool_bridge import normalize_arg_name
+
+    assert normalize_arg_name(raw) == expected
 
 
 @pytest.mark.asyncio

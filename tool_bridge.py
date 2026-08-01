@@ -34,10 +34,33 @@ SOCKET_PATH = Path(
 TOKEN_ENV = "KESHA_BRIDGE_TOKEN"
 _TOKEN_HEADER = "X-Kesha-Bridge-Token"
 
-# Arguments the caller may never supply: they decide WHO the call acts on.
-FORBIDDEN_ARGS = frozenset({"chat_id", "chatid", "chat"})
-
 ToolHandler = Callable[[dict], Awaitable[dict]]
+
+
+def normalize_arg_name(key: object) -> str | None:
+    """Return a comparable argument name, or None if it can never be valid.
+
+    Blacklisting `chat_id` spellings is a race we cannot win: ` chat_id`,
+    `chat-id`, a Cyrillic `с`, or a zero-width space all read as the same word
+    to a human and as different keys to `dict`. So names are normalized here and
+    matched against a per-tool whitelist instead. Non-ASCII is rejected outright
+    — every real argument name in this codebase is ASCII, and a homoglyph is
+    never a legitimate parameter.
+    """
+    if not isinstance(key, str):
+        return None
+    cleaned = "".join(ch for ch in key if not _is_invisible(ch)).strip()
+    if not cleaned.isascii():
+        return None
+    return cleaned.casefold().replace("-", "_")
+
+
+def _is_invisible(ch: str) -> bool:
+    # Zero-width and bidi controls carry no meaning in an argument name but do
+    # change dict identity, so they are stripped before comparison.
+    return ch in "​‌‍⁠﻿‎‏" or (
+        ch.isspace() and ch not in " \t"
+    )
 
 
 class ToolBridge:
@@ -49,12 +72,31 @@ class ToolBridge:
         self._token = token
         self._resolve_chat = resolve_chat
         self._handlers: dict[str, ToolHandler] = {}
+        self._allowed_args: dict[str, frozenset[str]] = {}
         self._runner: web.AppRunner | None = None
 
-    def register(self, name: str, handler: ToolHandler) -> None:
+    def register(
+        self,
+        name: str,
+        handler: ToolHandler,
+        allowed_args: frozenset[str] | set[str] | tuple[str, ...] = (),
+    ) -> None:
+        """Register a tool and the exact argument names it accepts.
+
+        `allowed_args` is a whitelist: anything else is refused before the
+        handler runs. This covers arguments nobody thought to forbid, not just
+        the ones we remembered.
+        """
         if name in self._handlers:
             raise ValueError(f"tool '{name}' already registered")
+        normalized = set()
+        for arg in allowed_args:
+            clean = normalize_arg_name(arg)
+            if clean is None:
+                raise ValueError(f"tool '{name}' declares invalid argument {arg!r}")
+            normalized.add(clean)
         self._handlers[name] = handler
+        self._allowed_args[name] = frozenset(normalized)
 
     @property
     def tools(self) -> list[str]:
@@ -84,23 +126,33 @@ class ToolBridge:
         if not isinstance(args, dict):
             return web.json_response({"error": "args must be an object"}, status=400)
 
-        forbidden = FORBIDDEN_ARGS & {str(k).lower() for k in args}
-        if forbidden:
-            logger.warning("bridge: rejected caller-supplied %s for %s", forbidden, name)
-            return web.json_response(
-                {"error": f"caller may not supply: {', '.join(sorted(forbidden))}"},
-                status=400,
-            )
-
         handler = self._handlers.get(name)
         if handler is None:
             return web.json_response({"error": f"unknown tool '{name}'"}, status=404)
+
+        allowed = self._allowed_args[name]
+        clean_args: dict = {}
+        for raw_key, value in args.items():
+            clean_key = normalize_arg_name(raw_key)
+            if clean_key is None or clean_key not in allowed:
+                logger.warning(
+                    "bridge: rejected argument %r for %s", raw_key, name
+                )
+                return web.json_response(
+                    {"error": f"argument not accepted: {raw_key!r}"}, status=400
+                )
+            if clean_key in clean_args:
+                return web.json_response(
+                    {"error": f"duplicate argument: {clean_key!r}"}, status=400
+                )
+            clean_args[clean_key] = value
 
         if self._resolve_chat() is None:
             return web.json_response({"error": "no active chat context"}, status=409)
 
         try:
-            result = await handler(args)
+            # Handlers receive normalized keys only — never the caller's spelling.
+            result = await handler(clean_args)
         except Exception as exc:
             logger.error("bridge: tool %s failed: %s", name, exc, exc_info=True)
             return web.json_response(
