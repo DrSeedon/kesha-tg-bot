@@ -25,6 +25,7 @@ from claude_agent_sdk import (
 )
 
 from config import MODEL
+from runtime_protocol import RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,14 @@ class _SessionReplacement:
 
 
 class ClaudeSession:
+    CAPABILITIES = RuntimeCapabilities(
+        mid_turn_inject=True,
+        native_compact=False,
+        context_percentage=True,
+        cost_reporting=True,
+        resume_across_restart=True,
+    )
+
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
                  system_prompt: str = "",
                  mcp_servers: dict[str, McpSdkServerConfig] | None = None,
@@ -783,7 +792,7 @@ class ClaudeSession:
         self.reconnect()
         logger.info("Session reset (cleared session_id)")
 
-    async def _safe_disconnect(self, client=None):
+    async def safe_disconnect(self, client=None):
         client = client or self._client
         if client is None:
             return
@@ -791,3 +800,5 @@ class ClaudeSession:
             await client.disconnect()
         except Exception:
             pass
+
+    _safe_disconnect = safe_disconnect
