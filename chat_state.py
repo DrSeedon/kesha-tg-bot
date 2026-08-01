@@ -170,15 +170,15 @@ class ChatState:
     ) -> None:
         entry = batch[-1]
         if entry.message is not None:
-            text = _t_cfg(entry.message, key)
+            # _t_cfg already applies .format(**kw) — pass fmt through instead of
+            # formatting a second time, or a message with placeholders raises.
             await entry.message.answer(
-                text.format(**fmt) if fmt else text, parse_mode=None
+                _t_cfg(entry.message, key, **fmt), parse_mode=None
             )
             return
-        text = STRINGS["ru"][key]
         await self.bot.send_message(
             entry.reply_target or self.chat_id,
-            text.format(**fmt) if fmt else text,
+            STRINGS["ru"][key].format(**fmt),
             parse_mode=None,
         )
 
@@ -780,13 +780,16 @@ class ChatState:
                 reserve = await self.session.check_context_reserve(manual=True)
                 if not reserve.get("ok"):
                     reason = reserve.get("reason")
-                    key = (
-                        "compact_floor"
-                        if reason == "reserve"
-                        else "session_unavailable"
-                        if reason == "session_unavailable"
-                        else "context_unknown"
-                    )
+                    fmt = {}
+                    if reason == "reserve":
+                        key = "compact_floor"
+                    elif reason == "session_unavailable":
+                        key = "session_unavailable"
+                    elif reason == "runtime_invariant":
+                        key = "context_runtime_invariant"
+                        fmt = {"expected": reserve.get("expected_model", "?")}
+                    else:
+                        key = "context_unknown"
                     logger.warning(
                         "Chat %s: manual compact rejected before query (%s)",
                         self.chat_id,
@@ -794,7 +797,7 @@ class ChatState:
                     )
                     await self.bot.send_message(
                         self.chat_id,
-                        STRINGS["ru"][key],
+                        STRINGS["ru"][key].format(**fmt),
                         parse_mode=None,
                     )
                     return

@@ -69,7 +69,14 @@ class QueueClient:
 
 
 def make_session(tmp_path):
-    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+    # Production wiring always passes config.MODEL (bot.py -> ChatRegistry),
+    # so tests must too — a fixture on a different model silently diverges
+    # from the invariant under test.
+    import config
+
+    session = ClaudeSession(
+        cwd=".", model=config.MODEL, session_file=tmp_path / "session"
+    )
     client = QueueClient()
     session._client = client
     session._connected = True
@@ -540,7 +547,15 @@ async def test_usage_limit_result_does_not_latch_runtime_invariant(tmp_path):
 
     client.context_usage = context_usage(10_000)
     outcome = await session.check_context_reserve("hello")
-    assert outcome["reason"] != "runtime_invariant"
+
+    # Codex [blocking]: asserting only "not runtime_invariant" accepted a
+    # DIFFERENT permanent block. A quota hit must leave admission OPEN so the
+    # next turn can actually reach Claude and clear usage_limit_active.
+    assert outcome["ok"] is True, (
+        f"a stale usage limit must not gate admission (got {outcome!r}); "
+        "usage_limit_active is only cleared by a successful turn, so "
+        "refusing here deadlocks the session until restart"
+    )
 
 
 @pytest.mark.asyncio
@@ -616,3 +631,31 @@ async def test_reserve_admits_normal_message_on_real_config(tmp_path):
 
     assert outcome["ok"] is True, f"normal message rejected: {outcome!r}"
     assert outcome["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_usage_without_expected_model_latches(tmp_path):
+    """Non-empty usage naming only other models IS drift evidence.
+
+    Distinct from an empty payload: the runtime billed a model we did not ask
+    for, so fail-closed is correct here.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="hi",
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is False
