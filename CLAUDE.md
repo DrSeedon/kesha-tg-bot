@@ -96,6 +96,8 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - Xray на 443/8443 — это VPN Максима, НЕ трогать
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`
+- **Перед деплоем — сверять SHA на remote** (`git ls-remote origin refs/heads/main`), а не доверять «мержено в main». Локальный merge без push для прода НЕ существует: `git pull` выкатит старый код и молча рестартнёт сервис без новой логики
+- **Перед деплоем — проверять `git status` на проде.** Незакоммиченные патчи там реальны (напр. `thinking={"type":"adaptive"}` + `effort="high"` в `_make_options`); `git pull` их либо уронит конфликтом, либо затрёт молча. Патч, который нужен, → внести в код и запушить, а не оставлять dirty
 - **codex_review из worktree воркера**: передавай АБСОЛЮТНЫЙ путь в `target` — скилл резолвит относительные пути от главного репо, не от worktree воркера. Иначе Codex читает не тот файл → ложный REJECT/APPROVE
 - **Error-handler substring match**: при ветвлении по подстроке в ошибке → проверяй БОЛЕЕ СПЕЦИФИЧНЫЕ варианты ПЕРВЫМИ (session LIMIT ≠ session died). Rate-limit/quota ошибки = ждать, НИКОГДА не retry
 - **HuggingFace fetch**: `env -u HTTPS_PROXY` — Anthropic-прокси 403-фильтрует HF. На Contabo прокси нет, но правило сохранено если вернётся
