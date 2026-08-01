@@ -58,6 +58,31 @@ class FileNotAllowed(Exception):
     """Raised when a path escapes every configured root."""
 
 
+def _link_stays_inside(real: Path, info: os.stat_result) -> bool:
+    """Whether a multi-linked file has all its names inside the allowed roots.
+
+    `resolve()` cannot help here: a hard link is not a pointer to a target, it
+    is an equal name for the same inode, so `/tmp/kesha/x` hard-linked to
+    `~/.ssh/id_rsa` resolves to itself and passes the path check (measured).
+    Rather than scan the filesystem, require that a multi-linked file be
+    reachable only from inside a root — the common case (one link) is free.
+    """
+    seen = 0
+    for root in sendable_roots():
+        for candidate in root.rglob("*"):
+            try:
+                if not candidate.is_file():
+                    continue
+                cand = candidate.stat()
+            except OSError:
+                continue
+            if (cand.st_dev, cand.st_ino) == (info.st_dev, info.st_ino):
+                seen += 1
+                if seen >= info.st_nlink:
+                    return True
+    return False
+
+
 def open_sendable(path: str) -> tuple[Path, bytes]:
     """Validate and read in one step, closing the check-to-use window.
 
@@ -73,6 +98,8 @@ def open_sendable(path: str) -> tuple[Path, bytes]:
         info = os.fstat(fd)
         if not _stat.S_ISREG(info.st_mode):
             raise FileNotAllowed("not a regular file")
+        if info.st_nlink > 1 and not _link_stays_inside(real, info):
+            raise FileNotAllowed("file is hard-linked outside the allowed directories")
         if info.st_size > MAX_SEND_BYTES:
             raise FileNotAllowed(
                 f"file is larger than the {MAX_SEND_BYTES // (1024 * 1024)}MB limit"

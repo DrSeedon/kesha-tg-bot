@@ -34,6 +34,7 @@ import compact as _compact
 import inbox_server as _inbox
 import rag as _rag
 
+import file_access as _file_access
 import telegram_io as _tio
 import media as _media
 import response_stream as _rs
@@ -164,6 +165,7 @@ async def main():
     _inbox.set_refs(bot, registry)
     await _inbox.start_inbox_server()
 
+    _file_access.ensure_roots()
     _media.cleanup_media()
     _media.cleanup_logs()
     asyncio.create_task(_media.daily_cleanup_loop())

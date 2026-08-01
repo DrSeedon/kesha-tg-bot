@@ -196,3 +196,32 @@ def test_directory_rejected_by_open_sendable(rooted):
     allowed, _ = rooted
     with pytest.raises(FileNotAllowed):
         file_access.open_sendable(str(allowed))
+
+
+# --- Hard links (found while self-reviewing T3 after Codex timed out) ---
+
+
+def test_hardlink_to_file_outside_root_is_blocked(rooted):
+    """resolve() cannot see this: a hard link IS the file, not a pointer to it."""
+    allowed, outside = rooted
+    victim = outside / ".env"
+    link = allowed / "innocent.bin"
+    os.link(victim, link)
+    with pytest.raises(FileNotAllowed, match="hard-linked outside"):
+        file_access.open_sendable(str(link))
+
+
+def test_hardlink_inside_root_is_allowed(rooted):
+    allowed, _ = rooted
+    original = allowed / "report.pdf"
+    link = allowed / "same.pdf"
+    os.link(original, link)
+    _, blob = file_access.open_sendable(str(link))
+    assert blob == b"ok"
+
+
+def test_single_link_file_skips_the_scan(rooted):
+    """The common case must not pay for the hard-link check."""
+    allowed, _ = rooted
+    path, blob = file_access.open_sendable(str(allowed / "report.pdf"))
+    assert blob == b"ok"
