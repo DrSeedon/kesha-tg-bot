@@ -383,6 +383,16 @@ class ChatState:
         except Exception as exc:
             logger.warning(f"Chat {self.chat_id}: old runtime disconnect: {exc}")
 
+        # A bridge handle must not outlive the runtime it was issued to: a
+        # straggling process from the retired runtime could otherwise still act
+        # on this chat. Scoped to THIS chat and THAT runtime, so a switch here
+        # cannot cancel a turn running in the other user's chat.
+        try:
+            from tool_bridge import revoke_chat_sessions
+            revoke_chat_sessions(self.chat_id, old_runtime)
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: bridge revoke failed: {exc}")
+
         self._context_reserve_blocked = False
         async with self._lock:
             self.phase = ChatPhase.IDLE

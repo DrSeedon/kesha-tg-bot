@@ -303,37 +303,147 @@ def test_handoff_respects_its_character_budget(tmp_path, monkeypatch):
 # ---------- work arriving during a switch (T5b, reminders) ----------
 
 
-def test_a_reminder_arriving_mid_switch_is_not_lost(tmp_path, monkeypatch):
-    """A reminder firing exactly during the swap must be deferred, not dropped.
+def test_an_urgent_reminder_firing_mid_switch_is_delivered_exactly_once(
+    tmp_path, monkeypatch
+):
+    """The real question the user asked: do reminders survive a switch?
 
-    While switching, the chat is held in PROCESSING, so accept_entry defers the
-    entry instead of racing the swap; the drain afterwards picks it up.
+    Drives the actual `run_urgent_prompt` while the swap is in flight and
+    measures what reaches processing — not what the code is supposed to do.
+    A reminder must arrive exactly once: losing it is a missed alarm,
+    duplicating it is the bot nagging twice.
     """
     new = FakeSession("codex")
     chat, _ = make_chat(tmp_path, monkeypatch, new_session=new)
-    drained: list[list[PendingEntry]] = []
 
-    async def capture_drain(record_activity=True):
-        drained.extend(chat.deferred)
-        chat.deferred.clear()
-        chat.phase = ChatPhase.IDLE
+    processed: list[list[PendingEntry]] = []
 
-    async def slow_probe():
-        # The reminder lands while the switch is in flight.
-        await chat.accept_entry(PendingEntry(
-            prompt="напоминание", message_id=0, message=None,
-            source="reminder", reply_target=42,
-        ))
+    async def record_batch(batch):
+        processed.append(batch)
+        async with chat._lock:
+            chat.phase = ChatPhase.IDLE
+
+    chat._start_processing = record_batch
+
+    async def probe_then_remind():
+        # The reminder fires at the worst possible moment: mid-switch.
+        await chat.run_urgent_prompt("прими таблетки")
         return {"primary": {"usedPercent": 1}}
 
-    new.read_quota = slow_probe
-    chat._drain_or_idle = capture_drain
+    new.read_quota = probe_then_remind
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is True, "switch failed"
+    delivered = [e.prompt for batch in processed for e in batch]
+    assert delivered == ["прими таблетки"], (
+        f"reminder not delivered exactly once: {delivered}"
+    )
+    assert chat.deferred == [], "reminder left stranded in the deferred queue"
+
+
+def test_a_reminder_is_not_lost_when_the_switch_fails(tmp_path, monkeypatch):
+    """Even on the failure path the deferred work must still be drained."""
+    broken = FakeSession("codex", probe_ok=False)
+    chat, _ = make_chat(tmp_path, monkeypatch, new_session=broken)
+
+    processed: list[list[PendingEntry]] = []
+
+    async def record_batch(batch):
+        processed.append(batch)
+        async with chat._lock:
+            chat.phase = ChatPhase.IDLE
+
+    chat._start_processing = record_batch
+
+    async def fail_after_reminder():
+        await chat.run_urgent_prompt("прими таблетки")
+        raise RuntimeError("app-server did not answer")
+
+    broken.read_quota = fail_after_reminder
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is False
+    delivered = [e.prompt for batch in processed for e in batch]
+    assert delivered == ["прими таблетки"], (
+        f"reminder lost on the failure path: {delivered}"
+    )
+
+
+# ---------- bridge session revocation (T5e) ----------
+
+
+def test_switch_revokes_the_old_runtimes_bridge_handles(tmp_path, monkeypatch):
+    """A handle must not outlive the runtime it was issued to."""
+    import tool_bridge
+
+    tool_bridge._SESSIONS.clear()
+    stale = tool_bridge.issue_session(42, runtime="claude")
+    chat, _ = make_chat(tmp_path, monkeypatch)
+
+    assert tool_bridge.session_chat(stale) == 42
+    asyncio.run(chat.switch_runtime("codex"))
+    assert tool_bridge.session_chat(stale) is None, "retired runtime kept a live handle"
+
+
+def test_revocation_does_not_disturb_another_chat(tmp_path, monkeypatch):
+    """With two users, one person's switch must not cancel the other's turn."""
+    import tool_bridge
+
+    tool_bridge._SESSIONS.clear()
+    ours = tool_bridge.issue_session(42, runtime="claude")
+    theirs = tool_bridge.issue_session(999, runtime="claude")
+    chat, _ = make_chat(tmp_path, monkeypatch)
+
+    asyncio.run(chat.switch_runtime("codex"))
+
+    assert tool_bridge.session_chat(ours) is None
+    assert tool_bridge.session_chat(theirs) == 999, "another chat's session was revoked"
+
+
+def test_revocation_is_scoped_to_the_retired_runtime(tmp_path, monkeypatch):
+    """A handle already issued to the incoming runtime must survive the switch."""
+    import tool_bridge
+
+    tool_bridge._SESSIONS.clear()
+    old_handle = tool_bridge.issue_session(42, runtime="claude")
+    new_handle = tool_bridge.issue_session(42, runtime="codex")
+    chat, _ = make_chat(tmp_path, monkeypatch)
+
+    asyncio.run(chat.switch_runtime("codex"))
+
+    assert tool_bridge.session_chat(old_handle) is None
+    assert tool_bridge.session_chat(new_handle) == 42
+
+
+def test_revoke_chat_sessions_reports_what_it_removed(tmp_path):
+    import tool_bridge
+
+    tool_bridge._SESSIONS.clear()
+    tool_bridge.issue_session(42, runtime="claude")
+    tool_bridge.issue_session(42, runtime="claude")
+    tool_bridge.issue_session(42, runtime="codex")
+
+    assert tool_bridge.revoke_chat_sessions(42, "claude") == 2
+    assert tool_bridge.revoke_chat_sessions(42) == 1
+    assert tool_bridge.revoke_chat_sessions(42) == 0
+
+
+def test_switch_survives_a_broken_bridge(tmp_path, monkeypatch):
+    """Revocation is hygiene; failing it must not strand the chat mid-switch."""
+    import tool_bridge
+
+    def boom(*a, **kw):
+        raise RuntimeError("bridge is down")
+
+    monkeypatch.setattr(tool_bridge, "revoke_chat_sessions", boom)
+    chat, _ = make_chat(tmp_path, monkeypatch)
 
     result = asyncio.run(chat.switch_runtime("codex"))
 
     assert result["ok"] is True
-    assert len(drained) == 1, "the reminder was lost during the switch"
-    assert drained[0][0].prompt == "напоминание"
+    assert chat.runtime_id == "codex"
 
 
 def test_switch_without_a_builder_fails_safely(tmp_path, monkeypatch):

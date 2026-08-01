@@ -59,5 +59,40 @@ open(p,"w").write(s)
 PY
 run
 
+cp "$BACKUP" "$FILE"
+
 echo
-echo "Expected: baseline green; A -> 3 failures; B -> 1; C -> 2."
+echo "== mutant D: bridge handles not revoked on switch =="
+python3 - <<'PY'
+p="chat_state.py"; s=open(p).read()
+s=s.replace("            revoke_chat_sessions(self.chat_id, old_runtime)", "            pass")
+open(p,"w").write(s)
+PY
+run
+cp "$BACKUP" "$FILE"
+
+echo
+echo "== mutant E: revocation ignores chat scoping (hits other users) =="
+BRIDGE_BACKUP=$(mktemp); cp tool_bridge.py "$BRIDGE_BACKUP"
+python3 - <<'PY'
+p="tool_bridge.py"; s=open(p).read()
+s=s.replace("        if cid == chat_id and (not runtime or owner == runtime)",
+            "        if (not runtime or owner == runtime)")
+open(p,"w").write(s)
+PY
+run
+cp "$BRIDGE_BACKUP" tool_bridge.py; rm -f "$BRIDGE_BACKUP"
+
+echo
+echo "== mutant F: post-switch drain removed (reminder stranded) =="
+python3 - <<'PY'
+p="chat_state.py"; s=open(p).read()
+s=s.replace("""        # Anything that arrived during the swap (a reminder, a queued message)
+        # is drained here rather than dropped.
+        await self._drain_or_idle(record_activity=False)""", "        pass")
+open(p,"w").write(s)
+PY
+run
+
+echo
+echo "Expected: baseline green; A -> 3; B -> 1; C -> 2; D -> 3; E -> 1; F -> 1."

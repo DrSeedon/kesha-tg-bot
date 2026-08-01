@@ -38,9 +38,11 @@ TOKEN_ENV = "KESHA_BRIDGE_TOKEN"
 _TOKEN_HEADER = "X-Kesha-Bridge-Token"
 _SESSION_HEADER = "X-Kesha-Bridge-Session"
 
-# Server-issued session -> (chat it acts on, expiry). The caller receives an
-# opaque handle and cannot derive or forge another chat's session from it.
-_SESSIONS: dict[str, tuple[int, float]] = {}
+# Server-issued session -> (chat it acts on, expiry, owning runtime). The caller
+# receives an opaque handle and cannot derive or forge another chat's session
+# from it. The runtime is recorded so a handle can be revoked when the runtime
+# that owns it is retired.
+_SESSIONS: dict[str, tuple[int, float, str]] = {}
 
 # A handle reaches the model: Codex sees the headers of its own requests, and
 # model history flows into RAG and compact summaries. An immortal handle in the
@@ -48,7 +50,11 @@ _SESSIONS: dict[str, tuple[int, float]] = {}
 SESSION_TTL_SECONDS = 3600
 
 
-def issue_session(chat_id: int, ttl: float = SESSION_TTL_SECONDS) -> str:
+def issue_session(
+    chat_id: int,
+    ttl: float = SESSION_TTL_SECONDS,
+    runtime: str = "",
+) -> str:
     """Bind a fresh opaque session handle to a chat, server-side.
 
     Addressing must ride the transport, not a process global: with two users a
@@ -58,7 +64,7 @@ def issue_session(chat_id: int, ttl: float = SESSION_TTL_SECONDS) -> str:
     """
     _purge_expired()
     handle = secrets.token_urlsafe(24)
-    _SESSIONS[handle] = (chat_id, time.monotonic() + ttl)
+    _SESSIONS[handle] = (chat_id, time.monotonic() + ttl, runtime)
     return handle
 
 
@@ -67,9 +73,35 @@ def revoke_session(handle: str) -> None:
     _SESSIONS.pop(handle, None)
 
 
+def revoke_chat_sessions(chat_id: int, runtime: str = "") -> int:
+    """Revoke a chat's handles, optionally only those owned by one runtime.
+
+    Called when a chat swaps runtimes: a handle issued to the retired runtime
+    must not outlive it, or a straggling process could still act on the chat.
+    Scoped by chat so a switch in one chat cannot disturb a turn running in
+    another — with two users, that would be one person's action cancelling the
+    other's work.
+    """
+    doomed = [
+        handle
+        for handle, (cid, _, owner) in _SESSIONS.items()
+        if cid == chat_id and (not runtime or owner == runtime)
+    ]
+    for handle in doomed:
+        del _SESSIONS[handle]
+    if doomed:
+        logger.info(
+            "bridge: revoked %d session(s) for chat %s%s",
+            len(doomed),
+            chat_id,
+            f" (runtime={runtime})" if runtime else "",
+        )
+    return len(doomed)
+
+
 def _purge_expired() -> None:
     now = time.monotonic()
-    for handle in [h for h, (_, exp) in _SESSIONS.items() if exp <= now]:
+    for handle in [h for h, (_, exp, _rt) in _SESSIONS.items() if exp <= now]:
         del _SESSIONS[handle]
 
 
@@ -77,7 +109,7 @@ def session_chat(handle: str) -> int | None:
     entry = _SESSIONS.get(handle)
     if entry is None:
         return None
-    chat_id, expires_at = entry
+    chat_id, expires_at, _runtime = entry
     if expires_at <= time.monotonic():
         del _SESSIONS[handle]
         logger.info("bridge: session expired")
