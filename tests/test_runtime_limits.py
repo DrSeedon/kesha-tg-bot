@@ -26,6 +26,8 @@ class LimitedCodexSession:
         self._quota = quota
         self._streamed = streamed
         self.model = "gpt-5.6-sol"
+        self.session_id = "codex-thread"
+        self.usage_limit_active = False
 
     def quota_summary(self):
         if not self._quota:
@@ -216,6 +218,123 @@ def test_runtime_label_falls_back_when_the_registry_cannot_answer():
 
     response_stream.set_registry(Broken())
     assert response_stream._runtime_label(7) == ""
+
+
+# ---------- the pre-turn reserve path (chat_state) ----------
+
+
+def _chat_with(session, runtime_id="codex"):
+    """A ChatState wired just enough to render a rejected batch."""
+    from chat_state import ChatState
+
+    class Store:
+        def begin_activity(self, *a, **kw):
+            return ""
+
+        def finish_activity(self, *a, **kw):
+            return ""
+
+        def get_activity(self, chat_id):
+            return None
+
+        def claim_auto_attempt(self, *a):
+            return False
+
+    return ChatState(
+        chat_id=42, session=session, bot=FakeBot(), debounce_sec=1, ask_fn=None,
+        set_current_chat_fn=lambda c: None, get_lazy_block_fn=lambda c: ("", [], []),
+        compact_session_fn=None, activity_store=Store(), work_dir="/tmp",
+        runtime_id=runtime_id, build_runtime_fn=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reserve_rejection_names_the_runtime_and_its_reset():
+    """The pre-turn reserve path had the same hardcoded 'Claude' as the stream.
+
+    Drives the real rejection through _run_batch so that removing the
+    `fmt = self._limit_fmt()` wiring fails here — asserting on the helper
+    alone would leave the call site untested.
+    """
+    from chat_state import PendingEntry
+
+    class Refusing(LimitedCodexSession):
+        async def check_context_reserve(self, combined="", *, manual=False):
+            return {"ok": False, "reason": "usage_limit"}
+
+    chat = _chat_with(Refusing(), runtime_id="codex")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+    await chat._run_batch([
+        PendingEntry(prompt="привет", message_id=0, message=None,
+                     source="reminder", reply_target=42)
+    ])
+
+    text = " ".join(t for _, t in chat.bot.sent)
+    assert "codex" in text, f"runtime not named: {text!r}"
+    assert "08.08 12:53" in text, f"reset time missing: {text!r}"
+    assert "Claude" not in text, "named the wrong subscription"
+
+
+def test_reserve_rejection_omits_a_reset_it_does_not_know():
+    chat = _chat_with(LimitedCodexSession(quota=False), runtime_id="codex")
+    fmt = chat._limit_fmt()
+
+    assert fmt["reset"] == ""
+    rendered = STRINGS["ru"]["context_usage_limit"].format(**fmt)
+    assert "(сброс" not in rendered
+
+
+def test_reserve_rejection_still_names_claude_on_the_default_runtime():
+    class Bare:
+        pass
+
+    chat = _chat_with(Bare(), runtime_id="claude")
+    rendered = STRINGS["ru"]["context_usage_limit"].format(**chat._limit_fmt())
+    assert "claude" in rendered.lower()
+
+
+def test_no_user_facing_string_hardcodes_a_provider_on_a_shared_path():
+    """Guard against the next copy of this bug.
+
+    Strings reachable from BOTH runtimes must not name one. compact.py's
+    Claude-specific text is exempt: it is only reachable through the
+    non-native compaction branch (verified in T6).
+    """
+    shared_keys = (
+        "session_limit", "context_usage_limit", "context_limit",
+        "context_reserve", "context_unknown", "session_unavailable",
+        "compact_floor",
+    )
+    for lang in ("ru", "en"):
+        for key in shared_keys:
+            text = STRINGS[lang][key]
+            assert "Claude" not in text, (
+                f"STRINGS[{lang}][{key}] hardcodes a provider on a shared path"
+            )
+
+
+def test_a_terminal_notice_never_dies_on_a_missing_placeholder():
+    """Adding a placeholder must not turn a notice into silence.
+
+    Caught by an existing test when {runtime}/{reset} were introduced: a
+    caller that omits them used to raise KeyError, which would swallow the
+    very explanation the message exists to deliver.
+    """
+    from config import render
+
+    for key in ("context_usage_limit", "session_limit"):
+        for lang in ("ru", "en"):
+            text = render(key, lang)          # no kwargs at all
+            assert text, f"{lang}/{key} rendered empty"
+            assert "{" not in text, f"{lang}/{key} leaked a raw placeholder"
+
+
+def test_render_still_substitutes_what_it_is_given():
+    from config import render
+
+    text = render("context_usage_limit", "ru", runtime="codex",
+                  reset=" (сброс 08.08 12:53)")
+    assert "codex" in text and "08.08 12:53" in text
 
 
 def test_limit_string_carries_both_runtime_and_reset():

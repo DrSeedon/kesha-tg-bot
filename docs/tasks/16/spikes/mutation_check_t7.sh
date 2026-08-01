@@ -50,5 +50,35 @@ open(p,"w").write(s)
 PY
 run
 
+cp "$BACKUP" "$FILE"
+
 echo
-echo "Expected: baseline green; J -> 1 failure; K -> 1; L -> 5."
+echo "== mutant M: reserve path stops passing runtime/reset =="
+CS_BACKUP=$(mktemp); cp chat_state.py "$CS_BACKUP"
+python3 - <<'PY'
+p="chat_state.py"; s=open(p).read()
+s=s.replace('                    key = "context_usage_limit"\n                    fmt = self._limit_fmt()',
+            '                    key = "context_usage_limit"')
+open(p,"w").write(s)
+PY
+run
+cp "$CS_BACKUP" chat_state.py; rm -f "$CS_BACKUP"
+
+echo
+echo "== mutant N: hardcoded provider name restored in the shared string =="
+CFG_BACKUP=$(mktemp); cp config.py "$CFG_BACKUP"
+python3 - <<'PY'
+import re
+p = "config.py"
+s = open(p).read()
+# Put a provider name back into the shared string, whatever its current wording.
+s = re.sub(r'("context_usage_limit": ")([^"]*)(")',
+           lambda m: m.group(1) + "Claude plan limit reached" + m.group(3),
+           s)
+open(p, "w").write(s)
+PY
+run
+cp "$CFG_BACKUP" config.py; rm -f "$CFG_BACKUP"
+
+echo
+echo "Expected: baseline green; J -> 1; K -> 1; L -> 5; M -> 1; N -> 2."

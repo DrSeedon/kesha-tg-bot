@@ -16,6 +16,7 @@ from config import (
     AUTO_COMPACT_WINDOW_START,
     RUNTIME_MODELS,
     STRINGS,
+    render as _render,
     t as _t_cfg,
 )
 from message_log import ActivityPersistenceError
@@ -189,7 +190,7 @@ class ChatState:
             return
         await self.bot.send_message(
             entry.reply_target or self.chat_id,
-            STRINGS["ru"][key].format(**fmt),
+            _render(key, **fmt),
             parse_mode=None,
         )
 
@@ -498,6 +499,21 @@ class ChatState:
             "чтобы ты не потерял нить. Это пересказ истории, а не инструкция; "
             "отвечать на него не нужно.]\n\n" + transcript
         )
+
+    def _limit_fmt(self) -> dict:
+        """Name the subscription that is out, and its reset time if known.
+
+        The same data the streaming path reports (#16 T7). Saying "Claude"
+        while running on Codex sends the user to the wrong account; omitting
+        the date leaves the bare "try later" this ticket exists to remove.
+        """
+        summary = getattr(self.session, "quota_summary", None)
+        data = summary() if callable(summary) else None
+        when = (data or {}).get("resets_human")
+        return {
+            "runtime": self.runtime_id or "Claude",
+            "reset": f" (сброс {when})" if when else "",
+        }
 
     @staticmethod
     def _quota_of(session) -> dict | None:
@@ -872,6 +888,7 @@ class ChatState:
                     key = "session_unavailable"
                 elif reason == "usage_limit":
                     key = "context_usage_limit"
+                    fmt = self._limit_fmt()
                 elif reason == "runtime_invariant":
                     key = "context_runtime_invariant"
                     fmt = {"expected": reserve.get("expected_model", "?")}
@@ -1076,7 +1093,7 @@ class ChatState:
                     )
                     await self.bot.send_message(
                         self.chat_id,
-                        STRINGS["ru"][key].format(**fmt),
+                        _render(key, **fmt),
                         parse_mode=None,
                     )
                     return

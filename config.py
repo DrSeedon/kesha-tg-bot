@@ -104,7 +104,7 @@ STRINGS = {
         "context_limit": "🧠 Контекст заполнен. Отправь /compact, чтобы продолжить без очистки.",
         "context_reserve": "🧠 Контекст почти заполнен. Отправь /compact, затем повтори сообщение.",
         "context_unknown": "⚠️ Не удалось проверить свободный контекст. Повтори сообщение чуть позже.",
-        "context_usage_limit": "🚧 Упёрлись в лимит плана Claude. Подожди сброса лимита и повтори — контекст тут ни при чём.",
+        "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.",
         "context_runtime_invariant": "⚠️ Рантайм не совпал с ожидаемой конфигурацией (ждём {expected}: 1M контекст, 64k вывода, авто-компакт выключен). Сообщение не отправлено — проверь конфиг.",
         "session_unavailable": "⚠️ Сохранённая сессия недоступна. Отправь /clear, чтобы начать новую.",
         "compact_native_start": "🗜 Сжимаю контекст средствами {runtime} (было {before:.0f}%)...",
@@ -177,7 +177,7 @@ STRINGS = {
         "context_limit": "🧠 Context is full. Send /compact to continue without clearing it.",
         "context_reserve": "🧠 Context is almost full. Send /compact, then resend your message.",
         "context_unknown": "⚠️ Could not verify free context. Please resend the message shortly.",
-        "context_usage_limit": "🚧 Hit the Claude plan limit. Wait for the limit to reset and resend — this is not a context problem.",
+        "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.",
         "context_runtime_invariant": "⚠️ The runtime did not match the expected configuration (want {expected}: 1M context, 64k output, auto-compact off). Message not sent — check the config.",
         "session_unavailable": "⚠️ The saved session is unavailable. Send /clear to start a new one.",
         "compact_native_start": "🗜 Compacting context via {runtime} (was {before:.0f}%)...",
@@ -230,11 +230,28 @@ STRINGS = {
 }
 
 
-def t(msg: types.Message, key: str, **kw) -> str:
-    lang = (msg.from_user.language_code or "en")[:2]
+class _Blank(dict):
+    """Missing placeholders render as empty, never as an exception.
+
+    These strings are terminal notices: they exist to explain why a message
+    could not be answered. A KeyError here would swallow the explanation and
+    leave the user with silence — the exact failure the message prevents.
+    """
+
+    def __missing__(self, key):
+        return ""
+
+
+def render(key: str, lang: str = "ru", **kw) -> str:
+    """Format a STRINGS entry, tolerating callers that omit optional fields."""
     if lang not in STRINGS:
         lang = "en"
-    return STRINGS[lang][key].format(**kw)
+    return STRINGS[lang][key].format_map(_Blank(kw))
+
+
+def t(msg: types.Message, key: str, **kw) -> str:
+    lang = (msg.from_user.language_code or "en")[:2]
+    return render(key, lang, **kw)
 
 
 # --- System Prompt ---

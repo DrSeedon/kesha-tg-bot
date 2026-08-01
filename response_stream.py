@@ -16,7 +16,14 @@ from claude_session import (
     is_context_limit as _is_context_limit,
     usage_limit_reset as _session_limit_reset,
 )
-from config import MAX_RETRIES, STRINGS, TG_MSG_LIMIT, logger, t as _t_cfg
+from config import (
+    MAX_RETRIES,
+    STRINGS,
+    TG_MSG_LIMIT,
+    logger,
+    render as _render,
+    t as _t_cfg,
+)
 from telegram_io import (
     _send_safe,
     split_msg,
@@ -349,7 +356,7 @@ async def _ask_inner(message, prompt, cid, typer):
         notice = (
             _t_cfg(message, "session_limit", reset=reset, runtime=runtime)
             if message is not None
-            else STRINGS["ru"]["session_limit"].format(reset=reset, runtime=runtime)
+            else _render("session_limit", reset=reset, runtime=runtime)
         )
         await _finalize_status()
         parts.clear()
@@ -397,7 +404,7 @@ async def _ask_inner(message, prompt, cid, typer):
         notice = (
             _t_cfg(message, key, **fmt)
             if message is not None
-            else STRINGS["ru"][key].format(**fmt)
+            else _render(key, **fmt)
         )
         await _finalize_status()
         parts.clear()
