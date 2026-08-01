@@ -166,14 +166,19 @@ class ChatState:
         self,
         batch: list[PendingEntry],
         key: str,
+        **fmt,
     ) -> None:
         entry = batch[-1]
         if entry.message is not None:
-            await entry.message.answer(_t_cfg(entry.message, key), parse_mode=None)
+            text = _t_cfg(entry.message, key)
+            await entry.message.answer(
+                text.format(**fmt) if fmt else text, parse_mode=None
+            )
             return
+        text = STRINGS["ru"][key]
         await self.bot.send_message(
             entry.reply_target or self.chat_id,
-            STRINGS["ru"][key],
+            text.format(**fmt) if fmt else text,
             parse_mode=None,
         )
 
@@ -634,11 +639,17 @@ class ChatState:
                 reserve = await self.session.check_context_reserve(combined)
             if not reserve.get("ok"):
                 reason = reserve.get("reason")
+                fmt = {}
                 if reason == "reserve":
                     await self.mark_context_reserve_blocked()
                     key = "context_reserve"
                 elif reason == "session_unavailable":
                     key = "session_unavailable"
+                elif reason == "usage_limit":
+                    key = "context_usage_limit"
+                elif reason == "runtime_invariant":
+                    key = "context_runtime_invariant"
+                    fmt = {"expected": reserve.get("expected_model", "?")}
                 else:
                     key = "context_unknown"
                 logger.warning(
@@ -646,7 +657,7 @@ class ChatState:
                     self.chat_id,
                     reason,
                 )
-                await self._send_batch_terminal(batch, key)
+                await self._send_batch_terminal(batch, key, **fmt)
                 return
 
             previews = []

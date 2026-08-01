@@ -496,3 +496,123 @@ async def test_send_message_never_invalidates_or_recursively_retries_sid(
     assert client.queries == ["hello"]
     assert session.session_id == "sid-old"
     assert (tmp_path / "session").read_text() == "sid-old"
+
+
+def limit_result_without_model_usage(text=RAW_LIMIT):
+    """The exact shape production returned on 2026-08-01.
+
+    A plan-limit Result arrives with is_error=False and NO model_usage:
+    the limit notice replaces the usage payload. Absent usage must never be
+    read as proof that the runtime is wrong.
+    """
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="sid-new",
+        result=text,
+        api_error_status=None,
+        model_usage={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_result_does_not_latch_runtime_invariant(tmp_path):
+    """Production incident: a quota hit bricked the bot until restart.
+
+    The limit Result carries no model_usage, the old code latched
+    _max_output_tokens_valid=False, and every later message was rejected
+    with runtime_invariant forever.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(limit_result_without_model_usage())
+    await task
+
+    assert session.usage_limit_active is True
+    assert session._max_output_tokens_valid is True, (
+        "a usage limit is a temporary condition and must not latch the "
+        "runtime invariant"
+    )
+
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+    assert outcome["reason"] != "runtime_invariant"
+
+
+@pytest.mark.asyncio
+async def test_empty_model_usage_on_plain_result_does_not_latch(tmp_path):
+    """Absent usage proves nothing about the runtime — only a contradiction does."""
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="",
+            api_error_status=None,
+            model_usage={},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True
+
+
+@pytest.mark.asyncio
+async def test_latch_clears_on_next_valid_usage(tmp_path):
+    """A contradicted invariant still fails closed, but must be recoverable."""
+    session, client = make_session(tmp_path)
+
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(result(max_output=32_000))
+    await task
+    assert session._max_output_tokens_valid is False
+
+    task = asyncio.create_task(collect(session, "second"))
+    await asyncio.sleep(0)
+    await client.events.put(result())
+    await task
+
+    assert session._max_output_tokens_valid is True, (
+        "a proven-good usage payload must clear the latch without a restart"
+    )
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+    assert outcome["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_reserve_admits_normal_message_on_real_config(tmp_path):
+    """Config-driven: the model actually deployed must pass the reserve.
+
+    The 167-test suite went green while production rejected every message,
+    because every reserve test built usage from EXPECTED_CONTEXT_MODEL
+    itself. This derives the runtime model from config.MODEL instead.
+    """
+    import config
+
+    session, client = make_session(tmp_path)
+    session.model = config.MODEL
+
+    resolved = session._make_options().model
+    assert resolved == EXPECTED_CONTEXT_MODEL, (
+        f"config.MODEL={config.MODEL!r} resolves to {resolved!r} but the "
+        f"reserve expects {EXPECTED_CONTEXT_MODEL!r} — these must be derived "
+        f"from one source, not kept in sync by hand"
+    )
+
+    client.context_usage = context_usage(10_000, model=resolved)
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["ok"] is True, f"normal message rejected: {outcome!r}"
+    assert outcome["reason"] is None

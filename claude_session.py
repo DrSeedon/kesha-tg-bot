@@ -24,10 +24,26 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 
+from config import MODEL
+
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path("./storage/sessions")
-EXPECTED_CONTEXT_MODEL = "claude-opus-5[1m]"
+
+
+def resolve_context_model(model: str, use_1m: bool = True) -> str:
+    """Return the model name as the runtime reports it back in usage payloads.
+
+    Single source of truth for the `[1m]` suffix: `_make_options` and the
+    reserve invariant both go through here, so a config change cannot leave
+    them disagreeing.
+    """
+    if use_1m and "[1m]" not in model:
+        return f"{model}[1m]"
+    return model
+
+
+EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
 MANUAL_COMPACT_FLOOR_TOKENS = 80_000
@@ -240,9 +256,7 @@ class ClaudeSession:
         return PermissionResultAllow(updated_input=tool_input)
 
     def _make_options(self) -> ClaudeAgentOptions:
-        model = self.model
-        if self.use_1m and "[1m]" not in model:
-            model = f"{model}[1m]"
+        model = resolve_context_model(self.model, self.use_1m)
         options = ClaudeAgentOptions(
             model=model,
             cwd=self.cwd,
@@ -377,7 +391,20 @@ class ClaudeSession:
                             else None
                         )
                         if observed_max_output == EXPECTED_MAX_OUTPUT_TOKENS:
+                            # A proven-good payload also clears an earlier latch:
+                            # the runtime is demonstrably correct right now.
                             self.last_max_output_tokens = observed_max_output
+                            self._max_output_tokens_valid = True
+                        elif observed_max_output is None:
+                            # Absent usage is not evidence of a wrong runtime.
+                            # Usage-limit and other short-circuited results carry
+                            # no model_usage; latching here bricked production
+                            # until restart (2026-08-01).
+                            logger.warning(
+                                "Terminal result carried no usage for %s; "
+                                "runtime invariant left unchanged",
+                                EXPECTED_CONTEXT_MODEL,
+                            )
                         else:
                             self._max_output_tokens_valid = False
                             logger.error(
@@ -542,11 +569,21 @@ class ClaudeSession:
             logger.warning("Context reserve connect failed (%s): %s", reason, exc)
             return {"ok": False, "reason": reason, "required": required}
 
+        if self.usage_limit_active:
+            return {"ok": False, "reason": "usage_limit", "required": required}
+
         if not self._max_output_tokens_valid:
+            logger.error(
+                "Context reserve blocked: last terminal usage contradicted "
+                "the runtime invariant (expected model=%s maxOutputTokens=%d)",
+                EXPECTED_CONTEXT_MODEL,
+                EXPECTED_MAX_OUTPUT_TOKENS,
+            )
             return {
                 "ok": False,
                 "reason": "runtime_invariant",
                 "required": required,
+                "expected_model": EXPECTED_CONTEXT_MODEL,
             }
 
         try:
