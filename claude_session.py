@@ -183,6 +183,12 @@ class ClaudeSession:
         if self.session_id != snapshot.session_id:
             raise RuntimeError("source session changed during summary")
         snapshot.candidate_started = True
+        # Refresh the validation evidence: the source-summary request ran AFTER
+        # begin_session_replacement(), so it may have proven the runtime good or
+        # contradicted it. Rolling back to the pre-summary values would discard
+        # what we just learned about the source session.
+        snapshot.max_output_tokens_valid = self._max_output_tokens_valid
+        snapshot.last_max_output_tokens = self.last_max_output_tokens
         self._pending_disconnect = self._client or self._pending_disconnect
         self._client = None
         self._connected = False
@@ -392,7 +398,21 @@ class ClaudeSession:
                         self.total_cost_usd += msg.total_cost_usd
                     if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
-                    if not msg.is_error:
+
+                    # Classify a quota/short-circuit terminal BEFORE touching the
+                    # runtime invariant. Such a result may still carry a partial
+                    # usage map (e.g. only the auxiliary Haiku entry observed in
+                    # production), and reading that as "the expected model is
+                    # missing" would weld admission shut again.
+                    raw_result = str(msg.result or "")
+                    result_is_limit = (
+                        pending_limit is not None
+                        or getattr(msg, "api_error_status", None) == 429
+                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
+                        or usage_limit_reset(raw_result) is not None
+                    )
+
+                    if not msg.is_error and not result_is_limit:
                         model_usage = getattr(msg, "model_usage", None) or {}
                         expected_usage = model_usage.get(self.expected_context_model)
                         observed_max_output = (
@@ -401,8 +421,13 @@ class ClaudeSession:
                             else None
                         )
                         if observed_max_output == EXPECTED_MAX_OUTPUT_TOKENS:
-                            # A proven-good payload also clears an earlier latch:
-                            # the runtime is demonstrably correct right now.
+                            # A proven-good payload also clears an earlier latch.
+                            # NOTE: this is reachable from an in-flight turn, a
+                            # compact, or after /clear — NOT from a fresh user
+                            # turn, which admission blocks first. A genuine
+                            # contradiction is therefore operator-recoverable by
+                            # /clear, by design: we do not spend a probe query
+                            # re-testing a runtime that already lied.
                             self.last_max_output_tokens = observed_max_output
                             self._max_output_tokens_valid = True
                         elif observed_max_output is None and not model_usage:
@@ -443,13 +468,6 @@ class ClaudeSession:
                         f"stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}"
                     )
 
-                    raw_result = str(msg.result or "")
-                    result_is_limit = (
-                        pending_limit is not None
-                        or getattr(msg, "api_error_status", None) == 429
-                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
-                        or usage_limit_reset(raw_result) is not None
-                    )
                     result_is_context_limit = (
                         not result_is_limit
                         and (

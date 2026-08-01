@@ -584,7 +584,12 @@ async def test_empty_model_usage_on_plain_result_does_not_latch(tmp_path):
 
 @pytest.mark.asyncio
 async def test_latch_clears_on_next_valid_usage(tmp_path):
-    """A contradicted invariant still fails closed, but must be recoverable."""
+    """A contradicted invariant fails closed but is not a one-way door.
+
+    Recovery is operator-driven: /clear, a compact, or an in-flight turn can
+    supply a good payload. A fresh user turn cannot, because admission blocks
+    first — this test drives collect() directly for exactly that reason.
+    """
     session, client = make_session(tmp_path)
 
     task = asyncio.create_task(collect(session))
@@ -659,3 +664,65 @@ async def test_terminal_usage_without_expected_model_latches(tmp_path):
     await task
 
     assert session._max_output_tokens_valid is False
+
+
+@pytest.mark.asyncio
+async def test_quota_result_with_partial_usage_does_not_latch(tmp_path):
+    """Codex round 2 [blocking]: a quota terminal may carry PARTIAL usage.
+
+    Production's model_usage really does contain an auxiliary Haiku entry
+    alongside the Opus one (measured live). A limit result carrying only that
+    auxiliary entry is non-empty but omits the expected model — classifying it
+    as drift would weld admission shut exactly like the original outage.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result=RAW_LIMIT,
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session.usage_limit_active is True
+    assert session._max_output_tokens_valid is True, (
+        "a positively identified quota result must never mutate the runtime "
+        "invariant, however partial its usage map"
+    )
+
+    client.context_usage = context_usage(10_000)
+    outcome = await session.check_context_reserve("hello")
+    assert outcome["ok"] is True, f"admission must stay open: {outcome!r}"
+
+
+@pytest.mark.asyncio
+async def test_quota_result_via_429_status_does_not_latch(tmp_path):
+    """Same guarantee via the typed 429 path rather than the text detector."""
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result="",
+            api_error_status=429,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True
