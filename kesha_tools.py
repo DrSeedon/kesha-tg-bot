@@ -23,14 +23,23 @@ def set_bot_ref(bot_module):
     _bot_ref = bot_module
 
 
+# The bridge's aiohttp handlers run in the context that started the server, not
+# the context that set the ContextVar, so a ContextVar alone is invisible to
+# them (measured: bridge saw None and returned 409). Mirror the value here so
+# out-of-process callers resolve the same chat WITHOUT ever passing chat_id.
+_active_chat_id: int | None = None
+
+
 def set_current_chat(chat_id: int):
     """Set the active chat_id for MCP tools routing. Called from bot.py before _ask."""
+    global _active_chat_id
     _current_chat_id.set(chat_id)
+    _active_chat_id = chat_id
 
 
 def get_current_chat() -> int | None:
     """Get the chat_id that triggered the current Claude session."""
-    return _current_chat_id.get(None)
+    return _current_chat_id.get(None) or _active_chat_id
 
 
 def _resolve_chat() -> int | None:
@@ -509,10 +518,47 @@ async def run_on_laptop(args):
         return {"content": [{"type": "text", "text": f"SSH error: {e}"}], "is_error": True}
 
 
+ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
+             send_photo, send_file, send_video, send_audio, send_voice, react,
+             create_reminder, list_reminders, cancel_reminder, update_reminder,
+             search_memory, run_on_laptop]
+
+# Tools still pending their own argument hardening (task #16, T3c): send_file
+# takes an arbitrary path and run_on_laptop shells out over SSH. They stay
+# in-process only until their whitelists exist.
+BRIDGE_EXCLUDED = frozenset({"send_file", "run_on_laptop"})
+
 kesha_server = create_sdk_mcp_server(
     name="kesha",
-    tools=[set_debounce, toggle_debug, get_bot_status, restart_bot,
-           send_photo, send_file, send_video, send_audio, send_voice, react,
-           create_reminder, list_reminders, cancel_reminder, update_reminder,
-           search_memory, run_on_laptop],
+    tools=ALL_TOOLS,
 )
+
+
+def bridge_tools() -> list:
+    """Tools that may be served over the out-of-process bridge."""
+    return [t for t in ALL_TOOLS if t.name not in BRIDGE_EXCLUDED]
+
+
+def tool_arg_names(tool) -> frozenset[str]:
+    """Allowed argument names for a tool, derived from its own MCP schema.
+
+    Deriving instead of restating: a hand-written list silently drifts from the
+    schema the first time a tool gains a parameter.
+    """
+    schema = tool.input_schema
+    if isinstance(schema, dict):
+        return frozenset(schema.keys())
+    properties = getattr(schema, "model_fields", None)
+    if properties:
+        return frozenset(properties.keys())
+    raise TypeError(f"cannot derive argument names for tool '{tool.name}'")
+
+
+def register_bridge_tools(bridge) -> None:
+    """Expose in-process tools over the bridge, chat_id resolved server-side."""
+    for tool in bridge_tools():
+        bridge.register(
+            tool.name,
+            tool.handler,
+            allowed_args=tool_arg_names(tool),
+        )
