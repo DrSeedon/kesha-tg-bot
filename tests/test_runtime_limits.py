@@ -1,0 +1,227 @@
+"""Quota exhaustion per runtime (#16 T7) — mocks only, no live Codex calls.
+
+The user spent an hour looking at "try later" without knowing which
+subscription was out or when it returns. A terminal limit must therefore say
+BOTH: whose limit, and when it resets.
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import response_stream  # noqa: E402
+from config import STRINGS  # noqa: E402
+
+RAW = "You've hit your usage limit"
+
+
+class LimitedCodexSession:
+    """Codex runtime that dies of quota partway through an answer."""
+
+    def __init__(self, *, quota=True, streamed="Сейчас посчитаю"):
+        self._quota = quota
+        self._streamed = streamed
+        self.model = "gpt-5.6-sol"
+
+    def quota_summary(self):
+        if not self._quota:
+            return None
+        return {
+            "used_percent": 100,
+            "resets_at": 1786168425,
+            "resets_human": "08.08 12:53",
+            "plan": "prolite",
+        }
+
+    async def send_message(self, prompt):
+        # The user has already seen text appear before the quota dies.
+        yield {"type": "text_delta", "content": self._streamed}
+        yield {"type": "error", "kind": "usage_limit", "content": RAW}
+
+
+class FakeState:
+    def __init__(self, session, runtime_id="codex"):
+        self.session = session
+        self.runtime_id = runtime_id
+        self.reserve_blocked = False
+
+    def should_stop(self):
+        return False
+
+    async def mark_context_reserve_blocked(self):
+        self.reserve_blocked = True
+
+
+class FakeRegistry:
+    def __init__(self, session, runtime_id="codex"):
+        self.state = FakeState(session, runtime_id)
+
+    def get(self, chat_id):
+        return self.state
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent = []
+        self.edits = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text))
+        return type("M", (), {"message_id": len(self.sent)})()
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+        return None
+
+    async def delete_message(self, chat_id, message_id):
+        return None
+
+    async def send_chat_action(self, *a, **kw):
+        return None
+
+
+async def completed_typer():
+    return None
+
+
+def visible_text(bot) -> str:
+    return " ".join([t for _, t in bot.sent] + [t for t, _ in bot.edits])
+
+
+async def run_turn(session, runtime_id="codex"):
+    bot = FakeBot()
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session, runtime_id))
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    await response_stream._ask_inner(None, "посчитай что-нибудь", 7, typer)
+    return bot
+
+
+# ---------- the scenario that will happen on prod at 98% quota ----------
+
+
+@pytest.mark.asyncio
+async def test_quota_dying_mid_turn_tells_the_user_why_and_until_when():
+    """Mid-answer quota death must not look like the bot going silent."""
+    bot = await run_turn(LimitedCodexSession())
+    text = visible_text(bot)
+
+    assert "лимит" in text.lower(), "user is not told there is a limit"
+    assert "08.08 12:53" in text, "the real reset time was dropped"
+    assert RAW not in text, "raw provider error leaked to the user"
+
+
+@pytest.mark.asyncio
+async def test_the_limit_message_names_the_runtime_that_is_out():
+    """Saying 'Claude' while running on Codex sends the user to the wrong account."""
+    bot = await run_turn(LimitedCodexSession(), runtime_id="codex")
+    text = visible_text(bot)
+
+    assert "codex" in text.lower()
+    assert "claude" not in text.lower(), "named the wrong subscription"
+
+
+@pytest.mark.asyncio
+async def test_claude_limit_still_names_claude():
+    """The default path must not regress into saying 'codex'."""
+
+    class LimitedClaude(LimitedCodexSession):
+        def __init__(self):
+            super().__init__()
+            self.model = "claude-opus-5"
+
+        def quota_summary(self):  # Claude reports no structured quota
+            return None
+
+    bot = await run_turn(LimitedClaude(), runtime_id="claude")
+    text = visible_text(bot)
+    assert "claude" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_without_quota_data_still_produces_a_clear_message():
+    """No reset date is not an excuse for an empty or raw message."""
+    bot = await run_turn(LimitedCodexSession(quota=False))
+    text = visible_text(bot)
+
+    assert "лимит" in text.lower()
+    assert RAW not in text
+    # It must not fabricate a date it does not have. ("жду сброса" is the
+    # ordinary wording; what must be absent is a parenthesised timestamp.)
+    assert "(сброс" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_the_live_bubble_becomes_the_limit_notice():
+    """The streamed bubble must end as the explanation, not as a cut-off answer.
+
+    NOTE: on the reminder path a partial answer already flushed as a SEPARATE
+    message survives (verified against main — pre-existing, not introduced
+    here). The guarantee tested is that the live bubble itself is replaced, so
+    the last thing the user sees is the reason and not a dangling half-sentence.
+    """
+    bot = await run_turn(LimitedCodexSession(streamed="Сейчас посчитаю, значит"))
+
+    assert bot.edits, "the live bubble was never finalized"
+    final = bot.edits[-1][0]
+    assert "лимит" in final.lower()
+    assert "Сейчас посчитаю, значит" not in final
+
+
+@pytest.mark.asyncio
+async def test_limit_is_terminal_and_not_retried():
+    """Retrying an exhausted quota burns nothing but time; it must stop at once."""
+    calls = []
+
+    class Counting(LimitedCodexSession):
+        async def send_message(self, prompt):
+            calls.append(prompt)
+            yield {"type": "text_delta", "content": "x"}
+            yield {"type": "error", "kind": "usage_limit", "content": RAW}
+
+    await run_turn(Counting())
+    assert len(calls) == 1, f"limit was retried {len(calls)} times"
+
+
+# ---------- the helpers, directly ----------
+
+
+def test_runtime_limit_suffix_prefers_the_runtimes_own_data():
+    response_stream.set_registry(FakeRegistry(LimitedCodexSession()))
+    assert response_stream._runtime_limit_suffix(7) == " (сброс 08.08 12:53)"
+
+
+def test_runtime_limit_suffix_is_none_when_the_runtime_cannot_say():
+    response_stream.set_registry(FakeRegistry(LimitedCodexSession(quota=False)))
+    assert response_stream._runtime_limit_suffix(7) is None
+
+
+def test_runtime_limit_suffix_survives_a_backend_without_quota_support():
+    class Bare:
+        pass
+
+    response_stream.set_registry(FakeRegistry(Bare()))
+    assert response_stream._runtime_limit_suffix(7) is None
+
+
+def test_runtime_label_falls_back_when_the_registry_cannot_answer():
+    class Broken:
+        def get(self, chat_id):
+            raise RuntimeError("no registry")
+
+    response_stream.set_registry(Broken())
+    assert response_stream._runtime_label(7) == ""
+
+
+def test_limit_string_carries_both_runtime_and_reset():
+    for lang in ("ru", "en"):
+        rendered = STRINGS[lang]["session_limit"].format(
+            runtime="codex", reset=" (сброс 08.08 12:53)"
+        )
+        assert "codex" in rendered
+        assert "08.08 12:53" in rendered

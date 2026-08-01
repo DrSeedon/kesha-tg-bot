@@ -31,6 +31,36 @@ _bot = None
 _registry = None
 
 
+def _runtime_limit_suffix(chat_id: int) -> Optional[str]:
+    """Reset suffix taken from the runtime itself, or None if it cannot say.
+
+    Each runtime reports its own limits (Codex through account/rateLimits, so
+    the date is real rather than parsed out of prose). Returning None lets the
+    caller fall back to the legacy text parser instead of inventing a date.
+    """
+    try:
+        session = _get_session(chat_id)
+    except Exception:
+        return None
+    summary = getattr(session, "quota_summary", None)
+    if not callable(summary):
+        return None
+    try:
+        data = summary()
+    except Exception:
+        return None
+    when = (data or {}).get("resets_human")
+    return f" (сброс {when})" if when else None
+
+
+def _runtime_label(chat_id: int) -> str:
+    """Which provider is out of quota — the user has more than one subscription."""
+    try:
+        return _registry.get(chat_id).runtime_id
+    except Exception:
+        return ""
+
+
 def _retry_after(error: Exception) -> Optional[int]:
     retry_after = getattr(error, "retry_after", None)
     if retry_after is not None:
@@ -310,11 +340,16 @@ async def _ask_inner(message, prompt, cid, typer):
         nonlocal parts, has_deltas, current_msg_id, last_edit_time
         nonlocal last_edit_text, terminal_handled
 
-        reset = _session_limit_reset(err) or ""
+        # Ask the runtime first: it knows its own provider and reset time. The
+        # Claude text parser only understands Claude's wording, so on another
+        # runtime it silently drops a reset date we actually have — leaving the
+        # user with a bare "try later" and no idea which subscription is out.
+        reset = _runtime_limit_suffix(cid) or _session_limit_reset(err) or ""
+        runtime = _runtime_label(cid) or "Claude"
         notice = (
-            _t_cfg(message, "session_limit", reset=reset)
+            _t_cfg(message, "session_limit", reset=reset, runtime=runtime)
             if message is not None
-            else STRINGS["ru"]["session_limit"].format(reset=reset)
+            else STRINGS["ru"]["session_limit"].format(reset=reset, runtime=runtime)
         )
         await _finalize_status()
         parts.clear()
