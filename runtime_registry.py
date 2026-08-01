@@ -101,14 +101,36 @@ def _claude_factory(context: RuntimeBuildContext) -> ChatRuntime:
     )
 
 
+def _codex_factory(context: RuntimeBuildContext) -> ChatRuntime:
+    from codex_session import CodexSession
+
+    return CodexSession(
+        cwd=context.cwd,
+        model=context.model,
+        system_prompt=context.system_prompt,
+        mcp_servers=context.mcp_servers,
+        session_file=context.session_file,
+        on_connecting=context.on_connecting,
+    )
+
+
 def _register_builtins() -> None:
     from claude_session import ClaudeSession
+    from codex_session import CodexSession
 
     register_runtime(
         RuntimeDefinition(
             id="claude",
             capabilities=ClaudeSession.CAPABILITIES,
             factory=_claude_factory,
+        ),
+        replace=True,
+    )
+    register_runtime(
+        RuntimeDefinition(
+            id="codex",
+            capabilities=CodexSession.CAPABILITIES,
+            factory=_codex_factory,
         ),
         replace=True,
     )
