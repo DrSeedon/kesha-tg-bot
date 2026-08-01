@@ -78,8 +78,149 @@ class FakeMessage:
         return message
 
 
+class FloodSession:
+    def __init__(self, clock):
+        self.clock = clock
+
+    async def send_message(self, prompt):
+        self.clock.now = 0.0
+        yield {"type": "text_delta", "content": "one"}
+        self.clock.now = 2.0
+        yield {"type": "text_delta", "content": " two"}
+        self.clock.now = 6.0
+        yield {"type": "text_delta", "content": " three"}
+        yield {"type": "turn_done"}
+
+
+class FinalUnchangedSession:
+    def __init__(self, clock):
+        self.clock = clock
+
+    async def send_message(self, prompt):
+        self.clock.now = 0.0
+        yield {"type": "text_delta", "content": "one"}
+        self.clock.now = 4.0
+        yield {"type": "text_delta", "content": " two"}
+        yield {"type": "turn_done"}
+
+
+class LongFloodSession:
+    def __init__(self, clock):
+        self.clock = clock
+
+    async def send_message(self, prompt):
+        self.clock.now = 0.0
+        yield {"type": "text_delta", "content": "a"}
+        self.clock.now = 2.0
+        yield {
+            "type": "text_delta",
+            "content": "b" * (response_stream.TG_MSG_LIMIT - 1),
+        }
+        self.clock.now = 6.0
+        yield {"type": "text_delta", "content": "c"}
+        yield {"type": "turn_done"}
+
+
+class FloodBot(FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.edit_calls = 0
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edit_calls += 1
+        if self.edit_calls == 1:
+            raise RuntimeError("Flood control exceeded. Retry after 30 seconds")
+        await super().edit_message_text(text, **kwargs)
+
+
+class FloodMessage(FakeMessage):
+    async def answer(self, text, **kwargs):
+        message = SimpleNamespace(message_id=40 + len(self.answers))
+        self.answers.append((text, kwargs, message.message_id))
+        return message
+
+
 async def completed_typer():
     return None
+
+
+@pytest.mark.asyncio
+async def test_chat_edit_budget_is_shared_between_bubbles(monkeypatch):
+    bot = FakeBot()
+    clock = SimpleNamespace(now=10.0)
+    sleeps = []
+
+    async def advance(delay):
+        sleeps.append(delay)
+        clock.now += delay
+
+    monkeypatch.setattr(response_stream, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(response_stream.asyncio, "sleep", advance)
+    budget_bot = response_stream._ChatEditBudgetBot(bot)
+
+    await budget_bot.edit_message_text("main", chat_id=7, message_id=1)
+    await budget_bot.edit_message_text("tool", chat_id=7, message_id=2)
+
+    assert sleeps == [pytest.approx(response_stream.CHAT_EDIT_INTERVAL)]
+    assert [edit[0] for edit in bot.edits] == ["main", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_active_edit_flood_deadline_keeps_stream_visible(monkeypatch):
+    bot = FloodBot()
+    clock = SimpleNamespace(now=0.0)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(FloodSession(clock)))
+    message = FloodMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    monkeypatch.setattr(response_stream, "monotonic", lambda: clock.now)
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    assert [answer[0] for answer in message.answers] == [
+        "one",
+        "one two",
+        "one two three",
+    ]
+    assert bot.deleted == [(7, 40), (7, 41)]
+    assert bot.edit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_finalization_skips_unchanged_plain_live_text(monkeypatch):
+    bot = FakeBot()
+    clock = SimpleNamespace(now=0.0)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(FinalUnchangedSession(clock)))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    monkeypatch.setattr(response_stream, "monotonic", lambda: clock.now)
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    assert len(bot.edits) == 1
+    assert bot.edits[0][0] == "one two"
+
+
+@pytest.mark.asyncio
+async def test_flood_fallback_deduplicates_visible_long_text(monkeypatch):
+    bot = FloodBot()
+    clock = SimpleNamespace(now=0.0)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(LongFloodSession(clock)))
+    message = FloodMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    monkeypatch.setattr(response_stream, "monotonic", lambda: clock.now)
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    visible = "a" + "b" * (response_stream.TG_MSG_LIMIT - 1)
+    assert [answer[0] for answer in message.answers] == ["a", visible, "c"]
+    assert bot.deleted == [(7, 40)]
+    assert bot.edit_calls == 1
 
 
 @pytest.mark.asyncio
