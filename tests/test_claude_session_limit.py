@@ -726,3 +726,31 @@ async def test_quota_result_via_429_status_does_not_latch(tmp_path):
     await task
 
     assert session._max_output_tokens_valid is True
+
+
+@pytest.mark.asyncio
+async def test_context_limit_result_with_partial_usage_does_not_latch(tmp_path):
+    """A context-limit short circuit must not latch either.
+
+    Latching here would block the very /compact the message tells the user to
+    run, turning a recoverable state into a dead end.
+    """
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="sid-new",
+            result=RAW_CONTEXT_LIMIT,
+            api_error_status=None,
+            model_usage={"claude-haiku-4-5-20251001": {"maxOutputTokens": 32_000}},
+        )
+    )
+    await task
+
+    assert session._max_output_tokens_valid is True

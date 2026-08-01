@@ -224,8 +224,13 @@ class ClaudeSession:
         self.session_id = snapshot.session_id
         self._session_resumed = snapshot.session_resumed
         self._last_ctx_usage = snapshot.last_ctx_usage
-        self._max_output_tokens_valid = snapshot.max_output_tokens_valid
-        self.last_max_output_tokens = snapshot.last_max_output_tokens
+        if not source_unchanged:
+            # Only restore validation evidence when the candidate actually
+            # replaced the source. If the summary failed before the candidate
+            # started, the source client never changed and whatever it just
+            # taught us about the runtime is still the freshest truth.
+            self._max_output_tokens_valid = snapshot.max_output_tokens_valid
+            self.last_max_output_tokens = snapshot.last_max_output_tokens
         self._session_replacement = None
         if source_unchanged:
             return
@@ -407,12 +412,20 @@ class ClaudeSession:
                     raw_result = str(msg.result or "")
                     result_is_limit = (
                         pending_limit is not None
+                        or limit_seen
                         or getattr(msg, "api_error_status", None) == 429
                         or getattr(msg, "terminal_reason", None) == "blocking_limit"
                         or usage_limit_reset(raw_result) is not None
                     )
+                    # A context-limit short circuit is equally not evidence about
+                    # the runtime, and latching here would block the very
+                    # /compact the message tells the user to run.
+                    short_circuited = result_is_limit or (
+                        getattr(msg, "terminal_reason", None) == "context_limit"
+                        or is_context_limit(raw_result)
+                    )
 
-                    if not msg.is_error and not result_is_limit:
+                    if not msg.is_error and not short_circuited:
                         model_usage = getattr(msg, "model_usage", None) or {}
                         expected_usage = model_usage.get(self.expected_context_model)
                         observed_max_output = (

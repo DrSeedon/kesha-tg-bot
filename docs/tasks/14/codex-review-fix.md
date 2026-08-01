@@ -130,3 +130,51 @@ The initial batch and manual compact now report `runtime_invariant`, but the ret
 **❌ Changes requested.** The two accepted blockers are correctly resolved, and model identity is consistent across ordinary and replacement sessions. Before deployment, quota results must be classified before terminal-usage validation; otherwise a benign non-empty short-circuit payload can weld the admission gate shut again.
 
 Same gate, fresher paint, one quota-shaped welding torch still lying nearby. 🔥
+
+## Round (2026-08-01T07:37:04Z)
+
+🧪 Third round finally leaves the main path boring—which is exactly what production safety code should be.
+
+## Summary
+
+All prior blocking findings are resolved.
+
+- Quota classification now precedes validation at [claude_session.py:407](/mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/upgrade-claude5/claude_session.py:407). `pending_limit`, typed `429`, `terminal_reason="blocking_limit"`, and textual detection all skip invariant mutation correctly.
+- Normal non-limit results still validate. A textual false positive could skip validation, but that same existing detector would already report the entire result as a quota failure; the reordered gate does not introduce a new failure mode.
+- `usage_limit_active` no longer blocks admission. Quota remains operator-visible through the terminal `usage_limit` outcome.
+- Per-session model validation is internally consistent.
+- Candidate commit/rollback ordering is correct: commit retains candidate evidence, while rollback discards evidence belonging to the abandoned candidate and restores the source evidence.
+- Explicit recovery for a genuine contradiction is reasonable. An independent paid probe is not required.
+- Main admission, manual compact, and retry-preflight paths now render the runtime cause correctly.
+
+No new blocking defect found.
+
+## Findings
+
+### [suggestion] Preserve quota state across multiple terminal results
+
+[claude_session.py:408](/mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/upgrade-claude5/claude_session.py:408) does not include the existing batch-level `limit_seen`. With multiple expected results—for example, if injection is used—the first result consumes `pending_limit`, but a later unmarked result can re-enter validation even though the batch is already known to have hit quota. Including `limit_seen` in `result_is_limit` would make the invariant immune to every subsequent partial terminal in that failed batch. This is not active in the current deferred-ingress flow, so it is hardening rather than a blocker.
+
+---
+
+### [suggestion] Exclude context-limit short circuits from validation too
+
+A non-error context-limit result is identified only after validation at [claude_session.py:471](/mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/upgrade-claude5/claude_session.py:471). If such a short-circuit carries only partial auxiliary usage, lines 443–447 can latch a false runtime contradiction and prevent the `/compact` recovery that the context-limit message recommends. Compute `result_is_context_limit` alongside `result_is_limit` and validate only ordinary successful terminals. No evidence says production currently returns this shape, so this is a suggestion rather than a blocker.
+
+---
+
+### [suggestion] Keep source evidence when compact fails before candidate start
+
+The refresh at [claude_session.py:185](/mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/upgrade-claude5/claude_session.py:185) correctly handles rollback after a candidate starts. However, if source summarization fails before `start_session_candidate`, rollback still restores the pre-summary latch at [claude_session.py:224](/mnt/data/Projects/Python/orchestra/worktrees/mnt-data-projects-python-kesha-tg-bot/upgrade-claude5/claude_session.py:224), even though the source client never changed. Move the `source_unchanged` return before restoring validation fields, or refresh the snapshot after every completed source-summary attempt. Otherwise a failed summary can erase new good or bad source evidence.
+
+---
+
+### [suggestion] Remove unrelated changes from the reserve fix
+
+The diff also rewrites [.serena/project.yml](/tmp/fix-reserve-v3.diff:1) and deletes two unrelated task-16 documents at [/tmp/fix-reserve-v3.diff:632](/tmp/fix-reserve-v3.diff:632) and [/tmp/fix-reserve-v3.diff:765](/tmp/fix-reserve-v3.diff:765). These changes are unrelated to reserve admission and should be restored or split into a separately reviewed commit.
+
+## Verdict
+
+**✅ APPROVED.** The production quota failure is fixed across all requested single-terminal signals, previous blockers are closed, and every persistent admission latch now has an intentional recovery contract plus a visible cause. The findings above are worthwhile hardening and scope cleanup, not release blockers.
+
+The gate is finally guarding the door instead of bricking it shut; only the spare hinges need tidying. 🚪
