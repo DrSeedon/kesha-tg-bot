@@ -347,31 +347,75 @@ def _completed(turn):
             "params": {"turnId": turn, "turn": {"id": turn, "status": "completed"}}}
 
 
+def fake_transport(session, turns: dict[str, list[dict]]):
+    """Make send_message runnable without a real app-server.
+
+    The test must drive the PUBLIC generator, not the internals: the cleanup
+    lives in send_message's `finally`, so calling `_discard_turn_events` by
+    hand would test the helper while leaving the wiring unverified. (That was
+    the original defect in this test — removing the `finally` call kept it
+    green.)
+    """
+    sequence = list(turns)
+
+    async def connect():
+        session._connected = True
+
+    async def request(method, params, **kwargs):
+        if method != "turn/start":
+            return {}
+        turn_id = sequence.pop(0)
+        for event in turns[turn_id]:
+            session._notifications.put_nowait(event)
+        return {"turn": {"id": turn_id}}
+
+    session._connect = connect
+    session._request = request
+    session.session_id = "thread-1"
+    return session
+
+
 def test_abandoned_turn_does_not_bleed_into_the_next_one(tmp_path):
     """User /stop must not make the next answer contain the previous one's tail.
 
-    response_stream breaks out of the `async for` on /stop, leaving the rest of
-    that turn queued. Measured before the fix: the following question was
-    answered with the stopped reply's leftovers, and its own text never showed.
+    Drives the real send_message generator and abandons it mid-stream, exactly
+    as response_stream does on /stop. Mutation-checked: deleting the cleanup in
+    send_message's `finally` makes this fail.
     """
-    session = make_session(tmp_path)
-    for event in (_delta("A", "ПЕРВЫЙ-"), _delta("A", "хвост1"),
-                  _delta("A", "хвост2"), _completed("A")):
-        session._notifications.put_nowait(event)
+    session = fake_transport(make_session(tmp_path), {
+        "A": [_delta("A", "ПЕРВЫЙ-"), _delta("A", "хвост1"),
+              _delta("A", "хвост2"), _completed("A")],
+        "B": [_delta("B", "ВТОРОЙ"), _completed("B")],
+    })
 
-    async def stop_early():
-        async for _ in session._consume_turn("A"):
+    async def scenario():
+        async for _ in session.send_message("вопрос 1"):
             break                       # user pressed /stop
-        session._discard_turn_events("A")
+        return [c async for c in session.send_message("вопрос 2")]
 
-        for event in (_delta("B", "ВТОРОЙ"), _completed("B")):
-            session._notifications.put_nowait(event)
-        return [c async for c in session._consume_turn("B")]
-
-    chunks = asyncio.run(stop_early())
+    chunks = asyncio.run(scenario())
     text = "".join(c["content"] for c in chunks if c["type"] == "text_delta")
-    assert "хвост" not in text, "previous turn leaked into this answer"
+    assert "хвост" not in text, f"previous turn leaked into this answer: {text!r}"
     assert text == "ВТОРОЙ"
+
+
+def test_stopped_turn_leaves_no_events_behind(tmp_path):
+    """After abandoning a turn, its remainder must not sit in the queue.
+
+    Checks the observable consequence of the `finally`, so removing that call
+    goes red here too.
+    """
+    session = fake_transport(make_session(tmp_path), {
+        "A": [_delta("A", "первый"), _delta("A", "хвост1"),
+              _delta("A", "хвост2"), _completed("A")],
+    })
+
+    async def scenario():
+        async for _ in session.send_message("вопрос"):
+            break
+
+    asyncio.run(scenario())
+    assert session._notifications.qsize() == 0, "stopped turn left events queued"
 
 
 def test_stale_turn_completed_does_not_truncate_the_live_turn(tmp_path):
