@@ -43,8 +43,11 @@ class ChatRuntime(Protocol):
     @property
     def session_id(self) -> Optional[str]: ...
 
-    async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
-        """Yield normalized chunks: text_delta | text | tool | result | turn_done | error."""
+    def send_message(self, text: str) -> AsyncGenerator[dict, None]:
+        """Yield normalized chunks: text_delta | text | tool | result | turn_done | error.
+
+        An async generator, not a coroutine — callers use `async for` directly.
+        """
         ...
 
     async def check_context_reserve(

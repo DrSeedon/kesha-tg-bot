@@ -19,6 +19,7 @@ from config import (
     DEBOUNCE_SEC,
     GREET_FLAG,
     MODEL,
+    RUNTIME,
     STRINGS,
     TOKEN,
     WORK_DIR,
@@ -148,6 +149,7 @@ async def main():
         compact_session_fn=_compact.compact_session,
         activity_store=activity_store,
         work_dir=WORK_DIR,
+        runtime=RUNTIME,
     )
 
     # Wire registry to response_stream and handlers

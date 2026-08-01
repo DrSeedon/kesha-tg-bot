@@ -885,8 +885,10 @@ class ChatRegistry:
         compact_session_fn,
         activity_store: "MessageLog",
         work_dir: str,
+        runtime: str = "claude",
     ):
         self._chats: dict[int, ChatState] = {}
+        self._runtime = runtime
         self._bot = bot
         self._mcp_config = mcp_config
         self._system_prompt = system_prompt
@@ -901,15 +903,19 @@ class ChatRegistry:
 
     def get(self, chat_id: int) -> ChatState:
         if chat_id not in self._chats:
-            from claude_session import ClaudeSession
+            from runtime_registry import RuntimeBuildContext, build_runtime
             session_file = Path(__file__).parent / "storage" / "sessions" / str(chat_id)
-            session = ClaudeSession(
-                cwd=self._work_dir,
-                model=self._model,
-                system_prompt=self._system_prompt,
-                mcp_servers=self._mcp_config,
-                session_file=session_file,
-                on_connecting=lambda: self._set_current_chat(chat_id),
+            session = build_runtime(
+                self._runtime,
+                RuntimeBuildContext(
+                    chat_id=chat_id,
+                    cwd=self._work_dir,
+                    model=self._model,
+                    system_prompt=self._system_prompt,
+                    mcp_servers=self._mcp_config,
+                    session_file=session_file,
+                    on_connecting=lambda: self._set_current_chat(chat_id),
+                ),
             )
             self._chats[chat_id] = ChatState(
                 chat_id=chat_id,
