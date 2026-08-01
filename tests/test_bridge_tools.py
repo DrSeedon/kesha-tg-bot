@@ -64,7 +64,10 @@ def test_path_taking_tools_are_gated(tool_name):
 
     tool = next(t for t in ALL_TOOLS if t.name == tool_name)
     source = inspect.getsource(tool.handler)
-    assert "resolve_sendable" in source, f"{tool_name} accepts an unchecked path"
+    # open_sendable validates AND reads: passing a path onward would reopen the
+    # file later and reintroduce the swap window closed in the T3 review.
+    assert "open_sendable" in source, f"{tool_name} accepts an unchecked path"
+    assert "FSInputFile" not in source, f"{tool_name} re-opens the path after validation"
 
 
 def test_all_tools_accounted_for():

@@ -9,11 +9,18 @@ straight out of an allowed directory.
 
 import logging
 import os
+import stat as _stat
 from pathlib import Path
 
 logger = logging.getLogger("kesha.file_access")
 
-_DEFAULT_ROOTS = "./storage:./artifacts:/tmp"
+# Telegram's own cap is 50MB for documents; refuse earlier so a huge file
+# cannot be read fully into memory just to be rejected by the API.
+MAX_SEND_BYTES = 50 * 1024 * 1024
+
+# Not bare /tmp: on the production host it is shared with other services, and a
+# default must be safe on its own rather than safe-if-nothing-else-is-breached.
+_DEFAULT_ROOTS = "./storage:./artifacts:/tmp/kesha"
 
 
 def _configured_roots() -> list[Path]:
@@ -34,8 +41,48 @@ def sendable_roots() -> list[Path]:
     return _configured_roots()
 
 
+def ensure_roots() -> None:
+    """Create configured roots at startup so legitimate paths resolve.
+
+    `resolve(strict=True)` refuses a path under a directory that does not exist,
+    so a missing scratch dir would block real sends, not just attacks.
+    """
+    for root in _configured_roots():
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("could not create sendable root %s: %s", root, exc)
+
+
 class FileNotAllowed(Exception):
     """Raised when a path escapes every configured root."""
+
+
+def open_sendable(path: str) -> tuple[Path, bytes]:
+    """Validate and read in one step, closing the check-to-use window.
+
+    `resolve_sendable` alone is not enough for delivery: aiogram's FSInputFile
+    stores the path and opens it later, so a symlink swapped in between passes
+    validation and leaks the new target (reproduced: a checked file became a
+    link to the token file before the read). Reading here means the bytes we
+    validated are the bytes we send.
+    """
+    real = resolve_sendable(path)
+    fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not _stat.S_ISREG(info.st_mode):
+            raise FileNotAllowed("not a regular file")
+        if info.st_size > MAX_SEND_BYTES:
+            raise FileNotAllowed(
+                f"file is larger than the {MAX_SEND_BYTES // (1024 * 1024)}MB limit"
+            )
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return real, b"".join(chunks)
 
 
 def resolve_sendable(path: str) -> Path:

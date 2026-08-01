@@ -117,13 +117,25 @@ def test_multiple_roots_each_allowed(monkeypatch, tmp_path):
 
 
 def test_default_roots_are_project_local():
-    """Defaults must not include the whole filesystem."""
+    """Defaults must not include the whole filesystem, nor shared /tmp."""
     from pathlib import Path
 
-    assert "/" not in file_access._DEFAULT_ROOTS.split(":")
-    for chunk in file_access._DEFAULT_ROOTS.split(":"):
-        assert chunk in ("./storage", "./artifacts", "/tmp"), chunk
-    assert Path("/etc").resolve() not in [Path(c).resolve() for c in file_access._DEFAULT_ROOTS.split(":")]
+    chunks = file_access._DEFAULT_ROOTS.split(":")
+    assert "/" not in chunks
+    # Bare /tmp is shared with other services on the production host.
+    assert "/tmp" not in chunks
+    for chunk in chunks:
+        assert chunk in ("./storage", "./artifacts", "/tmp/kesha"), chunk
+    assert Path("/etc").resolve() not in [Path(c).resolve() for c in chunks]
+
+
+def test_ensure_roots_creates_missing_scratch_dir(tmp_path, monkeypatch):
+    """strict resolve() would reject legitimate files under a missing root."""
+    scratch = tmp_path / "scratch"
+    monkeypatch.setenv("KESHA_SENDABLE_ROOTS", str(scratch))
+    assert not scratch.exists()
+    file_access.ensure_roots()
+    assert scratch.is_dir()
 
 
 def test_root_prefix_is_not_string_matched(monkeypatch, tmp_path):
@@ -136,3 +148,51 @@ def test_root_prefix_is_not_string_matched(monkeypatch, tmp_path):
     monkeypatch.setenv("KESHA_SENDABLE_ROOTS", str(root))
     with pytest.raises(FileNotAllowed, match="outside the allowed"):
         resolve_sendable(str(sibling / "loot.txt"))
+
+
+# --- TOCTOU (found via Codex review of T3) ---
+
+
+def test_open_sendable_returns_validated_bytes(rooted):
+    allowed, _ = rooted
+    path, blob = file_access.open_sendable(str(allowed / "report.pdf"))
+    assert blob == b"ok"
+    assert path == (allowed / "report.pdf").resolve()
+
+
+def test_symlink_swapped_after_check_cannot_leak(rooted):
+    """aiogram opens the path LATER; a swap in between leaked the target file."""
+    allowed, outside = rooted
+    target = allowed / "innocent.txt"
+    target.write_text("harmless")
+
+    _, blob = file_access.open_sendable(str(target))
+
+    target.unlink()
+    target.symlink_to(outside / ".env")
+
+    assert b"hunter2" not in blob, "content was re-read after validation"
+    assert blob == b"harmless"
+
+
+def test_open_sendable_still_blocks_preexisting_symlink(rooted):
+    allowed, outside = rooted
+    link = allowed / "link.txt"
+    link.symlink_to(outside / ".env")
+    with pytest.raises(FileNotAllowed, match="outside the allowed"):
+        file_access.open_sendable(str(link))
+
+
+def test_oversized_file_refused_before_full_read(rooted, monkeypatch):
+    allowed, _ = rooted
+    monkeypatch.setattr(file_access, "MAX_SEND_BYTES", 8)
+    big = allowed / "big.bin"
+    big.write_bytes(b"x" * 64)
+    with pytest.raises(FileNotAllowed, match="larger than"):
+        file_access.open_sendable(str(big))
+
+
+def test_directory_rejected_by_open_sendable(rooted):
+    allowed, _ = rooted
+    with pytest.raises(FileNotAllowed):
+        file_access.open_sendable(str(allowed))
