@@ -11,6 +11,7 @@ from pathlib import Path
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 import reminders as _rem
+from file_access import FileNotAllowed, resolve_sendable
 
 logger = logging.getLogger("kesha.tools")
 
@@ -132,9 +133,10 @@ async def send_photo(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    p = Path(path)
-    if not p.exists():
-        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        p = resolve_sendable(path)
+    except FileNotAllowed as exc:
+        return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
         from aiogram.types import FSInputFile
         photo = FSInputFile(str(p))
@@ -152,9 +154,10 @@ async def send_file(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    p = Path(path)
-    if not p.exists():
-        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        p = resolve_sendable(path)
+    except FileNotAllowed as exc:
+        return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
         from aiogram.types import FSInputFile
         doc = FSInputFile(str(p))
@@ -326,9 +329,10 @@ async def send_video(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    p = Path(path)
-    if not p.exists():
-        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        p = resolve_sendable(path)
+    except FileNotAllowed as exc:
+        return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
         from aiogram.types import FSInputFile
         video = FSInputFile(str(p))
@@ -346,9 +350,10 @@ async def send_audio(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    p = Path(path)
-    if not p.exists():
-        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        p = resolve_sendable(path)
+    except FileNotAllowed as exc:
+        return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
         from aiogram.types import FSInputFile
         audio = FSInputFile(str(p))
@@ -365,9 +370,10 @@ async def send_voice(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    p = Path(path)
-    if not p.exists():
-        return {"content": [{"type": "text", "text": f"File not found: {path}"}], "is_error": True}
+    try:
+        p = resolve_sendable(path)
+    except FileNotAllowed as exc:
+        return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
         from aiogram.types import FSInputFile
         voice = FSInputFile(str(p))
@@ -519,10 +525,9 @@ ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
              search_memory, run_on_laptop]
 
-# Tools still pending their own argument hardening (task #16, T3c): send_file
-# takes an arbitrary path and run_on_laptop shells out over SSH. They stay
-# in-process only until their whitelists exist.
-BRIDGE_EXCLUDED = frozenset({"send_file", "run_on_laptop"})
+# run_on_laptop shells out over SSH to the user's machine and still awaits its
+# own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.
+BRIDGE_EXCLUDED = frozenset({"run_on_laptop"})
 
 kesha_server = create_sdk_mcp_server(
     name="kesha",

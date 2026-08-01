@@ -45,11 +45,26 @@ def _body(resp):
 
 
 def test_dangerous_tools_are_not_exposed_yet():
-    """send_file (arbitrary path) and run_on_laptop (SSH) wait for T3c."""
+    """run_on_laptop (SSH to the user's machine) waits for T3c-3.
+
+    Path-taking tools are exposed only because file_access gates every path.
+    """
     names = {t.name for t in bridge_tools()}
-    assert BRIDGE_EXCLUDED == {"send_file", "run_on_laptop"}
+    assert BRIDGE_EXCLUDED == {"run_on_laptop"}
     assert not (names & BRIDGE_EXCLUDED)
-    assert len(names) == 14
+    assert len(names) == 15
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["send_file", "send_photo", "send_video", "send_audio", "send_voice"]
+)
+def test_path_taking_tools_are_gated(tool_name):
+    """Every exposed tool with a `path` argument must go through the whitelist."""
+    import inspect
+
+    tool = next(t for t in ALL_TOOLS if t.name == tool_name)
+    source = inspect.getsource(tool.handler)
+    assert "resolve_sendable" in source, f"{tool_name} accepts an unchecked path"
 
 
 def test_all_tools_accounted_for():
