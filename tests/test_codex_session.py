@@ -338,6 +338,69 @@ def test_context_limit_is_classified_for_compaction(tmp_path):
     assert chunks[-1]["kind"] == "context_limit"
 
 
+def _delta(turn, text):
+    return {"method": "item/agentMessage/delta", "params": {"turnId": turn, "delta": text}}
+
+
+def _completed(turn):
+    return {"method": "turn/completed",
+            "params": {"turnId": turn, "turn": {"id": turn, "status": "completed"}}}
+
+
+def test_abandoned_turn_does_not_bleed_into_the_next_one(tmp_path):
+    """User /stop must not make the next answer contain the previous one's tail.
+
+    response_stream breaks out of the `async for` on /stop, leaving the rest of
+    that turn queued. Measured before the fix: the following question was
+    answered with the stopped reply's leftovers, and its own text never showed.
+    """
+    session = make_session(tmp_path)
+    for event in (_delta("A", "ПЕРВЫЙ-"), _delta("A", "хвост1"),
+                  _delta("A", "хвост2"), _completed("A")):
+        session._notifications.put_nowait(event)
+
+    async def stop_early():
+        async for _ in session._consume_turn("A"):
+            break                       # user pressed /stop
+        session._discard_turn_events("A")
+
+        for event in (_delta("B", "ВТОРОЙ"), _completed("B")):
+            session._notifications.put_nowait(event)
+        return [c async for c in session._consume_turn("B")]
+
+    chunks = asyncio.run(stop_early())
+    text = "".join(c["content"] for c in chunks if c["type"] == "text_delta")
+    assert "хвост" not in text, "previous turn leaked into this answer"
+    assert text == "ВТОРОЙ"
+
+
+def test_stale_turn_completed_does_not_truncate_the_live_turn(tmp_path):
+    """A leftover terminator from an old turn must not end the current one."""
+    session = make_session(tmp_path)
+    for event in (_completed("OLD"), _delta("NEW", "ЖИВОЙ"), _completed("NEW")):
+        session._notifications.put_nowait(event)
+
+    chunks = asyncio.run(_collect(session._consume_turn("NEW")))
+    text = "".join(c["content"] for c in chunks if c["type"] == "text_delta")
+    assert text == "ЖИВОЙ"
+
+
+def test_discard_keeps_process_level_events(tmp_path):
+    """Cleanup is turn-scoped: a process death must survive it."""
+    session = make_session(tmp_path)
+    session._notifications.put_nowait(_delta("A", "x"))
+    session._notifications.put_nowait({"method": "_process/exited", "params": {}})
+    session._discard_turn_events("A")
+
+    remaining = [session._notifications.get_nowait()
+                 for _ in range(session._notifications.qsize())]
+    assert [m["method"] for m in remaining] == ["_process/exited"]
+
+
+async def _collect(agen):
+    return [chunk async for chunk in agen]
+
+
 def test_process_exit_ends_the_stream(tmp_path):
     session = make_session(tmp_path)
     chunks = asyncio.run(drive(session, [{"method": "_process/exited", "params": {}}]))

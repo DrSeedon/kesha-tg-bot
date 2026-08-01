@@ -476,15 +476,42 @@ class CodexSession:
             yield self._error_chunk_from_exception(exc)
             return
 
-        self._active_turn_id = (result.get("turn") or {}).get("id")
+        turn_id = (result.get("turn") or {}).get("id")
+        self._active_turn_id = turn_id
 
-        async for chunk in self._consume_turn():
-            yield chunk
+        try:
+            async for chunk in self._consume_turn(turn_id):
+                yield chunk
+        finally:
+            # The caller can abandon this generator mid-turn (user /stop breaks
+            # out of the `async for`). Anything still queued belongs to a turn
+            # nobody is listening to, and would otherwise be read as the NEXT
+            # turn's answer. Verified: without this, the tail of a stopped
+            # reply is emitted as the reply to the following question.
+            self._discard_turn_events(turn_id)
 
         self.last_duration_ms = int((time.monotonic() - started) * 1000)
         self.last_num_turns += 1
 
-    async def _consume_turn(self) -> AsyncGenerator[dict, None]:
+    def _discard_turn_events(self, turn_id: Optional[str]) -> None:
+        """Drop queued notifications belonging to a finished/abandoned turn."""
+        kept: list[dict] = []
+        while not self._notifications.empty():
+            try:
+                msg = self._notifications.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            params = msg.get("params") or {}
+            event_turn = params.get("turnId") or ((params.get("turn") or {}).get("id"))
+            # Process-level events are not turn-scoped and must survive.
+            if msg.get("method") == "_process/exited":
+                kept.append(msg)
+            elif turn_id and event_turn and event_turn != turn_id:
+                kept.append(msg)
+        for msg in kept:
+            self._notifications.put_nowait(msg)
+
+    async def _consume_turn(self, turn_id: Optional[str] = None) -> AsyncGenerator[dict, None]:
         """Translate notifications until the turn settles.
 
         The app-server reports a failure twice — once as a standalone `error`
@@ -500,6 +527,14 @@ class CodexSession:
                 raise
             method = msg.get("method") or ""
             params = msg.get("params") or {}
+
+            # Ignore anything stamped for a different turn. Without this a
+            # stale `turn/completed` from an abandoned turn would end this one
+            # before the model had said anything.
+            if turn_id and method != "_process/exited":
+                event_turn = params.get("turnId") or ((params.get("turn") or {}).get("id"))
+                if event_turn and event_turn != turn_id:
+                    continue
 
             if method == "_process/exited":
                 self._active_turn_id = None
