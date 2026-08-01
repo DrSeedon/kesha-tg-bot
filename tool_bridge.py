@@ -17,6 +17,8 @@ Argument validation (paths, laptop commands) stays with the in-process tool
 implementations — the bridge transports calls, it never widens trust.
 """
 
+import asyncio
+import contextvars
 import hmac
 import logging
 import os
@@ -33,6 +35,32 @@ SOCKET_PATH = Path(
 ).resolve()
 TOKEN_ENV = "KESHA_BRIDGE_TOKEN"
 _TOKEN_HEADER = "X-Kesha-Bridge-Token"
+_SESSION_HEADER = "X-Kesha-Bridge-Session"
+
+# Server-issued session -> chat it acts on. The caller receives an opaque handle
+# and cannot derive or forge another chat's session from it.
+_SESSIONS: dict[str, int] = {}
+
+
+def issue_session(chat_id: int) -> str:
+    """Bind a fresh opaque session handle to a chat, server-side.
+
+    Addressing must ride the transport, not a process global: with two users a
+    "last chat wins" global delivered one person's output to the other. The
+    handle is random so the caller cannot construct a session for a chat it was
+    not given.
+    """
+    handle = secrets.token_urlsafe(24)
+    _SESSIONS[handle] = chat_id
+    return handle
+
+
+def revoke_session(handle: str) -> None:
+    _SESSIONS.pop(handle, None)
+
+
+def session_chat(handle: str) -> int | None:
+    return _SESSIONS.get(handle)
 
 ToolHandler = Callable[[dict], Awaitable[dict]]
 
@@ -147,18 +175,42 @@ class ToolBridge:
                 )
             clean_args[clean_key] = value
 
-        if self._resolve_chat() is None:
-            return web.json_response({"error": "no active chat context"}, status=409)
+        handle = request.headers.get(_SESSION_HEADER, "")
+        if handle:
+            chat_id = session_chat(handle)
+            if chat_id is None:
+                logger.warning("bridge: rejected unknown session for %s", name)
+                return web.json_response({"error": "unknown session"}, status=401)
+        else:
+            # In-process callers (the Claude SDK path) carry their chat in the
+            # ContextVar already; only bridge clients need an explicit session.
+            chat_id = self._resolve_chat()
+            if chat_id is None:
+                return web.json_response({"error": "no active chat context"}, status=409)
 
         try:
             # Handlers receive normalized keys only — never the caller's spelling.
-            result = await handler(clean_args)
+            # Bind the chat for THIS call so a concurrent chat cannot steal it.
+            result = await self._run_in_chat(chat_id, handler, clean_args)
         except Exception as exc:
             logger.error("bridge: tool %s failed: %s", name, exc, exc_info=True)
             return web.json_response(
                 {"error": f"{type(exc).__name__}: {exc}"}, status=500
             )
         return web.json_response({"result": result})
+
+    @staticmethod
+    async def _run_in_chat(chat_id: int, handler: ToolHandler, args: dict):
+        """Run a handler with the chat bound to THIS call's context.
+
+        Each request gets its own copied context, so two chats served
+        concurrently cannot observe each other's chat_id.
+        """
+        import kesha_tools
+
+        context = contextvars.copy_context()
+        context.run(kesha_tools.set_current_chat, chat_id)
+        return await context.run(lambda: asyncio.ensure_future(handler(args)))
 
     async def start(self) -> None:
         app = web.Application()

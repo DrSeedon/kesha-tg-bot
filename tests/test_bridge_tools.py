@@ -17,15 +17,22 @@ from tool_bridge import ToolBridge
 
 @pytest.fixture
 def bridge(monkeypatch):
-    monkeypatch.setattr(kt, "_active_chat_id", 4242)
+    monkeypatch.setattr(
+        kt, "_current_chat_id", kt.contextvars.ContextVar("test_chat", default=4242)
+    )
     b = ToolBridge(token="t", resolve_chat=kt.get_current_chat)
     register_bridge_tools(b)
     return b
 
 
-async def _call(bridge: ToolBridge, tool: str, args: dict):
+async def _call(bridge: ToolBridge, tool: str, args: dict, session: str | None = None):
+    headers = {"X-Kesha-Bridge-Token": "t"}
+    if session:
+        headers["X-Kesha-Bridge-Session"] = session
+
     class _Req:
-        headers = {"X-Kesha-Bridge-Token": "t"}
+        def __init__(self):
+            self.headers = headers
 
         async def json(self):
             return {"tool": tool, "args": args}
@@ -90,15 +97,18 @@ async def test_chat_resolved_server_side_not_from_args(bridge, monkeypatch):
         seen["chat"] = kt.get_current_chat()
         return {"content": [{"type": "text", "text": "ok"}]}
 
+    from tool_bridge import issue_session
+
     monkeypatch.setitem(bridge._handlers, "search_memory", fake_search)
-    resp = await _call(bridge, "search_memory", {"query": "hi"})
+    resp = await _call(
+        bridge, "search_memory", {"query": "hi"}, session=issue_session(4242)
+    )
     assert resp.status == 200
     assert seen["chat"] == 4242
 
 
 @pytest.mark.asyncio
 async def test_no_active_chat_blocks_tool(monkeypatch):
-    monkeypatch.setattr(kt, "_active_chat_id", None)
     monkeypatch.setattr(kt, "_current_chat_id", kt.contextvars.ContextVar("x", default=None))
     b = ToolBridge(token="t", resolve_chat=kt.get_current_chat)
     register_bridge_tools(b)
@@ -106,11 +116,8 @@ async def test_no_active_chat_blocks_tool(monkeypatch):
     assert resp.status == 409
 
 
-def test_active_chat_mirror_survives_foreign_context(monkeypatch):
-    """A ContextVar set in one task is invisible to the bridge's handler task."""
-    monkeypatch.setattr(kt, "_active_chat_id", None)
-    kt.set_current_chat(777)
-    assert kt._active_chat_id == 777
-    # Fresh ContextVar = a different execution context, as in an aiohttp handler.
-    monkeypatch.setattr(kt, "_current_chat_id", kt.contextvars.ContextVar("y", default=None))
-    assert kt.get_current_chat() == 777
+def test_no_process_wide_chat_fallback():
+    """Regression guard: a "last chat wins" global leaked A's output into B's chat."""
+    assert not hasattr(kt, "_active_chat_id"), (
+        "process-wide chat fallback reintroduced — use a bridge session instead"
+    )

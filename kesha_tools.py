@@ -23,23 +23,19 @@ def set_bot_ref(bot_module):
     _bot_ref = bot_module
 
 
-# The bridge's aiohttp handlers run in the context that started the server, not
-# the context that set the ContextVar, so a ContextVar alone is invisible to
-# them (measured: bridge saw None and returned 409). Mirror the value here so
-# out-of-process callers resolve the same chat WITHOUT ever passing chat_id.
-_active_chat_id: int | None = None
-
-
 def set_current_chat(chat_id: int):
     """Set the active chat_id for MCP tools routing. Called from bot.py before _ask."""
-    global _active_chat_id
     _current_chat_id.set(chat_id)
-    _active_chat_id = chat_id
 
 
 def get_current_chat() -> int | None:
-    """Get the chat_id that triggered the current Claude session."""
-    return _current_chat_id.get(None) or _active_chat_id
+    """Get the chat_id that triggered the current Claude session.
+
+    Deliberately NOT backed by a process-wide fallback: with two users the
+    "last chat wins" mirror delivered user A's tool output to user B (measured).
+    Out-of-process callers carry their chat in the bridge session instead.
+    """
+    return _current_chat_id.get(None)
 
 
 def _resolve_chat() -> int | None:
