@@ -417,6 +417,8 @@ async def _ask_inner(message, prompt, cid, typer):
                 elif reason == "runtime_invariant":
                     key = "context_runtime_invariant"
                     fmt = {"expected": reserve.get("expected_model", "?")}
+                elif reason == "runtime_unhealthy":
+                    key = "context_runtime_unhealthy"
                 else:
                     key = "context_unknown"
                 logger.warning(

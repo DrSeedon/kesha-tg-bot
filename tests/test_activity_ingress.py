@@ -289,7 +289,34 @@ async def test_plain_terminal_keys_still_render():
     )
     entry = PendingEntry(prompt="x", message_id=1, message=Msg())
 
-    for key in ("context_reserve", "context_unknown", "context_usage_limit"):
+    for key in (
+        "context_reserve",
+        "context_unknown",
+        "context_usage_limit",
+        "context_runtime_unhealthy",
+    ):
         await state._send_batch_terminal([entry], key)
 
-    assert len(sent) == 3
+    assert len(sent) == 4
+
+
+def test_every_reserve_reason_has_strings_in_both_languages():
+    """#14 shipped a KeyError by adding a reason and updating only one path.
+
+    Every reason `check_context_reserve` can return must map to a key that
+    exists in ru AND en, or the refusal itself crashes at send time.
+    """
+    from config import STRINGS
+
+    keys = {
+        "context_reserve",
+        "context_unknown",
+        "context_usage_limit",
+        "context_runtime_invariant",
+        "context_runtime_unhealthy",
+        "session_unavailable",
+        "compact_floor",
+    }
+    for lang in ("ru", "en"):
+        missing = keys - set(STRINGS[lang])
+        assert not missing, f"{lang} missing {missing}"
