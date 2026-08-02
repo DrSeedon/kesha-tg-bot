@@ -49,6 +49,14 @@ EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
 MANUAL_COMPACT_FLOOR_TOKENS = 80_000
 NORMAL_TURN_RESERVE_TOKENS = 208_000
+# A healthy control request answers in 0.9-3.4s (measured, docs/tasks/20).
+# The SDK's own budget is 60s, which only ever expires when the CLI is not
+# servicing the control channel at all — never because it was "a bit slow".
+CONTEXT_PROBE_TIMEOUT_S = 10.0
+
+
+class _ProbeTimeout(Exception):
+    """Both bounded context probes went unanswered."""
 
 _USAGE_LIMIT_RE = re.compile(
     r"(hit\s+your\s+.*limit|session\s+limit|usage\s+limit|monthly\s+spend\s+limit)",
@@ -606,6 +614,40 @@ class ClaudeSession:
                 async with self._query_lock:
                     self._is_processing = False
 
+    async def _probe_context_usage(self):
+        """Ask the runtime for usage within our own budget, twice at most.
+
+        Raises `_ProbeTimeout` if both attempts go unanswered.
+
+        The orphaned attempt is deliberately NOT cancelled. The SDK removes its
+        `pending_control_responses` entry inside its own `fail_after` handler
+        (`query.py:588-590`); cancelling from outside skips that cleanup and
+        leaks one entry per timeout on a session that lives for weeks (measured
+        0->1->2->3, docs/tasks/20/spikes/ctxleak.py). Letting the task run to its
+        own timeout returns the dictionary to 0.
+        """
+        # Bind once: reconnect() may clear self._client between attempts, and a
+        # bare None here would surface as a misleading reason="unknown".
+        client = self._client
+        if client is None:
+            raise RuntimeError("context probe attempted without a connected client")
+        for attempt in (1, 2):
+            task = asyncio.ensure_future(client.get_context_usage())
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(task), timeout=CONTEXT_PROBE_TIMEOUT_S
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                # Retrieve the eventual exception so asyncio does not log the
+                # abandoned task as "exception was never retrieved".
+                task.add_done_callback(lambda t: t.cancelled() or t.exception())
+                logger.warning(
+                    "Context reserve probe attempt %d timed out after %.0fs",
+                    attempt,
+                    CONTEXT_PROBE_TIMEOUT_S,
+                )
+        raise _ProbeTimeout
+
     async def check_context_reserve(
         self,
         combined: str = "",
@@ -650,7 +692,24 @@ class ClaudeSession:
             }
 
         try:
-            usage = await self._client.get_context_usage()
+            usage = await self._probe_context_usage()
+        except _ProbeTimeout:
+            # Two bounded probes in a row went unanswered: this is not a slow
+            # runtime, it is one that has stopped servicing the control channel.
+            # Refuse (we still have no measurement) but drop the bad client so
+            # the NEXT message meets a healthy one. Never rescue this batch.
+            if self._session_replacement is None:
+                logger.error(
+                    "Context reserve probe timed out twice; reconnecting the "
+                    "unresponsive client (session_id preserved)"
+                )
+                self.reconnect()
+            else:
+                logger.error(
+                    "Context reserve probe timed out twice during an active "
+                    "session replacement; not reconnecting"
+                )
+            return {"ok": False, "reason": "runtime_unhealthy", "required": required}
         except Exception as exc:
             if self.session_id and "No conversation found" in str(exc):
                 return {

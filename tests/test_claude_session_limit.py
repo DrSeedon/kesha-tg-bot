@@ -754,3 +754,139 @@ async def test_context_limit_result_with_partial_usage_does_not_latch(tmp_path):
     await task
 
     assert session._max_output_tokens_valid is True
+
+
+# --- #20: bounded context probe, honest reason, self-healing client ---
+
+
+class HangingProbeClient(QueueClient):
+    """A client whose control request never answers, like a wedged CLI.
+
+    Measured in production: `get_context_usage` returns in 0.9-3.4s when healthy,
+    but a stopped CLI burns the SDK's full 60s default before raising.
+    """
+
+    def __init__(self, *, hang_times=1, usage=None):
+        super().__init__()
+        self.hang_times = hang_times
+        self.calls = 0
+        self.usage = usage
+        self.abandoned = 0
+
+    async def get_context_usage(self):
+        self.calls += 1
+        if self.calls <= self.hang_times:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.abandoned += 1
+                raise
+        return self.usage
+
+
+@pytest.fixture
+def fast_probe(monkeypatch):
+    """Shrink the probe budget so tests exercise logic, not wall-clock."""
+    import claude_session
+    monkeypatch.setattr(claude_session, "CONTEXT_PROBE_TIMEOUT_S", 0.05)
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_refuses_fast_instead_of_blocking_for_the_sdk_budget(tmp_path, fast_probe):
+    """Two timeouts -> runtime_unhealthy, and the caller is not held for 60s."""
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=99)
+    session._client = client
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    outcome = await session.check_context_reserve("hello")
+    elapsed = loop.time() - started
+
+    assert outcome["ok"] is False
+    assert outcome["reason"] == "runtime_unhealthy"
+    # generous ceiling: the point is "not the SDK's 60s", not a perf assertion
+    assert elapsed < 30
+
+
+@pytest.mark.asyncio
+async def test_probe_succeeding_on_retry_admits_the_message(tmp_path, fast_probe):
+    """One transient timeout must not cost the user their message."""
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=1, usage=context_usage(1000))
+    session._client = client
+
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["ok"] is True
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_does_not_leak_pending_control_entries(tmp_path, fast_probe):
+    """The orphaned probe must be abandoned, never cancelled from outside.
+
+    Cancelling from outside skips the SDK's own cleanup
+    (`query.py:588-590`), leaking one pending entry per timeout on a session
+    that lives for weeks. Measured 0->1->2->3 with a naive asyncio.wait_for.
+    """
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=99)
+    session._client = client
+
+    await session.check_context_reserve("hello")
+    await asyncio.sleep(0)
+
+    assert client.abandoned == 0
+
+
+@pytest.mark.asyncio
+async def test_second_consecutive_timeout_reconnects_but_still_refuses(tmp_path, fast_probe):
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=99)
+    session._client = client
+    session.session_id = "sid-keep"
+
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["ok"] is False
+    assert session._client is None          # reconnect() dropped the bad client
+    assert session.session_id == "sid-keep"  # durable SID preserved
+
+
+@pytest.mark.asyncio
+async def test_single_timeout_does_not_reconnect(tmp_path, fast_probe):
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=1, usage=context_usage(1000))
+    session._client = client
+
+    await session.check_context_reserve("hello")
+
+    assert session._client is client
+
+
+@pytest.mark.asyncio
+async def test_no_reconnect_while_session_replacement_is_active(tmp_path, fast_probe):
+    """reconnect() swaps _client, which rollback compares by identity."""
+    session, _ = make_session(tmp_path)
+    client = HangingProbeClient(hang_times=99)
+    session._client = client
+    snapshot = session.begin_session_replacement()
+
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["reason"] == "runtime_unhealthy"
+    assert session._client is client
+    assert session._session_replacement is snapshot
+
+
+@pytest.mark.asyncio
+async def test_full_context_still_refused_when_probe_works(tmp_path):
+    """Hard constraint from #14: no new path admits into a full context."""
+    session, client = make_session(tmp_path)
+    client.context_usage = context_usage(EXPECTED_CONTEXT_TOKENS - 10)
+
+    outcome = await session.check_context_reserve("hello")
+
+    assert outcome["ok"] is False
+    assert outcome["reason"] == "reserve"
