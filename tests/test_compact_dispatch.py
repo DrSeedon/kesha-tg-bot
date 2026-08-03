@@ -110,11 +110,17 @@ class FakeBot:
 def make_chat(tmp_path, session, *, custom_compact=None, runtime_id="claude"):
     calls: list = []
 
-    async def custom(sess, notify=None):
+    # `recent_rows` is the #21 verbatim tail. The stub must mirror the real
+    # compact_session signature, otherwise it fails on the call itself and the
+    # dispatch assertion below never gets to run.
+    async def custom(sess, notify=None, recent_rows=None):
         calls.append(sess)
+        custom.recent_rows_seen.append(recent_rows)
         if custom_compact:
             return await custom_compact(sess, notify)
         return {"ok": True, "before_pct": 50, "after_pct": 4}
+
+    custom.recent_rows_seen = []
 
     chat = ChatState(
         chat_id=42,
@@ -145,6 +151,8 @@ def test_claude_still_uses_keshas_own_compaction(tmp_path):
 
     assert calls == [session], "Claude did not go through compact_session"
     assert session.native_compacted == 0
+    # #21: the Claude path must also hand over the verbatim tail argument.
+    assert chat._compact_session_fn.recent_rows_seen == [[]]
 
 
 def test_codex_uses_its_own_native_compaction(tmp_path):
