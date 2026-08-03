@@ -378,6 +378,35 @@ None → `_max_output_tokens_valid` залатчился False НАВСЕГДА 
 Мержу по явному списку файлов + `git diff origin/main` глазами. Сам на этом ошибся дважды:
 потерял `ensure_roots()` в `bot.py` и снёс часть #16 при cherry-pick.
 
+## VPS: оркестратор живёт на сервере (#24, 03.08.2026)
+
+**Копия оркестратора на Contabo** `158.220.127.161`, дашборд `https://orchestra.seedon.ru`.
+Цель: работа с воркерами без включённого ноутбука.
+
+- Код: `/home/kesha/projects/kesha-tg-bot` (НЕ `/opt/kesha-bot` — там боевой бот, его не трогать).
+- Сессия в Orchestra: `kesha-tg-bot-orchestrator`, `role=orchestrator`, `claude-opus-5[1m]`.
+- Своего systemd-сервиса и venv у оркестратора НЕТ и не нужно: бот работает отдельно в `/opt`.
+- Ветки: `main` ведёт ноутбук, на VPS только ветки задач, синхронизация через GitHub.
+  **VPS тянет из `origin`** — незапушенный `main` = на сервере вчерашний код.
+
+**Грабли (проверены на своём переезде):**
+- `su - kesha` виснет (нет пароля) → `su -s /bin/bash kesha`.
+- Работать в каталоге только под `kesha`: `find /home/kesha/projects/kesha-tg-bot ! -user kesha | wc -l`
+  должно быть 0, иначе `git fetch` умрёт через месяц.
+- **Сессию в БД руками НЕ создавать.** `_ensure_orchestrator` (`bootstrap.py:100`) молчит, если в базе
+  уже есть хоть один оркестратор; ручной INSERT неполон — `save_session()` (`db.py:618`) проставляет
+  ~20 умолчаний. Правильный путь: скрипт с `save_session()` + `resolve_model()` + `backend_for_model()`.
+- `system_prompt` в БД — ОВЕРЛЕЙ поверх собранной роли, не сама роль. Скопируешь чужой → двойная личность.
+- `uv` не в PATH под `su` → `/home/kesha/orchestra/.venv/bin/python`; скрипт запускать ИЗ каталога
+  Orchestra, иначе `No module named 'app'`.
+- **Перед любым `systemctl stop orchestra`**: `select name,status from sessions where status='running'` —
+  остановка рвёт ходы ВСЕХ агентов, включая чужие проекты (там же seedon и Orchestra).
+- Прокси на VPS не нужен (Германия, Anthropic отвечает напрямую); `.env` с ноутбука → закомментировать
+  `HTTPS_PROXY`, иначе таймауты в несуществующий порт.
+
+Инструкция целиком: `/mnt/data/Projects/Python/orchestra/docs/vps-orchestrator-onboarding.md`.
+Застрял — `send_message(to="Orchestra-orchestrator")`, он владелец сервера.
+
 ## TODO
 
 См. [TODO.md](TODO.md)
