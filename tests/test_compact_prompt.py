@@ -277,3 +277,123 @@ def test_source_ledger_ignores_list_ordinals_but_rejects_unsourced_values():
         {},
         [],
     )["categories"]["source_ledger"]
+
+
+# --- #21: both-polarity evidence rule, zero-exit on writes, deterministic tail ---
+
+
+def test_prompt_bans_both_polarities_and_offers_a_third_option():
+    """A one-sided ban makes the model assert the inverse instead.
+
+    Measured in 18 real production summaries (docs/tasks/21): 7 inverted
+    claims, including `CLAUDE.md — Not modified this session` — an absence of
+    tool evidence rendered as a positive claim about the world.
+    """
+    lowered = " ".join(COMPACT_PROMPT.lower().split())
+    assert "no evidence of" in lowered
+    assert "unknown — source gap" in lowered
+    # the negative half must be banned explicitly, not just the positive one
+    assert "do not assert the negative either" in lowered
+
+
+def test_prompt_keeps_legitimate_pending_negatives_possible():
+    """Kesha's PENDING legitimately tracks 'not done yet' backlog items.
+
+    6 of the 7 measured negatives were real user-confirmed backlog, not
+    hallucinations. A blanket ban on negatives would destroy them.
+    """
+    lowered = " ".join(COMPACT_PROMPT.lower().split())
+    assert "conversation itself established" in lowered
+
+
+def test_prompt_gives_the_write_permission_an_explicit_zero_exit():
+    """A permission without a 'do nothing' branch is an order, not a permission."""
+    lowered = " ".join(COMPACT_PROMPT.lower().split())
+    assert "otherwise do not write any file" in lowered
+    assert "solely for compaction" in lowered
+
+
+def test_verbatim_tail_is_appended_and_labelled():
+    from compact import append_verbatim_tail
+
+    rows = [
+        {"content": "[msg_id=10] hello", "message_id": 10},
+        {"content": "[msg_id=11] world", "message_id": 11},
+    ]
+    out = append_verbatim_tail(valid_summary(), rows)
+
+    assert "[VERBATIM TAIL — appended by runtime]" in out
+    assert "hello" in out and "world" in out
+
+
+def test_verbatim_tail_excludes_reminders_and_non_user_rows():
+    """Measured: a naive 'last 3 user rows' presents a fired reminder as the
+    user's own words in 32% of windows (docs/tasks/21 research F6)."""
+    from compact import append_verbatim_tail
+
+    rows = [
+        {"content": "[REMINDER FIRED at 10:05, type=urgent_llm, id=24] Text: dump", "message_id": 0},
+        {"content": "[msg_id=0] --- message 1/2 --- [REMINDER FIRED at 10:00] Text: salary", "message_id": 0},
+        {"content": "[msg_id=31560] real user words", "message_id": 31560},
+    ]
+    out = append_verbatim_tail(valid_summary(), rows)
+
+    assert "real user words" in out
+    assert "REMINDER FIRED" not in out
+
+
+def test_verbatim_tail_does_not_break_the_continuation_ordering_contract():
+    """The validator anchors on the LAST `CONTINUATION` match.
+
+    An appended block that contained that literal would move the anchor and
+    invert the ordering check, so the tail must survive validation.
+    """
+    from compact import append_verbatim_tail
+
+    rows = [{"content": "[msg_id=1] please run CONTINUATION now", "message_id": 1}]
+    out = append_verbatim_tail(valid_summary(), rows)
+
+    assert _validate_summary_sections(out)
+
+
+def test_verbatim_tail_is_a_noop_without_usable_rows():
+    from compact import append_verbatim_tail
+
+    base = valid_summary()
+    assert append_verbatim_tail(base, []) == base
+    assert append_verbatim_tail(base, [{"content": "x", "message_id": 0}]) == base
+
+
+def test_recent_user_rows_are_oldest_first_and_user_only(monkeypatch):
+    """get_history is ORDER BY id DESC; the tail must read chronologically."""
+    import chat_state as cs
+    from unittest.mock import MagicMock
+
+    rows = [
+        {"role": "user", "content": "third", "message_id": 3},
+        {"role": "assistant", "content": "reply", "message_id": 0},
+        {"role": "user", "content": "second", "message_id": 2},
+        {"role": "user", "content": "first", "message_id": 1},
+    ]
+    fake = MagicMock()
+    fake.get_history.return_value = rows
+    monkeypatch.setattr("message_log.get_db", lambda: fake)
+
+    state = cs.ChatState.__new__(cs.ChatState)
+    state.chat_id = 42
+    got = state._recent_user_rows(limit=3)
+
+    assert [r["content"] for r in got] == ["first", "second", "third"]
+
+
+def test_recent_user_rows_never_raises_into_the_transaction(monkeypatch):
+    import chat_state as cs
+
+    def boom():
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr("message_log.get_db", boom)
+    state = cs.ChatState.__new__(cs.ChatState)
+    state.chat_id = 42
+
+    assert state._recent_user_rows() == []

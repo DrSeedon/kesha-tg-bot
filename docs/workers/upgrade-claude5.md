@@ -18,6 +18,19 @@ thousands of deleted lines belonging to other tasks. **Never `git add -A` here.*
 file list, never commit `.serena/project.yml` (a tool rewrites it), and read `git diff --cached`
 before committing.
 
+## Project facts I had to dig out (kesha)
+
+- `message_log.get_history()` is **`ORDER BY id DESC`** — newest first. Slicing `[-n:]` gives you
+  the OLDEST rows. Bit me in #21.
+- `role='user'` rows are NOT all user speech: fired reminders are logged as user rows with
+  `message_id` **`None` or `0`** (17% of rows; a naive "last 3" is polluted 32% of the time).
+  Filter on truthy `message_id` AND absence of `REMINDER FIRED` — a batch row bundles both.
+- Real prod summaries live in the journal as `[kesha.compact] DEBUG Compact summary:` followed by
+  untimestamped lines. Extract by "read until the next `^\d{4}-\d\d-\d\d ... [` line".
+- `compact.py:_validate_summary_sections` anchors on the **LAST** `CONTINUATION` match and only
+  checks duplicates in the prefix before `RECENT VERBATIM`. Text appended after the summary cannot
+  break it — but verify by probe before assuming, it is #14 prod-incident code.
+
 ## Technique that keeps paying off
 
 - **Bounding a third-party async call from outside cancels its internal cleanup.**
