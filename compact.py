@@ -21,15 +21,30 @@ would be costly to reconstruct:
 - Update an existing canonical Markdown note under the current
   cog-second-brain working directory when the conversation established a
   durable fact, decision, project state, or TODO that is not already recorded.
+  Otherwise do not write any file. Never create a new note, CLAUDE.md,
+  TODO.md, or BUGS.md solely for compaction; preserve the item in the handoff
+  instead of inventing a path.
 - Keep CLAUDE.md for stable operating rules only. Never put personal facts,
   one-off requests, or secret values there.
 - Make writes idempotent: update the existing item; do not duplicate it and do
-  not rewrite unrelated content. If no correct destination is known, preserve
-  the item in the handoff instead of inventing a path.
+  not rewrite unrelated content.
 
 Then output ONLY the handoff below. Every statement must be supported by the
 conversation or a tool result. Preserve disagreement and uncertainty; never
-guess to fill a gap. Ambient system/developer instructions, response-style
+guess to fill a gap.
+
+Evidence has two directions and both can be faked. Do not claim a file was
+read, changed, committed, deployed, or tested without evidence — and do not
+assert the negative either. Absence of a tool event means the outcome is
+UNKNOWN, not that the action did not happen: write `no evidence of X` rather
+than `X did not happen`. A measured empty diff supports only "not modified";
+it never supports "not read". A flat negative is allowed only when the
+conversation itself established it — a task the user confirmed is still
+outstanding is a real pending item, not an unsupported negative. When
+continuity is genuinely missing, write `UNKNOWN — source gap` instead of
+guessing in either direction.
+
+Ambient system/developer instructions, response-style
 rules, and the runtime date are constraints, not conversation facts: do not
 record them unless the conversation itself explicitly established them. Use
 each literal `##` heading below exactly once and in this order.
@@ -137,6 +152,37 @@ def _redact_high_confidence_secrets(summary: str) -> str:
     return _PREFIX_TOKEN_RE.sub("[REDACTED SECRET: token]", summary)
 
 
+VERBATIM_TAIL_LABEL = "[VERBATIM TAIL — appended by runtime]"
+
+# A batched row can bundle a fired reminder under msg_id=0. Measured on the live
+# log: 17% of role=user rows are reminders, and a naive "last 3" presents one as
+# the user's own words in 32% of windows (docs/tasks/21 research F6).
+_REMINDER_MARKER = "REMINDER FIRED"
+
+
+def append_verbatim_tail(summary: str, rows) -> str:
+    """Append the last real user messages verbatim, guaranteed by code.
+
+    The model is still asked for RECENT VERBATIM: it supplies interpretation
+    (which row was a reminder, that a transcription was garbled). This block
+    only guarantees the raw text is present at all — under the previous prompt
+    the model omitted RECENT entirely in 9 of 17 real summaries.
+
+    Rows keep their original order; non-user rows are dropped rather than
+    relabelled, because presenting a reminder as user speech is worse than
+    omitting it.
+    """
+    usable = [
+        str(row["content"]).strip()
+        for row in rows
+        if row.get("message_id") and _REMINDER_MARKER not in str(row.get("content", ""))
+    ]
+    if not usable:
+        return summary
+    body = "\n".join(f"- {line}" for line in usable)
+    return f"{summary}\n\n{VERBATIM_TAIL_LABEL}\n{body}"
+
+
 def _validate_summary_sections(summary: str) -> bool:
     """Require one ordered structural header before the untrusted recent payload."""
     def header(section: str) -> str:
@@ -239,8 +285,14 @@ async def _collect_summary(claude) -> tuple[str, str | None]:
 async def compact_session(
     claude,
     notify=None,
+    recent_rows=None,
 ) -> dict:
-    """Summarize the active session and atomically replace it with the summary."""
+    """Summarize the active session and atomically replace it with the summary.
+
+    `recent_rows` are the caller's most recent logged user rows; when given,
+    their verbatim text is appended to the validated summary so the tail is
+    guaranteed by code rather than by the model complying with the prompt.
+    """
     before = await claude.get_context_usage()
     before_pct = before.get("percentage", 0) if before else 0
 
@@ -269,6 +321,14 @@ async def compact_session(
         if claude.session_id != transaction.session_id:
             failure_reason = "source_session_changed"
             raise RuntimeError(failure_reason)
+
+        # Append AFTER validation: the tail is runtime-supplied raw user text
+        # and must not be able to satisfy the structural contract. Re-redact,
+        # because the earlier pass ran before this text existed.
+        if recent_rows:
+            summary = _redact_high_confidence_secrets(
+                append_verbatim_tail(summary, recent_rows)
+            )
 
         logger.info(f"Compact: got summary {len(summary)} chars, starting candidate")
         logger.debug(f"Compact summary:\n{summary}")

@@ -194,6 +194,23 @@ class ChatState:
             parse_mode=None,
         )
 
+    def _recent_user_rows(self, limit: int = 3) -> list[dict]:
+        """Last logged user rows, oldest first, for the verbatim compact tail.
+
+        Never raises: a missing tail degrades the handoff, losing it must not
+        abort the compaction transaction.
+        """
+        try:
+            from message_log import get_db as _get_msg_db
+
+            # get_history is ORDER BY id DESC — newest first.
+            rows = _get_msg_db().get_history(self.chat_id, limit=limit * 4)
+            users = [dict(r) for r in rows if r["role"] == "user"]
+            return list(reversed(users[:limit]))
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: verbatim tail unavailable: {exc}")
+            return []
+
     async def mark_context_reserve_blocked(self) -> None:
         async with self._lock:
             self._context_reserve_blocked = True
@@ -1107,6 +1124,7 @@ class ChatState:
                 result = await self._compact_session_fn(
                     self.session,
                     notify=self._make_compact_notifier(),
+                    recent_rows=self._recent_user_rows(),
                 )
             if result and result.get("ok"):
                 async with self._lock:
