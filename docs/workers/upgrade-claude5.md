@@ -20,6 +20,12 @@ before committing.
 
 ## Project facts I had to dig out (kesha)
 
+- `message_log.DB_PATH` is **`./storage/messages.db` — relative and REAL**. A test that drives
+  `_run_batch` past the reserve gate reaches `log_user` and pollutes the live file; the next run
+  then sees phantom rows and an unrelated test fails. Always
+  `monkeypatch.setattr("message_log.get_db", ...)`, and verify with
+  `sqlite3 storage/messages.db "SELECT COUNT(*) FROM messages WHERE chat_id=42"`. Cost me a false
+  failure in #25 that looked like my #21 code breaking.
 - `message_log.get_history()` is **`ORDER BY id DESC`** — newest first. Slicing `[-n:]` gives you
   the OLDEST rows. Bit me in #21.
 - `role='user'` rows are NOT all user speech: fired reminders are logged as user rows with
