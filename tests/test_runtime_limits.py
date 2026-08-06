@@ -344,3 +344,132 @@ def test_limit_string_carries_both_runtime_and_reset():
         )
         assert "codex" in rendered
         assert "08.08 12:53" in rendered
+
+
+# ---------- #25: one automatic retry on runtime_unhealthy ----------
+
+
+class ProbeSession(LimitedCodexSession):
+    """Records every reserve call and replays a scripted list of outcomes."""
+
+    def __init__(self, outcomes):
+        super().__init__(quota=False)
+        self.outcomes = list(outcomes)
+        self.calls = 0
+        self.asked = []
+
+    async def check_context_reserve(self, combined="", *, manual=False):
+        self.calls += 1
+        self.asked.append(combined)
+        # Fail loud instead of hanging: an unbounded retry loop would spin here
+        # forever and the test would time out rather than report a failure.
+        if self.calls > len(self.outcomes) + 2:
+            raise AssertionError(f"reserve probed {self.calls} times — retry is unbounded")
+        return self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
+
+
+def _entry():
+    from chat_state import PendingEntry
+
+    return PendingEntry(
+        prompt="привет", message_id=0, message=None,
+        source="reminder", reply_target=42,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_unhealthy_retries_once_and_succeeds_silently(monkeypatch):
+    """A recovered runtime must cost the user nothing — not even a notice.
+
+    Measured: after reconnect() drops the wedged client the retry builds a NEW
+    CLI process and the reserve succeeds in 8-15s (docs/tasks/25 F2).
+    """
+    session = ProbeSession([
+        {"ok": False, "reason": "runtime_unhealthy"},
+        {"ok": True, "reason": None, "remaining": 900_000},
+    ])
+    chat = _chat_with(session, runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+    asked = []
+
+    async def ask(msg, combined, cid):
+        asked.append(combined)
+
+    chat._ask_fn = ask
+
+    monkeypatch.setattr("message_log.get_db", lambda: type(
+        "D", (), {"log_user": lambda *a, **kw: 0}
+    )())
+
+    await chat._run_batch([_entry()])
+
+    assert session.calls == 2, "expected exactly one retry"
+    assert chat.bot.sent == [], f"user was notified anyway: {chat.bot.sent}"
+    assert asked, "recovered batch never reached the model"
+
+
+@pytest.mark.asyncio
+async def test_runtime_unhealthy_twice_refuses_once_and_stops():
+    """A still-dead runtime: exactly two probes, exactly one notice."""
+    session = ProbeSession([{"ok": False, "reason": "runtime_unhealthy"}])
+    chat = _chat_with(session, runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+
+    await chat._run_batch([_entry()])
+
+    assert session.calls == 2, f"retry was not bounded: {session.calls} calls"
+    assert len(chat.bot.sent) == 1, f"expected one notice: {chat.bot.sent}"
+
+
+@pytest.mark.asyncio
+async def test_retry_reports_the_reason_the_retry_actually_returned():
+    """Fail-closed #14: if the retry measures a full context, say `reserve`."""
+    from config import STRINGS
+
+    session = ProbeSession([
+        {"ok": False, "reason": "runtime_unhealthy"},
+        {"ok": False, "reason": "reserve"},
+    ])
+    chat = _chat_with(session, runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+
+    await chat._run_batch([_entry()])
+
+    text = " ".join(t for _, t in chat.bot.sent)
+    assert text == STRINGS["ru"]["context_reserve"], text
+    assert chat._context_reserve_blocked is True, "reserve latch not set on retry"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["reserve", "usage_limit", "runtime_invariant", "session_unavailable", "unknown"],
+)
+async def test_other_reasons_are_never_retried(reason):
+    """Retrying a full context or an exhausted quota is forbidden.
+
+    `reserve` would hammer a context we just measured as full (against #14);
+    `usage_limit` would retry a quota error the project rule says to wait out.
+    """
+    session = ProbeSession([{"ok": False, "reason": reason}])
+    chat = _chat_with(session, runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+
+    await chat._run_batch([_entry()])
+
+    assert session.calls == 1, f"{reason} must not be retried"
+    assert len(chat.bot.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_latch_short_circuit_does_not_trigger_a_retry():
+    """`_context_reserve_blocked` skips the session entirely — it is `reserve`."""
+    session = ProbeSession([{"ok": True, "reason": None}])
+    chat = _chat_with(session, runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+    await chat.mark_context_reserve_blocked()
+
+    await chat._run_batch([_entry()])
+
+    assert session.calls == 0, "latched chat must not probe at all"
+    assert len(chat.bot.sent) == 1

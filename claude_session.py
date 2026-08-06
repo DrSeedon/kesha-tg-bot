@@ -696,8 +696,11 @@ class ClaudeSession:
         except _ProbeTimeout:
             # Two bounded probes in a row went unanswered: this is not a slow
             # runtime, it is one that has stopped servicing the control channel.
-            # Refuse (we still have no measurement) but drop the bad client so
-            # the NEXT message meets a healthy one. Never rescue this batch.
+            # Refuse — we still have no measurement — and drop the bad client so
+            # the next probe meets a healthy one. Deciding what to do with the
+            # refused batch is the caller's job, not ours: this function stays a
+            # pure measurement. `_run_batch` retries it once (#25), which is safe
+            # only because it rejects before anything is sent or logged.
             if self._session_replacement is None:
                 logger.error(
                     "Context reserve probe timed out twice; reconnecting the "

@@ -895,6 +895,21 @@ class ChatState:
                 reserve = {"ok": False, "reason": "reserve"}
             else:
                 reserve = await self.session.check_context_reserve(combined)
+                if reserve.get("reason") == "runtime_unhealthy":
+                    # The probe found a runtime that stopped answering and
+                    # reconnect() already dropped that client, so the retry
+                    # builds a fresh CLI process — there is nothing to wait for
+                    # and no delay helps (measured: docs/tasks/25 F2).
+                    # Safe because the reject happens BEFORE log_user/_ask_fn:
+                    # nothing was sent, logged, or marked delivered (F1).
+                    # Only this reason: retrying `reserve` would hammer a
+                    # context we just measured as full, and `usage_limit` must
+                    # never be retried.
+                    logger.warning(
+                        "Chat %s: runtime unhealthy, retrying the batch once",
+                        self.chat_id,
+                    )
+                    reserve = await self.session.check_context_reserve(combined)
             if not reserve.get("ok"):
                 reason = reserve.get("reason")
                 fmt = {}
