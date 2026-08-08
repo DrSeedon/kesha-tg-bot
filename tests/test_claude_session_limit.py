@@ -10,6 +10,7 @@ from claude_agent_sdk import (
 )
 
 from claude_session import (
+    CLAUDE_MAX_BUFFER_SIZE,
     ClaudeSession,
     EXPECTED_CONTEXT_MODEL,
     EXPECTED_CONTEXT_TOKENS,
@@ -302,6 +303,54 @@ def test_options_disable_native_auto_compact(tmp_path):
 
     assert options.env["DISABLE_AUTO_COMPACT"] == "1"
     assert "DISABLE_COMPACT" not in options.env
+
+
+def test_options_allow_bounded_telegram_image_tool_results(tmp_path):
+    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+
+    options = session._make_options()
+    observed_production_line = 1_136_940
+    telegram_download_ceiling = 20 * 1024 * 1024
+    duplicated_base64 = 2 * 4 * ((telegram_download_ceiling + 2) // 3)
+
+    assert options.max_buffer_size == CLAUDE_MAX_BUFFER_SIZE == 64 * 1024 * 1024
+    assert 1024 * 1024 < observed_production_line < options.max_buffer_size
+    assert duplicated_base64 + 1024 * 1024 < options.max_buffer_size
+
+
+@pytest.mark.asyncio
+async def test_sdk_reader_error_disconnects_discarded_client(tmp_path):
+    class BrokenReaderClient(QueueClient):
+        def __init__(self):
+            super().__init__()
+            self.disconnect_calls = 0
+
+        async def receive_messages(self):
+            raise Exception(
+                "Failed to decode JSON: JSON message exceeded maximum buffer size"
+            )
+            yield  # pragma: no cover - makes this an async generator
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+
+    session, _ = make_session(tmp_path)
+    client = BrokenReaderClient()
+    session._client = client
+
+    chunks = await collect(session)
+
+    assert chunks == [
+        {
+            "type": "error",
+            "content": (
+                "Failed to decode JSON: JSON message exceeded maximum buffer size"
+            ),
+        }
+    ]
+    assert client.disconnect_calls == 1
+    assert session._client is None
+    assert session._connected is False
 
 
 @pytest.mark.asyncio

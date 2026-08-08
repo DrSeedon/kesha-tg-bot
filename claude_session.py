@@ -49,6 +49,9 @@ EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
 MANUAL_COMPACT_FLOOR_TOKENS = 80_000
 NORMAL_TURN_RESERVE_TOKENS = 208_000
+# Read can repeat an image's base64 twice in one NDJSON result. At Telegram's
+# 20 MiB download ceiling that is ~53.4 MiB before JSON overhead.
+CLAUDE_MAX_BUFFER_SIZE = 64 * 1024 * 1024
 # A healthy control request answers in 0.9-3.4s (measured, docs/tasks/20).
 # The SDK's own budget is 60s, which only ever expires when the CLI is not
 # servicing the control channel at all — never because it was "a bit slow".
@@ -305,6 +308,7 @@ class ClaudeSession:
             thinking={"type": "adaptive"},
             effort="high",
             env={"DISABLE_AUTO_COMPACT": "1"},
+            max_buffer_size=CLAUDE_MAX_BUFFER_SIZE,
         )
         if self.system_prompt:
             options.system_prompt = self.system_prompt
@@ -605,9 +609,11 @@ class ClaudeSession:
                 }
                 return
             logger.error(f"SDK error: {e}", exc_info=True)
+            failed_client = self._client
             self._connected = False
             self._client = None
             self._expected_results = 0
+            await self._safe_disconnect(failed_client)
             yield {"type": "error", "content": err}
         finally:
             if self._is_processing:
