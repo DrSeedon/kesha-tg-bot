@@ -68,6 +68,7 @@ def test_capabilities_are_honest():
     assert caps.mid_turn_inject is False
     assert caps.native_compact is True
     assert caps.resume_across_restart is True
+    assert caps.passive_handoff is True
 
 
 def test_build_runtime_accepts_codex(tmp_path):
@@ -261,12 +262,14 @@ def load_spike_events():
     return [json.loads(line) for line in SPIKE_EVENTS.read_text().splitlines() if line.strip()]
 
 
-async def drive(session: CodexSession, events: list[dict]) -> list[dict]:
+async def drive(
+    session: CodexSession, events: list[dict], turn_id: str | None = None
+) -> list[dict]:
     """Feed recorded notifications through the turn consumer."""
     for event in events:
         session._notifications.put_nowait(event)
     chunks = []
-    async for chunk in session._consume_turn():
+    async for chunk in session._consume_turn(turn_id):
         chunks.append(chunk)
     return chunks
 
@@ -288,6 +291,146 @@ def test_recorded_turn_streams_deltas_then_turn_done(tmp_path):
     assert "".join(deltas) == "Работаю — чудеса техники всё-таки случаются. 😏"
     assert chunks[-1]["type"] == "turn_done"
     assert not [c for c in chunks if c["type"] == "error"]
+
+
+def test_completed_agent_message_falls_back_when_deltas_are_missing(tmp_path):
+    """Production regression: resumed turns may emit only item/completed."""
+    session = make_session(tmp_path)
+    chunks = asyncio.run(drive(session, [
+        {"method": "item/completed", "params": {
+            "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "msg-1", "text": "Ку, живой"},
+        }},
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed"},
+        }},
+    ], "turn-1"))
+
+    assert chunks == [
+        {"type": "text_delta", "content": "Ку, живой"},
+        {"type": "turn_done"},
+    ]
+
+
+def test_completed_agent_message_does_not_duplicate_streamed_item(tmp_path):
+    """Mutation guard: fallback is per item, not a second copy of every reply."""
+    session = make_session(tmp_path)
+    chunks = asyncio.run(drive(session, [
+        {"method": "item/agentMessage/delta", "params": {
+            "turnId": "turn-1", "itemId": "msg-1", "delta": "Ку",
+        }},
+        {"method": "item/completed", "params": {
+            "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "msg-1", "text": "Ку"},
+        }},
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed"},
+        }},
+    ], "turn-1"))
+
+    assert [c["content"] for c in chunks if c["type"] == "text_delta"] == ["Ку"]
+
+
+def test_repeated_completed_agent_message_is_emitted_once(tmp_path):
+    """A replayed terminal notification cannot duplicate a delta-less reply."""
+    session = make_session(tmp_path)
+    completed = {"method": "item/completed", "params": {
+        "turnId": "turn-1",
+        "item": {"type": "agentMessage", "id": "msg-1", "text": "Ку"},
+    }}
+    chunks = asyncio.run(drive(session, [
+        completed,
+        completed,
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed"},
+        }},
+    ], "turn-1"))
+
+    assert [c["content"] for c in chunks if c["type"] == "text_delta"] == ["Ку"]
+
+
+def test_delta_tracking_is_per_agent_message(tmp_path):
+    """A delta on one item must not suppress another item's final fallback."""
+    session = make_session(tmp_path)
+    chunks = asyncio.run(drive(session, [
+        {"method": "item/agentMessage/delta", "params": {
+            "turnId": "turn-1", "itemId": "msg-1", "delta": "first",
+        }},
+        {"method": "item/completed", "params": {
+            "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "msg-2", "text": "second"},
+        }},
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed"},
+        }},
+    ], "turn-1"))
+
+    assert [c["content"] for c in chunks if c["type"] == "text_delta"] == [
+        "first", "second",
+    ]
+
+
+def test_completed_fallback_keeps_turn_scope(tmp_path):
+    """A late completed item from an abandoned turn must not leak to this one."""
+    session = make_session(tmp_path)
+    chunks = asyncio.run(drive(session, [
+        {"method": "item/completed", "params": {
+            "turnId": "old-turn",
+            "item": {"type": "agentMessage", "id": "old", "text": "stale"},
+        }},
+        {"method": "item/completed", "params": {
+            "turnId": "turn-1",
+            "item": {"type": "agentMessage", "id": "new", "text": "fresh"},
+        }},
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed"},
+        }},
+    ], "turn-1"))
+
+    assert [c.get("content") for c in chunks if "content" in c] == ["fresh"]
+
+
+def test_passive_context_uses_inject_items_not_agent_turn(tmp_path, monkeypatch):
+    """Mutation guard: handoff must be incapable of MCP/exec execution."""
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    calls = []
+
+    async def fake_request(method, params, **kwargs):
+        calls.append((method, params, kwargs))
+        return {}
+
+    monkeypatch.setattr(session, "_connect", _noop_async)
+    session._request = fake_request
+
+    asyncio.run(session.inject_context("old transcript"))
+
+    assert [method for method, _, _ in calls] == ["thread/inject_items"]
+    params = calls[0][1]
+    assert params["threadId"] == "thread-1"
+    assert params["items"] == [{
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "old transcript"}],
+    }]
+
+
+def test_passive_context_refuses_during_an_active_turn(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._active_turn_id = "turn-1"
+    called = False
+
+    async def fake_request(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(session, "_connect", _noop_async)
+    session._request = fake_request
+
+    with pytest.raises(RuntimeError, match="active turn"):
+        asyncio.run(session.inject_context("old transcript"))
+    assert called is False
 
 
 def test_recorded_turn_absorbs_real_context_numbers(tmp_path):

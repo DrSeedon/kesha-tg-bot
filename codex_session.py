@@ -46,6 +46,7 @@ CONNECT_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 180
 INTERRUPT_TIMEOUT_SECONDS = 5
 COMPACT_TIMEOUT_SECONDS = 300
+CONTEXT_INJECT_TIMEOUT_SECONDS = 10
 
 # Terminal Codex error classes. `usageLimitExceeded` is the subscription limit
 # we must never retry; `contextWindowExceeded` needs a compact, not a reconnect.
@@ -104,6 +105,9 @@ class CodexSession:
         cost_reporting=False,
         # thread/resume restores the thread across bot restarts.
         resume_across_restart=True,
+        # thread/inject_items appends model-visible history without opening an
+        # agent turn, so carrying context cannot execute an old task or tools.
+        passive_handoff=True,
     )
 
     def __init__(
@@ -493,6 +497,26 @@ class CodexSession:
         self.last_duration_ms = int((time.monotonic() - started) * 1000)
         self.last_num_turns += 1
 
+    async def inject_context(self, text: str) -> None:
+        """Append passive context without starting an agentic turn."""
+        await self._connect()
+        if not self.session_id:
+            raise RuntimeError("Codex thread is not initialized")
+        if self._active_turn_id:
+            raise RuntimeError("cannot inject context during an active turn")
+        await self._request(
+            "thread/inject_items",
+            {
+                "threadId": self.session_id,
+                "items": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }],
+            },
+            timeout=CONTEXT_INJECT_TIMEOUT_SECONDS,
+        )
+
     def _discard_turn_events(self, turn_id: Optional[str]) -> None:
         """Drop queued notifications belonging to a finished/abandoned turn."""
         kept: list[dict] = []
@@ -520,6 +544,7 @@ class CodexSession:
         never sees one failure as two messages.
         """
         pending_error: Optional[dict] = None
+        text_items: set[tuple[str | None, str | None]] = set()
         while True:
             try:
                 msg = await self._notifications.get()
@@ -531,8 +556,13 @@ class CodexSession:
             # Ignore anything stamped for a different turn. Without this a
             # stale `turn/completed` from an abandoned turn would end this one
             # before the model had said anything.
+            item = params.get("item") or {}
+            event_turn = (
+                params.get("turnId")
+                or ((params.get("turn") or {}).get("id"))
+                or item.get("turnId")
+            )
             if turn_id and method != "_process/exited":
-                event_turn = params.get("turnId") or ((params.get("turn") or {}).get("id"))
                 if event_turn and event_turn != turn_id:
                     continue
 
@@ -547,6 +577,7 @@ class CodexSession:
             if method == "item/agentMessage/delta":
                 delta = params.get("delta") or ""
                 if delta:
+                    text_items.add((event_turn or turn_id, params.get("itemId") or item.get("id")))
                     yield {"type": "text_delta", "content": delta}
                 continue
 
@@ -557,9 +588,15 @@ class CodexSession:
                 continue
 
             if method == "item/completed":
-                # agentMessage text already streamed as deltas; re-yielding it
-                # would duplicate the answer (response_stream ignores `text`
-                # after deltas, but staying silent keeps the contract clean).
+                if item.get("type") == "agentMessage":
+                    key = (event_turn or turn_id, item.get("id") or params.get("itemId"))
+                    text = item.get("text") or ""
+                    if text and key not in text_items:
+                        text_items.add(key)
+                        # Some resumed threads emit only the completed item.
+                        # Use a delta chunk so response_stream cannot discard a
+                        # second delta-less agent item after earlier deltas.
+                        yield {"type": "text_delta", "content": text}
                 continue
 
             if method == "thread/tokenUsage/updated":

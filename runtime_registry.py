@@ -85,6 +85,12 @@ def build_runtime(runtime_id: str, context: RuntimeBuildContext) -> ChatRuntime:
         raise TypeError(
             f"runtime '{runtime_id}' capabilities disagree with the registry"
         )
+    if definition.capabilities.passive_handoff and not callable(
+        getattr(backend, "inject_context", None)
+    ):
+        raise TypeError(
+            f"runtime '{runtime_id}' declares passive handoff without inject_context"
+        )
     return backend
 
 

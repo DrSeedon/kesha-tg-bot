@@ -35,6 +35,8 @@ TRANSCRIPTION_WAIT_MAX = 30  # seconds to wait for pending transcriptions before
 HANDOFF_MESSAGE_LIMIT = 40
 HANDOFF_MESSAGE_CHARS = 2_000
 HANDOFF_MAX_CHARS = 24_000
+HANDOFF_TIMEOUT_SECONDS = 10
+SWITCH_CLEANUP_TIMEOUT_SECONDS = 10
 
 
 def _utc_now() -> datetime:
@@ -134,8 +136,10 @@ class ChatState:
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
         self._auto_compact_task: asyncio.Task | None = None
+        self._runtime_switch_task: asyncio.Task | None = None
         self._compact_started: bool = False
         self._context_reserve_blocked: bool = False
+        self._runtime_cleanup_tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._shutdown: bool = False
         self.runtime_id: str = runtime_id
@@ -338,7 +342,7 @@ class ChatState:
 
         try:
             from runtime_registry import get_runtime
-            get_runtime(target)
+            runtime_definition = get_runtime(target)
         except ValueError as exc:
             return {"ok": False, "reason": "unknown", "runtime": target, "error": str(exc)}
 
@@ -355,6 +359,7 @@ class ChatState:
                 self._debounce_task = None
             previous_phase = self.phase
             self.phase = ChatPhase.PROCESSING  # hold the chat while we swap
+            self._runtime_switch_task = asyncio.current_task()
             logger.info(
                 f"Chat {self.chat_id}: phase {previous_phase} → {self.phase} "
                 f"[switch_runtime → {target}]"
@@ -373,50 +378,33 @@ class ChatState:
             if not probe["ok"]:
                 raise RuntimeError(probe.get("error") or "runtime did not respond")
 
-            handoff_note = await self._deliver_handoff(new_session)
+            handoff_note, handoff_status = await self._deliver_handoff(
+                new_session,
+                passive=runtime_definition.capabilities.passive_handoff,
+            )
 
             self.session = new_session
             self.runtime_id = target
         except asyncio.CancelledError:
+            await self._finish_cancel_safely(
+                self._abort_runtime_switch(new_session, target)
+            )
             raise
         except Exception as exc:
             # Stay on the incumbent. It was never disconnected, so the chat
             # keeps working; the user is told why the switch did not happen.
             logger.error(f"Chat {self.chat_id}: switch to {target} failed: {exc}")
-            if new_session is not None:
-                try:
-                    await new_session.safe_disconnect()
-                except Exception:
-                    pass
-            async with self._lock:
-                self.phase = ChatPhase.IDLE
-            await self._drain_or_idle(record_activity=False)
+            await self._finish_cancel_safely(
+                self._abort_runtime_switch(new_session, target)
+            )
             return {"ok": False, "reason": "unavailable", "runtime": target,
                     "fallback": old_runtime, "error": str(exc)}
 
-        # The replacement is live. Retire the incumbent without losing its
-        # session id, so switching back keeps that runtime's own history.
-        try:
-            await old_session.safe_disconnect()
-        except Exception as exc:
-            logger.warning(f"Chat {self.chat_id}: old runtime disconnect: {exc}")
-
-        # A bridge handle must not outlive the runtime it was issued to: a
-        # straggling process from the retired runtime could otherwise still act
-        # on this chat. Scoped to THIS chat and THAT runtime, so a switch here
-        # cannot cancel a turn running in the other user's chat.
-        try:
-            from tool_bridge import revoke_chat_sessions
-            revoke_chat_sessions(self.chat_id, old_runtime)
-        except Exception as exc:
-            logger.warning(f"Chat {self.chat_id}: bridge revoke failed: {exc}")
-
-        self._context_reserve_blocked = False
-        async with self._lock:
-            self.phase = ChatPhase.IDLE
-        # Anything that arrived during the swap (a reminder, a queued message)
-        # is drained here rather than dropped.
-        await self._drain_or_idle(record_activity=False)
+        # Once adopted, cancellation may suppress the command reply but must
+        # not leave PROCESSING latched or the old process/bridge alive.
+        await self._finish_cancel_safely(
+            self._retire_runtime_and_finish(old_session, old_runtime)
+        )
 
         return {
             "ok": True,
@@ -424,8 +412,110 @@ class ChatState:
             "previous": old_runtime,
             "model": getattr(new_session, "model", ""),
             "handoff": handoff_note,
+            "handoff_status": handoff_status,
             "quota": self._quota_of(new_session),
         }
+
+    async def _abort_runtime_switch(self, new_session, target: str) -> None:
+        """Bound candidate cleanup and atomically release queued work."""
+        if new_session is not None:
+            try:
+                await asyncio.wait_for(
+                    new_session.interrupt(), timeout=SWITCH_CLEANUP_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Chat {self.chat_id}: candidate {target} interrupt failed: {exc}"
+                )
+            await self._disconnect_runtime_terminal(
+                new_session, f"candidate {target}"
+            )
+        try:
+            await self._drain_or_idle(record_activity=False)
+        finally:
+            self._runtime_switch_task = None
+
+    async def _retire_runtime_and_finish(self, old_session, old_runtime: str) -> None:
+        """Retire the incumbent and release queued work exactly once."""
+        await self._disconnect_runtime_terminal(
+            old_session, f"old runtime {old_runtime}"
+        )
+
+        try:
+            from tool_bridge import revoke_chat_sessions
+            revoke_chat_sessions(self.chat_id, old_runtime)
+        except Exception as exc:
+            logger.warning(f"Chat {self.chat_id}: bridge revoke failed: {exc}")
+
+        self._context_reserve_blocked = False
+        try:
+            await self._drain_or_idle(record_activity=False)
+        finally:
+            self._runtime_switch_task = None
+
+    async def _disconnect_runtime_terminal(self, session, label: str) -> None:
+        """Start terminal teardown once; a deadline never cancels its escalation."""
+        task = asyncio.create_task(session.safe_disconnect())
+        self._track_runtime_cleanup(task, label)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=SWITCH_CLEANUP_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Chat %s: %s disconnect exceeded %ss; terminal cleanup continues",
+                self.chat_id,
+                label,
+                SWITCH_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            # The done callback owns exception reporting and retrieval.
+            pass
+
+    def _track_runtime_cleanup(self, task: asyncio.Task, label: str) -> None:
+        """Own a detached cleanup until completion and always retrieve its result."""
+        self._runtime_cleanup_tasks.add(task)
+
+        def finished(done: asyncio.Task) -> None:
+            self._runtime_cleanup_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Chat %s: %s terminal cleanup was cancelled",
+                    self.chat_id,
+                    label,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chat %s: %s terminal cleanup failed: %s",
+                    self.chat_id,
+                    label,
+                    exc,
+                )
+
+        task.add_done_callback(finished)
+
+    async def wait_runtime_cleanups(self) -> None:
+        """Finish owned terminal teardowns before the event loop can cancel them."""
+        while self._runtime_cleanup_tasks:
+            tasks = tuple(self._runtime_cleanup_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    async def _finish_cancel_safely(coro) -> None:
+        """Let lifecycle cleanup finish even when the command task is cancelled."""
+        task = asyncio.create_task(coro)
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        result = task.result()
+        if cancelled is not None:
+            raise cancelled
+        return result
 
     @staticmethod
     async def _probe_runtime(session) -> dict:
@@ -450,26 +540,34 @@ class ChatState:
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    async def _deliver_handoff(self, new_session) -> str | None:
-        """Feed the transcript to the new runtime and swallow its reply.
-
-        The summary is delivered as a real turn (that is the only ingress a
-        runtime has), but the answer is drained rather than shown — the user
-        asked to switch, not to receive a recap. A failure here is logged and
-        tolerated: an emergency switch must not be blocked by its own nicety.
-        """
-        transcript = await self._handoff_transcript()
-        if not transcript:
-            return None
+    async def _deliver_handoff(
+        self, new_session, *, passive: bool
+    ) -> tuple[str | None, str]:
+        """Inject context only when the backend has non-agentic ingress."""
+        if not passive:
+            return None, "unsupported"
         try:
-            async for _ in new_session.send_message(transcript):
-                pass
-            return transcript
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(f"Chat {self.chat_id}: handoff delivery failed: {exc}")
-            return None
+            transcript = await asyncio.wait_for(
+                self._handoff_transcript(), timeout=HANDOFF_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"passive handoff history timed out after {HANDOFF_TIMEOUT_SECONDS}s"
+            ) from exc
+        if not transcript:
+            return None, "empty"
+        inject = getattr(new_session, "inject_context", None)
+        if not callable(inject):
+            raise RuntimeError("runtime declares passive handoff without inject_context")
+        try:
+            await asyncio.wait_for(
+                inject(transcript), timeout=HANDOFF_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"passive handoff injection timed out after {HANDOFF_TIMEOUT_SECONDS}s"
+            ) from exc
+        return transcript, "carried"
 
     async def _handoff_transcript(self) -> str | None:
         """Seed the new runtime with a bounded summary of the conversation.
@@ -1304,8 +1402,13 @@ class ChatRegistry:
             if chat._auto_compact_task and not chat._auto_compact_task.done():
                 chat._auto_compact_task.cancel()
                 tasks.append(chat._auto_compact_task)
+            if chat._runtime_switch_task and not chat._runtime_switch_task.done():
+                chat._runtime_switch_task.cancel()
+                tasks.append(chat._runtime_switch_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for chat in self._chats.values():
+            await chat.wait_runtime_cleanups()
         for chat in self._chats.values():
             await chat.session._safe_disconnect()
         self._chats.clear()

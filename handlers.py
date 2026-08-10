@@ -244,8 +244,11 @@ async def h_runtime(msg: types.Message):
 
     result = await cs.switch_runtime(argument)
     if result["ok"]:
-        handoff = t(msg, "runtime_handoff_ok" if result.get("handoff")
-                    else "runtime_handoff_none")
+        if result.get("handoff_status") == "unsupported":
+            handoff = t(msg, "runtime_handoff_unsupported")
+        else:
+            handoff = t(msg, "runtime_handoff_ok" if result.get("handoff")
+                        else "runtime_handoff_none")
         await _send_safe(msg, t(
             msg, "runtime_switched",
             previous=result["previous"],

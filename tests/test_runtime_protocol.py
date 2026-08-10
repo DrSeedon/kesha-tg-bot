@@ -63,4 +63,6 @@ def test_claude_capabilities_declared():
         "context_percentage",
         "cost_reporting",
         "resume_across_restart",
+        "passive_handoff",
     }
+    assert caps.passive_handoff is False

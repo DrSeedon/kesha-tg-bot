@@ -108,6 +108,7 @@ class ClaudeSession:
         context_percentage=True,
         cost_reporting=True,
         resume_across_restart=True,
+        passive_handoff=False,
     )
 
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",
@@ -861,12 +862,22 @@ class ClaudeSession:
         logger.info("Session reset (cleared session_id)")
 
     async def safe_disconnect(self, client=None):
-        client = client or self._client
-        if client is None:
-            return
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        clients = [client] if client is not None else [
+            item for item in (self._client, self._pending_disconnect) if item is not None
+        ]
+        if any(item is self._client for item in clients):
+            self._client = None
+            self._connected = False
+        if any(item is self._pending_disconnect for item in clients):
+            self._pending_disconnect = None
+        seen = set()
+        for target in clients:
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            try:
+                await target.disconnect()
+            except Exception:
+                pass
 
     _safe_disconnect = safe_disconnect
