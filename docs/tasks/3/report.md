@@ -62,6 +62,12 @@ rejected because Kesha must not gain arbitrary filesystem writes.
 - Render a timed-out active tool as `Прервано` with a warning marker. The old
   `ToolStatusTracker.finalize()` path converted every active tool to `Сделано`,
   which falsely presented the 300-second watchdog as a successful mail call.
+- Select the model from `RUNTIME_MODELS` even when Codex is the configured
+  startup runtime. This permits a restart with `KESHA_RUNTIME=codex` without
+  handing Codex the `claude-opus-5` model id.
+- Retain text blocks after `turn_done` finalizes their Telegram message. Without
+  this, successful Codex replies were displayed but logged as `response 0
+  chars` and omitted from `messages.db`, breaking cross-runtime history.
 
 ## Verification
 
@@ -72,9 +78,18 @@ rejected because Kesha must not gain arbitrary filesystem writes.
 - End-to-end image turn through the patched `CodexSession` opened
   `photo_20260810_045205_32656.jpg` and extracted the visible sleep values,
   including score 73 and duration 10 h 10 min.
+- Integrated runtime suite after #2: `145 passed, 1 skipped`; final history
+  regression suite: `126 passed, 1 skipped`.
+- Production nonce after the history fix: exactly `codex-history-ok`,
+  `response 16 chars`, transition back to `IDLE`, and an assistant row in
+  `messages.db`.
 
 ## Operational note
 
 The existing 300-second status is a watchdog timeout, not a successful tool
 duration. The UI must not be interpreted as proof that the mail operation
 completed when the stream ends without a tool result.
+
+Production deployed at `4156d2ee1756d1e22d628434ec1d6a3e1483b631` with a
+systemd drop-in setting `KESHA_RUNTIME=codex` while the Claude subscription is
+exhausted.
