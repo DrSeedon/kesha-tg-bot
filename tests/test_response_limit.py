@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import message_log
 import response_stream
 
 
@@ -202,6 +203,27 @@ async def test_finalization_skips_unchanged_plain_live_text(monkeypatch):
 
     assert len(bot.edits) == 1
     assert bot.edits[0][0] == "one two"
+
+
+@pytest.mark.asyncio
+async def test_turn_done_text_is_kept_in_message_history_and_metrics(monkeypatch, caplog):
+    bot = FakeBot()
+    clock = SimpleNamespace(now=0.0)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(FinalUnchangedSession(clock)))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    logged = []
+    db = SimpleNamespace(log_assistant=lambda chat_id, text: logged.append((chat_id, text)))
+    monkeypatch.setattr(message_log, "get_db", lambda: db)
+    monkeypatch.setattr(response_stream, "monotonic", lambda: clock.now)
+
+    with caplog.at_level("INFO", logger="kesha"):
+        await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    assert logged == [(7, "one two")]
+    assert "response 7 chars" in caplog.text
 
 
 @pytest.mark.asyncio

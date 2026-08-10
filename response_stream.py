@@ -170,6 +170,7 @@ async def _ask_inner(message, prompt, cid, typer):
     last_edit_time = 0.0
     last_edit_text = ""
     finalized: list[int] = []
+    completed_text_blocks: list[str] = []
     terminal_handled = False
 
     status: Optional[ToolStatusTracker] = None
@@ -255,6 +256,7 @@ async def _ask_inner(message, prompt, cid, typer):
         raw = "".join(parts)
         if not raw:
             return
+        completed_text_blocks.append(raw)
         await _stop_typer(typer)
 
         try:
@@ -632,7 +634,11 @@ async def _ask_inner(message, prompt, cid, typer):
                 logger.info(f"Chat {cid}: max retries reached, giving up")
                 break
 
-    text = "".join(parts)
+    # Codex emits an explicit turn_done, so its final text block has already
+    # been rendered and `parts` cleared above. Keep completed blocks for the
+    # message log and health metric; otherwise every successful Codex reply is
+    # reported as `response 0 chars` and disappears from cross-runtime history.
+    text = "".join(completed_text_blocks + parts)
     logger.info(f"Chat {cid}: response {len(text)} chars, finalized={len(finalized)}, tools={len(status.tools) if status else 0}")
     if text:
         try:
