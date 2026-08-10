@@ -471,10 +471,9 @@ class CodexSession:
             "cwd": self.cwd,
             "model": self.model,
             "approvalPolicy": "never",
-            # Kesha is a chat assistant: it must not edit the filesystem. Its
-            # real abilities arrive through the tool bridge, which does its own
-            # path validation (file_access.py).
-            "sandbox": "read-only",
+            # The owner explicitly allows Kesha to edit, commit, push and use
+            # the network from its normal OS account without Codex sandboxing.
+            "sandbox": "danger-full-access",
         }
         if self.system_prompt:
             params["developerInstructions"] = self.system_prompt
@@ -678,6 +677,11 @@ class CodexSession:
                         # Use a delta chunk so response_stream cannot discard a
                         # second delta-less agent item after earlier deltas.
                         yield {"type": "text_delta", "content": text}
+                elif self._tool_chunk(item):
+                    # Close the Telegram timer at the real app-server
+                    # completion event.  Waiting for the next model event made
+                    # 0.3s shell commands look like 151s commands.
+                    yield {"type": "tool_done"}
                 continue
 
             if method == "thread/tokenUsage/updated":

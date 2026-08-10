@@ -303,7 +303,7 @@ class ClaudeSession:
             model=model,
             cwd=self.cwd,
             max_turns=25,
-            permission_mode="default",
+            permission_mode="bypassPermissions",
             can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
             thinking={"type": "adaptive"},

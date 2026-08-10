@@ -50,3 +50,19 @@ def test_failed_status_keeps_already_finished_tools_successful():
 
     assert "✅ 📧 mail\\_list" in rendered
     assert "⚠️ 📧 mail\\_read" in rendered
+
+
+def test_completed_tool_timer_stops_before_model_thinks(monkeypatch):
+    tracker = ToolStatusTracker(FakeBot(), None, 42)
+    tracker.status_msg = SimpleNamespace(message_id=7)
+    tracker.tools = [{
+        "name": "Bash", "icon": "🖥", "hint": "", "start": 100.0, "end": None,
+    }]
+    tracker._current_idx = 0
+    monkeypatch.setattr("tool_status.time.time", lambda: 100.3)
+
+    asyncio.run(tracker.complete_current())
+
+    assert tracker.tools[0]["end"] == 100.3
+    assert tracker._current_idx is None
+    assert "· 0s" in tracker.bot.edits[-1][0]

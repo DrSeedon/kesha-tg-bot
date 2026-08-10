@@ -125,6 +125,16 @@ class ToolStatusTracker:
         except Exception as e:
             logger.debug(f"ToolStatus ticker error: {e}")
 
+    async def complete_current(self):
+        """Stop timing the active tool without closing the whole status log."""
+        if self._current_idx is None:
+            return
+        current = self.tools[self._current_idx]
+        if current["end"] is None:
+            current["end"] = time.time()
+        self._current_idx = None
+        await self._render(force=True)
+
     def _render_text(self, final: bool = False, failed: bool = False) -> str:
         now = time.time()
         if failed:

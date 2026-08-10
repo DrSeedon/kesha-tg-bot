@@ -555,6 +555,9 @@ async def _ask_inner(message, prompt, cid, typer):
                         _ti_short = str(tool_input)[:400]
                     logger.info(f"Chat {cid} tool: {tool_name} input={_ti_short}")
                     await status.add_tool(tool_name, tool_input)
+                elif ct == "tool_done":
+                    if status is not None:
+                        await status.complete_current()
                 elif ct == "turn_done":
                     if parts:
                         await _finalize_text_block()

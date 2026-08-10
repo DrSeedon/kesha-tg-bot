@@ -303,6 +303,7 @@ def test_options_disable_native_auto_compact(tmp_path):
 
     assert options.env["DISABLE_AUTO_COMPACT"] == "1"
     assert "DISABLE_COMPACT" not in options.env
+    assert options.permission_mode == "bypassPermissions"
 
 
 def test_options_allow_bounded_telegram_image_tool_results(tmp_path):

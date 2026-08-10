@@ -113,6 +113,24 @@ def test_only_kesha_bridge_is_configured(tmp_path):
     assert configured == {"kesha"}, f"unexpected MCP servers configured: {configured}"
 
 
+def test_thread_uses_owner_requested_full_access(tmp_path):
+    session = make_session(tmp_path)
+    session.session_id = None
+    calls = []
+
+    async def fake_request(method, params, **kwargs):
+        calls.append((method, params))
+        return {"thread": {"id": "thread-workspace"}}
+
+    session._request = fake_request
+    asyncio.run(session._start_or_resume_thread())
+
+    assert calls[0][0] == "thread/start"
+    assert calls[0][1]["cwd"] == str(tmp_path)
+    assert calls[0][1]["sandbox"] == "danger-full-access"
+    assert calls[0][1]["approvalPolicy"] == "never"
+
+
 def test_private_codex_home_is_used_and_isolated(tmp_path):
     session = make_session(tmp_path, mcp_servers={})
     home = Path(session._ensure_codex_home())
@@ -765,11 +783,16 @@ def test_tool_calls_map_to_status_bubble(tmp_path):
             "type": "mcpToolCall", "server": "kesha", "tool": "send_photo",
             "arguments": {"path": "a.png"},
         }}},
+        {"method": "item/completed", "params": {"item": {
+            "type": "mcpToolCall", "server": "kesha", "tool": "send_photo",
+            "arguments": {"path": "a.png"},
+        }}},
         {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
     ]))
     tools = [c for c in chunks if c["type"] == "tool"]
     assert tools == [{"type": "tool", "name": "mcp__kesha__send_photo",
                       "input": {"path": "a.png"}}]
+    assert [c for c in chunks if c["type"] == "tool_done"] == [{"type": "tool_done"}]
 
 
 def test_reasoning_items_do_not_leak_into_the_answer(tmp_path):
