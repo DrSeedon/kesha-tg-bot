@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -16,11 +17,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_proxy_exposes_telegram_tools_but_not_laptop_shell():
-    names = {tool.name for tool in exposed_tools()}
+    tools = exposed_tools()
+    names = {tool.name for tool in tools}
     assert "send_file" in names
     assert "send_photo" in names
     assert "send_video" in names
     assert "run_on_laptop" not in names
+    schemas = {tool.name: tool.inputSchema for tool in tools}
+    assert schemas["create_reminder"]["type"] == "object"
+    assert schemas["create_reminder"]["properties"]["type"] == {"type": "string"}
+    json.dumps(schemas)
 
 
 @pytest.mark.asyncio

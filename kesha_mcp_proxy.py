@@ -31,7 +31,11 @@ def _json_type(value: type) -> dict[str, Any]:
 def exposed_tools() -> list[Tool]:
     result = []
     for item in bridge_tools():
-        if isinstance(item.input_schema, dict) and "type" in item.input_schema:
+        if (
+            isinstance(item.input_schema, dict)
+            and item.input_schema.get("type") == "object"
+            and isinstance(item.input_schema.get("properties"), dict)
+        ):
             schema = item.input_schema
         else:
             properties = {
