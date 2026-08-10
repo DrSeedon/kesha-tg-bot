@@ -87,6 +87,30 @@ def test_capabilities_mismatch_fails_at_build(tmp_path):
         build_runtime("liar", _ctx(tmp_path))
 
 
+def test_passive_handoff_capability_requires_non_agentic_ingress(tmp_path):
+    """A flag alone must not make ChatState fall back to an agentic turn."""
+    lying = replace(ClaudeSession.CAPABILITIES, passive_handoff=True)
+
+    class LyingClaude(ClaudeSession):
+        CAPABILITIES = lying
+
+    register_runtime(
+        RuntimeDefinition(
+            id="agentic-liar",
+            capabilities=lying,
+            factory=lambda context: LyingClaude(
+                cwd=context.cwd,
+                model=context.model,
+                session_file=context.session_file,
+            ),
+        ),
+        replace=True,
+    )
+
+    with pytest.raises(TypeError, match="without inject_context"):
+        build_runtime("agentic-liar", _ctx(tmp_path))
+
+
 def _claude_like_factory(context: RuntimeBuildContext):
     return ClaudeSession(
         cwd=context.cwd,

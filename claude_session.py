@@ -108,6 +108,7 @@ class ClaudeSession:
         context_percentage=True,
         cost_reporting=True,
         resume_across_restart=True,
+        passive_handoff=False,
     )
 
     def __init__(self, cwd: str, model: str = "claude-sonnet-4-6",

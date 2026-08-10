@@ -25,7 +25,10 @@ class FakeSession:
         self.rate_limit = None
         self.usage_limit_active = False
         self.disconnected = False
+        self.interrupted = False
+        self.reconnects = 0
         self.received: list[str] = []
+        self.injected: list[str] = []
         self._probe_ok = probe_ok
 
     async def read_quota(self):
@@ -46,6 +49,9 @@ class FakeSession:
         yield {"type": "text_delta", "content": "ok"}
         yield {"type": "turn_done"}
 
+    async def inject_context(self, text):
+        self.injected.append(text)
+
     async def check_context_reserve(self, combined="", *, manual=False):
         return {"ok": True, "reason": None}
 
@@ -53,10 +59,10 @@ class FakeSession:
         return None
 
     async def interrupt(self):
-        pass
+        self.interrupted = True
 
     def reconnect(self):
-        pass
+        self.reconnects += 1
 
     async def reset_async(self):
         pass
@@ -234,8 +240,9 @@ def test_handoff_is_delivered_as_user_text_with_a_disclaimer(tmp_path, monkeypat
     result = asyncio.run(chat.switch_runtime("codex"))
 
     assert result["ok"] is True
-    assert len(new.received) == 1, "handoff must be delivered exactly once"
-    sent = new.received[0]
+    assert len(new.injected) == 1, "handoff must be delivered exactly once"
+    assert new.received == [], "handoff opened an agentic turn"
+    sent = new.injected[0]
     assert "Переключение рантайма" in sent, "missing disclaimer"
     assert "Как дела?" in sent and "Привет!" in sent
     # Oldest first, so the new runtime reads the conversation in order.
@@ -251,7 +258,8 @@ def test_empty_history_does_not_block_the_switch(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     assert result["handoff"] is None
-    assert new.received == []
+    assert result["handoff_status"] == "empty"
+    assert new.injected == []
 
 
 def test_unavailable_history_does_not_block_the_switch(tmp_path, monkeypatch):
@@ -270,22 +278,23 @@ def test_unavailable_history_does_not_block_the_switch(tmp_path, monkeypatch):
     assert result["handoff"] is None
 
 
-def test_failed_handoff_delivery_still_switches(tmp_path, monkeypatch):
-    """The summary is a nicety; losing it must not cost the switch."""
+def test_failed_handoff_delivery_discards_candidate(tmp_path, monkeypatch):
+    """An indeterminate candidate is discarded instead of adopted."""
     new = FakeSession("codex")
 
-    async def broken_send(text):
+    async def broken_inject(text):
         raise RuntimeError("turn failed")
-        yield  # pragma: no cover
 
-    new.send_message = broken_send
+    new.inject_context = broken_inject
     chat, _ = make_chat(tmp_path, monkeypatch, new_session=new,
                         history=[{"role": "user", "content": "hi"}])
 
     result = asyncio.run(chat.switch_runtime("codex"))
 
-    assert result["ok"] is True
-    assert chat.runtime_id == "codex"
+    assert result["ok"] is False
+    assert chat.runtime_id == "claude"
+    assert new.interrupted and new.disconnected
+    assert chat.phase is ChatPhase.IDLE
 
 
 def test_handoff_respects_its_character_budget(tmp_path, monkeypatch):
@@ -297,7 +306,175 @@ def test_handoff_respects_its_character_budget(tmp_path, monkeypatch):
 
     asyncio.run(chat.switch_runtime("codex"))
 
-    assert len(new.received[0]) < HANDOFF_MAX_CHARS + 2_000
+    assert len(new.injected[0]) < HANDOFF_MAX_CHARS + 2_000
+
+
+def test_agentic_only_runtime_skips_handoff_instead_of_running_it(
+    tmp_path, monkeypatch
+):
+    """Claude has no passive ingress; old tasks must never be sent as a turn."""
+    new = FakeSession("claude")
+    chat, _ = make_chat(
+        tmp_path,
+        monkeypatch,
+        new_session=new,
+        history=[{"role": "user", "content": "send every email"}],
+    )
+    chat.runtime_id = "codex"
+
+    result = asyncio.run(chat.switch_runtime("claude"))
+
+    assert result["ok"] is True
+    assert result["handoff"] is None
+    assert result["handoff_status"] == "unsupported"
+    assert new.received == []
+    assert new.injected == []
+
+
+def test_handoff_timeout_discards_candidate_and_drains_once(
+    tmp_path, monkeypatch
+):
+    """Mutation guard: removing wait_for used to latch PROCESSING forever."""
+    new = FakeSession("codex")
+    chat, _ = make_chat(
+        tmp_path,
+        monkeypatch,
+        new_session=new,
+        history=[{"role": "user", "content": "old task"}],
+    )
+    processed: list[list[PendingEntry]] = []
+
+    async def record_batch(batch):
+        processed.append(batch)
+        async with chat._lock:
+            chat.phase = ChatPhase.IDLE
+
+    async def hanging_inject(text):
+        await chat.run_urgent_prompt("queued once")
+        await asyncio.sleep(0.2)
+
+    chat._start_processing = record_batch
+    new.inject_context = hanging_inject
+    monkeypatch.setattr("chat_state.HANDOFF_TIMEOUT_SECONDS", 0.01)
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is False
+    assert chat.runtime_id == "claude"
+    assert new.interrupted and new.disconnected
+    assert chat.phase is ChatPhase.IDLE
+    assert [e.prompt for batch in processed for e in batch] == ["queued once"]
+    assert chat.deferred == []
+
+
+def test_cancelled_handoff_cleans_candidate_and_drains_once(tmp_path, monkeypatch):
+    """Cancellation is a lifecycle path, not permission to leak a process."""
+    new = FakeSession("codex")
+    chat, _ = make_chat(
+        tmp_path,
+        monkeypatch,
+        new_session=new,
+        history=[{"role": "user", "content": "old task"}],
+    )
+    entered = asyncio.Event()
+    processed: list[list[PendingEntry]] = []
+
+    async def record_batch(batch):
+        processed.append(batch)
+        async with chat._lock:
+            chat.phase = ChatPhase.IDLE
+
+    async def hanging_inject(text):
+        entered.set()
+        await asyncio.Future()
+
+    chat._start_processing = record_batch
+    new.inject_context = hanging_inject
+
+    async def scenario():
+        task = asyncio.create_task(chat.switch_runtime("codex"))
+        await entered.wait()
+        await chat.run_urgent_prompt("queued once")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert chat.runtime_id == "claude"
+    assert new.interrupted and new.disconnected
+    assert chat.phase is ChatPhase.IDLE
+    assert [e.prompt for batch in processed for e in batch] == ["queued once"]
+    assert chat.deferred == []
+
+
+def test_candidate_disconnect_timeout_forces_process_reconnect(tmp_path, monkeypatch):
+    """A broken disconnect must not turn bounded handoff cleanup into a leak."""
+    new = FakeSession("codex")
+    chat, _ = make_chat(
+        tmp_path,
+        monkeypatch,
+        new_session=new,
+        history=[{"role": "user", "content": "old task"}],
+    )
+
+    async def broken_inject(text):
+        raise RuntimeError("inject failed")
+
+    async def hanging_disconnect():
+        await asyncio.sleep(0.2)
+
+    new.inject_context = broken_inject
+    new.safe_disconnect = hanging_disconnect
+    monkeypatch.setattr("chat_state.SWITCH_CLEANUP_TIMEOUT_SECONDS", 0.01)
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is False
+    assert new.interrupted is True
+    assert new.reconnects == 1
+    assert chat.phase is ChatPhase.IDLE
+
+
+def test_cancel_after_adoption_still_retires_old_and_drains_once(
+    tmp_path, monkeypatch
+):
+    """Mutation guard: cancellation is safe on both sides of session adoption."""
+    new = FakeSession("codex")
+    chat, _ = make_chat(tmp_path, monkeypatch, new_session=new, history=[])
+    old = chat.session
+    entered = asyncio.Event()
+    processed: list[list[PendingEntry]] = []
+
+    async def hanging_old_disconnect():
+        entered.set()
+        await asyncio.sleep(0.2)
+
+    async def record_batch(batch):
+        processed.append(batch)
+        async with chat._lock:
+            chat.phase = ChatPhase.IDLE
+
+    old.safe_disconnect = hanging_old_disconnect
+    chat._start_processing = record_batch
+    monkeypatch.setattr("chat_state.SWITCH_CLEANUP_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario():
+        task = asyncio.create_task(chat.switch_runtime("codex"))
+        await entered.wait()
+        await chat.run_urgent_prompt("queued once")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert chat.runtime_id == "codex"
+    assert chat.session is new
+    assert old.reconnects == 1
+    assert chat.phase is ChatPhase.IDLE
+    assert [e.prompt for batch in processed for e in batch] == ["queued once"]
+    assert chat.deferred == []
 
 
 # ---------- work arriving during a switch (T5b, reminders) ----------

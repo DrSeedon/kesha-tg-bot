@@ -18,6 +18,7 @@ class RuntimeCapabilities:
     context_percentage: bool
     cost_reporting: bool
     resume_across_restart: bool
+    passive_handoff: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -26,6 +27,7 @@ class RuntimeCapabilities:
             "context_percentage": self.context_percentage,
             "cost_reporting": self.cost_reporting,
             "resume_across_restart": self.resume_across_restart,
+            "passive_handoff": self.passive_handoff,
         }
 
 
