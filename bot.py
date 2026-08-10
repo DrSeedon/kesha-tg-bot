@@ -28,7 +28,14 @@ from config import (
 )
 from chat_state import ChatRegistry
 from claude_session import ClaudeSession
-from kesha_tools import kesha_server, set_bot_ref, set_current_chat
+from kesha_tools import (
+    get_current_chat,
+    kesha_server,
+    register_bridge_tools,
+    set_bot_ref,
+    set_current_chat,
+)
+from tool_bridge import ToolBridge, issue_token
 import reminders as _reminders
 import compact as _compact
 import inbox_server as _inbox
@@ -134,6 +141,9 @@ async def main():
     global BOT_START_TIME, _singleton_lock_fp, registry
 
     _singleton_lock_fp = _acquire_singleton_lock()
+    tool_bridge = ToolBridge(issue_token(), get_current_chat)
+    register_bridge_tools(tool_bridge)
+    await tool_bridge.start()
     BOT_START_TIME = time.time()
     from message_log import get_db as _msg_db
     activity_store = _msg_db()
@@ -251,6 +261,7 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        await tool_bridge.stop()
         await registry.shutdown()
         if _rag_executor:
             _rag_executor.shutdown(wait=False)

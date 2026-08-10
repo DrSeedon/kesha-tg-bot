@@ -111,6 +111,7 @@ def _codex_factory(context: RuntimeBuildContext) -> ChatRuntime:
     from codex_session import CodexSession
 
     return CodexSession(
+        chat_id=context.chat_id,
         cwd=context.cwd,
         model=context.model,
         system_prompt=context.system_prompt,

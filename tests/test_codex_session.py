@@ -85,6 +85,7 @@ def test_build_runtime_accepts_codex(tmp_path):
     )
     assert isinstance(backend, CodexSession)
     assert backend.model == "gpt-5.6-sol"
+    assert backend.chat_id == 42
 
 
 # ---------- MCP isolation (the T3 bridge must not be bypassable) ----------
@@ -113,6 +114,35 @@ def test_only_kesha_bridge_is_configured(tmp_path):
     assert configured == {"kesha"}, f"unexpected MCP servers configured: {configured}"
 
 
+def test_sdk_kesha_server_becomes_chat_bound_stdio_bridge(tmp_path, monkeypatch):
+    import tool_bridge
+
+    monkeypatch.setenv(tool_bridge.TOKEN_ENV, "bridge-token")
+    monkeypatch.setattr(tool_bridge, "SOCKET_PATH", tmp_path / "bridge.sock")
+    issued = []
+
+    def fake_issue(chat_id, ttl, runtime):
+        issued.append((chat_id, ttl, runtime))
+        return "opaque-session"
+
+    monkeypatch.setattr(tool_bridge, "issue_session", fake_issue)
+    session = make_session(
+        tmp_path,
+        chat_id=42,
+        mcp_servers={"kesha": {"type": "sdk", "instance": object()}},
+    )
+
+    args = session._mcp_config_args()
+    rendered = "\n".join(args)
+
+    assert issued == [(42, 24 * 60 * 60, "codex")]
+    assert "mcp_servers.kesha.enabled=true" in rendered
+    assert "kesha_mcp_proxy.py" in rendered
+    assert "KESHA_BRIDGE_SESSION" in rendered
+    assert "opaque-session" in rendered
+    assert "chat_id" not in rendered
+
+
 def test_thread_uses_owner_requested_full_access(tmp_path):
     session = make_session(tmp_path)
     session.session_id = None
@@ -129,6 +159,37 @@ def test_thread_uses_owner_requested_full_access(tmp_path):
     assert calls[0][1]["cwd"] == str(tmp_path)
     assert calls[0][1]["sandbox"] == "danger-full-access"
     assert calls[0][1]["approvalPolicy"] == "never"
+
+
+def test_each_turn_pins_low_reasoning_effort(tmp_path):
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    requests = []
+
+    async def fake_connect():
+        return None
+
+    async def fake_request(method, params, **kwargs):
+        requests.append((method, params))
+        if method == "turn/start":
+            session._notifications.put_nowait({"method": "turn/completed", "params": {
+                "turnId": "turn-1",
+                "turn": {"id": "turn-1", "status": "completed"},
+            }})
+            return {"turn": {"id": "turn-1"}}
+        return {}
+
+    session._connect = fake_connect
+    session._request = fake_request
+
+    async def collect():
+        return [chunk async for chunk in session.send_message("hi")]
+
+    asyncio.run(collect())
+    turn = next(params for method, params in requests if method == "turn/start")
+    assert turn["effort"] == "low"
 
 
 def test_private_codex_home_is_used_and_isolated(tmp_path):

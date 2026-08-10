@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -118,7 +119,8 @@ class CodexSession:
         mcp_servers: Optional[dict] = None,
         session_file: Optional[Path] = None,
         on_connecting=None,
-        reasoning_effort: str = "medium",
+        reasoning_effort: str = "low",
+        chat_id: int | None = None,
     ):
         self.cwd = cwd
         self.model = model
@@ -127,6 +129,8 @@ class CodexSession:
         self._session_file = session_file
         self._on_connecting = on_connecting
         self.reasoning_effort = reasoning_effort
+        self.chat_id = chat_id
+        self._bridge_session: str | None = None
 
         self.session_id: Optional[str] = self._load_session()
 
@@ -216,6 +220,7 @@ class CodexSession:
                     RuntimeError(f"Codex app-server exited: {self._last_stderr[-300:]}")
                 )
         self._pending_requests.clear()
+        self._revoke_bridge_session()
         self._notifications.put_nowait({"method": "_process/exited", "params": {}})
 
     async def _handle_server_request(self, msg: dict) -> None:
@@ -394,6 +399,38 @@ class CodexSession:
             except OSError as exc:
                 logger.warning(f"Codex: could not link auth.json: {exc}")
 
+    def _kesha_bridge_config(self) -> dict:
+        """Turn Claude's in-process SDK server into Codex's stdio proxy."""
+        if self.chat_id is None:
+            raise RuntimeError("Codex Kesha bridge requires a chat_id")
+        from tool_bridge import SOCKET_PATH, TOKEN_ENV, issue_session
+
+        token = os.getenv(TOKEN_ENV, "").strip()
+        if not token:
+            raise RuntimeError("Kesha bridge token is unavailable")
+        self._revoke_bridge_session()
+        self._bridge_session = issue_session(
+            self.chat_id, ttl=24 * 60 * 60, runtime="codex"
+        )
+        return {
+            "command": sys.executable,
+            "args": [str(Path(__file__).with_name("kesha_mcp_proxy.py"))],
+            "env": {
+                "KESHA_BRIDGE_SOCKET": str(SOCKET_PATH),
+                TOKEN_ENV: token,
+                "KESHA_BRIDGE_SESSION": self._bridge_session,
+            },
+        }
+
+    def _revoke_bridge_session(self) -> None:
+        if not self._bridge_session:
+            return
+        try:
+            from tool_bridge import revoke_session
+            revoke_session(self._bridge_session)
+        finally:
+            self._bridge_session = None
+
     def _mcp_config_args(self) -> list[str]:
         """Pin MCP servers to exactly what Kesha passes.
 
@@ -405,13 +442,14 @@ class CodexSession:
             "--disable",
             "apps",
             # This VPS cannot create the loopback interface required by
-            # bubblewrap (RTM_NEWADDR EPERM).  Codex's legacy Landlock backend
-            # preserves the read-only policy without that network-namespace
-            # operation; verified with codex-cli 0.146.0.
+            # bubblewrap (RTM_NEWADDR EPERM). Keep the proven backend available
+            # for commands that still use a sandbox policy.
             "--enable",
             "use_legacy_landlock",
         ]
         for name, cfg in self.mcp_servers.items():
+            if name == "kesha" and isinstance(cfg, dict) and cfg.get("type") == "sdk":
+                cfg = self._kesha_bridge_config()
             command = cfg.get("command") if isinstance(cfg, dict) else None
             if not command:
                 continue
@@ -528,6 +566,7 @@ class CodexSession:
                 self._notifications.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        self._revoke_bridge_session()
 
     # ---------- streaming ----------
 
@@ -554,6 +593,7 @@ class CodexSession:
                     "threadId": self.session_id,
                     "input": [{"type": "text", "text": text}],
                     "model": self.model,
+                    "effort": self.reasoning_effort,
                 },
             )
         except Exception as exc:
@@ -962,6 +1002,7 @@ class CodexSession:
                 proc.terminate()
             except ProcessLookupError:
                 pass
+        self._revoke_bridge_session()
         logger.info("Codex: reconnecting (keeping thread id)")
 
     async def reset_async(self) -> None:
