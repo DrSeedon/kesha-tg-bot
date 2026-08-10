@@ -350,7 +350,10 @@ class CodexSession:
             pass
 
         config = home / "config.toml"
-        desired = f'model = {_toml_str(self.model)}\n'
+        desired = (
+            f'model = {_toml_str(self.model)}\n'
+            "project_doc_max_bytes = 131072\n"
+        )
         if not config.exists() or config.read_text() != desired:
             config.write_text(desired)
 

@@ -122,6 +122,7 @@ def test_private_codex_home_is_used_and_isolated(tmp_path):
     assert home != Path.home() / ".codex"
     config = (home / "config.toml").read_text()
     assert "mcp_servers" not in config, "private config must not define servers"
+    assert "project_doc_max_bytes = 131072" in config
     assert oct(home.stat().st_mode)[-3:] == "700"
 
 
