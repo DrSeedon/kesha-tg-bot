@@ -1,6 +1,6 @@
 # #3 — Codex MCP hang and image sandbox failure
 
-Date: 2026-08-10  
+Date: 2026-08-10
 Runtime under test: `codex-cli 0.146.0`, `gpt-5.6-sol`
 
 ## Production symptoms
