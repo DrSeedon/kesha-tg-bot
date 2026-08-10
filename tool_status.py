@@ -125,9 +125,12 @@ class ToolStatusTracker:
         except Exception as e:
             logger.debug(f"ToolStatus ticker error: {e}")
 
-    def _render_text(self, final: bool = False) -> str:
+    def _render_text(self, final: bool = False, failed: bool = False) -> str:
         now = time.time()
-        header = "🤖 *Сделано:*" if final else "🤖 *Работаю...*"
+        if failed:
+            header = "🤖 *Прервано:*"
+        else:
+            header = "🤖 *Сделано:*" if final else "🤖 *Работаю...*"
         lines = [header]
         for i, t in enumerate(self.tools):
             is_current = (i == self._current_idx) and not final and t["end"] is None
@@ -138,6 +141,8 @@ class ToolStatusTracker:
                 if dur >= STALL_HINT_AFTER:
                     marker = "⏱"
                 lines.append(f"{marker} {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
+            elif failed and i == self._current_idx:
+                lines.append(f"⚠️ {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
             else:
                 lines.append(f"✅ {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
         return "\n".join(lines)
@@ -210,6 +215,35 @@ class ToolStatusTracker:
             except Exception as e:
                 if "message is not modified" not in str(e):
                     logger.debug(f"ToolStatus finalize edit error: {e}")
+        return self.status_msg.message_id
+
+    async def fail(self) -> Optional[int]:
+        """Stop ticker and mark the active tool interrupted, never successful."""
+        self._stopped = True
+        now = time.time()
+        if self._current_idx is not None and self.tools and self.tools[self._current_idx]["end"] is None:
+            self.tools[self._current_idx]["end"] = now
+        if self._tick_task and not self._tick_task.done():
+            self._tick_task.cancel()
+            try:
+                await self._tick_task
+            except Exception:
+                pass
+        self._tick_task = None
+        if not self.tools or self.status_msg is None:
+            return self.status_msg.message_id if self.status_msg else None
+        final_text = self._render_text(failed=True)
+        if final_text != self._last_text:
+            try:
+                await self.bot.edit_message_text(
+                    final_text,
+                    chat_id=self.chat_id,
+                    message_id=self.status_msg.message_id,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e):
+                    logger.debug(f"ToolStatus fail edit error: {e}")
         return self.status_msg.message_id
 
     async def cancel_empty(self):

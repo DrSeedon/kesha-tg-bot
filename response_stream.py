@@ -496,7 +496,7 @@ async def _ask_inner(message, prompt, cid, typer):
                         try:
                             if status:
                                 if status.tools:
-                                    await status.finalize()
+                                    await status.fail()
                                 else:
                                     await status.cancel_empty()
                                 status = None
@@ -507,9 +507,17 @@ async def _ask_inner(message, prompt, cid, typer):
                     if parts:
                         parts.append("\n\n⚠️ _ответ прервался (stream timeout)_")
                     elif status is not None:
-                        await _finalize_status()
+                        failed_mid = await status.fail()
+                        if failed_mid:
+                            finalized.append(failed_mid)
+                        status = None
                         if message is not None:
                             await _send_safe(message, "⚠️ _ответ прервался (stream timeout)_")
+                    if status is not None:
+                        failed_mid = await status.fail()
+                        if failed_mid:
+                            finalized.append(failed_mid)
+                        status = None
                     _get_session(cid).reconnect()
                     break
                 except StopAsyncIteration:
