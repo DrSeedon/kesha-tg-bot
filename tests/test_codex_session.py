@@ -142,6 +142,106 @@ def test_apps_feature_is_disabled_not_just_config(tmp_path):
     assert args[:2] == ["--disable", "apps"]
 
 
+def test_legacy_landlock_avoids_vps_bubblewrap_network_namespace(tmp_path):
+    """The VPS cannot create bwrap's loopback interface (RTM_NEWADDR EPERM)."""
+    args = make_session(tmp_path, mcp_servers={})._mcp_config_args()
+    assert ["--enable", "use_legacy_landlock"] == args[2:4]
+
+
+class _ServerRequestStdout:
+    def __init__(self, messages):
+        self._lines = [json.dumps(message).encode() + b"\n" for message in messages]
+
+    async def readline(self):
+        return self._lines.pop(0) if self._lines else b""
+
+
+class _ServerResponseStdin:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(json.loads(data))
+
+    async def drain(self):
+        return None
+
+
+def _drive_server_request(session, params, *, method="mcpServer/elicitation/request"):
+    stdin = _ServerResponseStdin()
+    session._proc = type("Proc", (), {
+        "stdout": _ServerRequestStdout([{
+            "jsonrpc": "2.0", "id": 17, "method": method, "params": params,
+        }]),
+        "stdin": stdin,
+    })()
+    session._connected = True
+    asyncio.run(session._read_stdout())
+    return stdin.writes
+
+
+def test_configured_mcp_empty_permission_is_accepted(tmp_path):
+    session = make_session(
+        tmp_path,
+        mcp_servers={"mailru": {"command": "/usr/bin/mailru-mcp"}},
+    )
+    writes = _drive_server_request(session, {
+        "serverName": "mailru",
+        "mode": "form",
+        "message": 'Allow the mailru MCP server to run tool "mail_count_all"?',
+        "requestedSchema": {"type": "object", "properties": {}},
+    })
+    assert writes == [{
+        "jsonrpc": "2.0", "id": 17,
+        "result": {"action": "accept", "content": {}},
+    }]
+
+
+@pytest.mark.parametrize("params", [
+    {
+        "serverName": "foreign",
+        "mode": "form",
+        "message": 'Allow the foreign MCP server to run tool "steal"?',
+        "requestedSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "serverName": "mailru",
+        "mode": "form",
+        "message": "Send a password",
+        "requestedSchema": {
+            "type": "object", "properties": {"password": {"type": "string"}},
+        },
+    },
+    {
+        "serverName": "mailru",
+        "mode": "url",
+        "message": "Open this URL",
+        "url": "https://example.invalid/authorize",
+    },
+])
+def test_non_permission_mcp_elicitation_is_declined(tmp_path, params):
+    session = make_session(
+        tmp_path,
+        mcp_servers={"mailru": {"command": "/usr/bin/mailru-mcp"}},
+    )
+    writes = _drive_server_request(session, params)
+    assert writes == [{
+        "jsonrpc": "2.0", "id": 17,
+        "result": {"action": "decline"},
+    }]
+
+
+def test_unknown_server_request_gets_error_instead_of_hanging(tmp_path):
+    session = make_session(tmp_path)
+    writes = _drive_server_request(
+        session,
+        {"anything": True},
+        method="item/tool/call",
+    )
+    assert writes[0]["id"] == 17
+    assert writes[0]["error"]["code"] == -32601
+
+
 @pytest.mark.skipif(
     not os.getenv("KESHA_CODEX_LIVE"),
     reason="live app-server test; set KESHA_CODEX_LIVE=1 to run",
