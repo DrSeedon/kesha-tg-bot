@@ -535,6 +535,16 @@ def test_registry_shutdown_owns_an_active_runtime_switch(tmp_path, monkeypatch):
     assert registry._chats == {}
 
 
+def test_codex_can_be_the_configured_startup_runtime():
+    """KESHA_RUNTIME=codex must not pass Claude's model id to Codex."""
+    registry = ChatRegistry.__new__(ChatRegistry)
+    registry._runtime = "codex"
+    registry._model = "claude-opus-5"
+
+    assert registry._model_for("codex") == "gpt-5.6-sol"
+    assert registry._model_for("claude") == "claude-opus-5"
+
+
 def test_cancel_after_adoption_still_retires_old_and_drains_once(
     tmp_path, monkeypatch
 ):

@@ -1357,8 +1357,6 @@ class ChatRegistry:
 
     def _model_for(self, runtime_id: str) -> str:
         """Each runtime needs its own model id; Claude's would be rejected by Codex."""
-        if runtime_id == self._runtime:
-            return self._model
         return RUNTIME_MODELS.get(runtime_id, self._model)
 
     def get(self, chat_id: int) -> ChatState:
