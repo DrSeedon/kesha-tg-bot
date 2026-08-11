@@ -16,10 +16,12 @@ from config import (
     AUTO_COMPACT_WINDOW_START,
     RUNTIME_MODELS,
     STRINGS,
+    lang_of,
     render as _render,
     t as _t_cfg,
 )
 from message_log import ActivityPersistenceError
+from quota import quota_block
 
 if TYPE_CHECKING:
     from aiogram import Bot, types
@@ -615,8 +617,8 @@ class ChatState:
             "отвечать на него не нужно.]\n\n" + transcript
         )
 
-    def _limit_fmt(self) -> dict:
-        """Name the subscription that is out, and its reset time if known.
+    async def _limit_fmt(self, message=None) -> dict:
+        """Name the subscription that is out, its reset time, and its windows.
 
         The same data the streaming path reports (#16 T7). Saying "Claude"
         while running on Codex sends the user to the wrong account; omitting
@@ -625,9 +627,12 @@ class ChatState:
         summary = getattr(self.session, "quota_summary", None)
         data = summary() if callable(summary) else None
         when = (data or {}).get("resets_human")
+        block = await quota_block(self.runtime_id or "claude", self.session,
+                                  lang_of(message))
         return {
             "runtime": self.runtime_id or "Claude",
             "reset": f" (сброс {when})" if when else "",
+            "quota": f"\n\n{block}" if block else "",
         }
 
     @staticmethod
@@ -1018,7 +1023,7 @@ class ChatState:
                     key = "session_unavailable"
                 elif reason == "usage_limit":
                     key = "context_usage_limit"
-                    fmt = self._limit_fmt()
+                    fmt = await self._limit_fmt(batch[-1].message)
                 elif reason == "runtime_invariant":
                     key = "context_runtime_invariant"
                     fmt = {"expected": reserve.get("expected_model", "?")}

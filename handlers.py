@@ -17,6 +17,7 @@ from config import (
     LOG_DIR,
     STRINGS,
     WORK_DIR,
+    lang_of,
     logger,
     t,
 )
@@ -28,6 +29,7 @@ from media import (
     transcribe,
 )
 from message_log import ActivityPersistenceError
+from quota import quota_block
 from telegram_io import (
     _send_safe,
     extract_caption_with_urls,
@@ -163,7 +165,9 @@ async def h_status(msg: types.Message):
     else:
         ctx_str = "n/a"
     uptime = _uptime_fn() if _uptime_fn else "unknown"
+    block = await quota_block(cs.runtime_id, s, lang_of(msg))
     await _send_safe(msg, t(msg, "status",
+        quota=f"\n\n{block}" if block else "",
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
@@ -276,20 +280,15 @@ async def h_runtime(msg: types.Message):
 
 
 async def _runtime_quota_line(msg: types.Message, cs) -> str:
-    """Render the runtime's quota, refreshing it when the backend can."""
+    """Render the runtime's quota windows, refreshing them when the backend can."""
     reader = getattr(cs.session, "read_quota", None)
     if callable(reader) and not cs.is_busy:
         try:
             await asyncio.wait_for(reader(), timeout=30)
         except Exception as exc:
             logger.debug(f"quota refresh failed: {exc}")
-    summary = getattr(cs.session, "quota_summary", None)
-    data = summary() if callable(summary) else None
-    if not data:
-        return t(msg, "runtime_quota_unknown")
-    return t(msg, "runtime_quota",
-             used=data.get("used_percent"),
-             reset=data.get("resets_human") or "?")
+    return (await quota_block(cs.runtime_id, cs.session, lang_of(msg))
+            or t(msg, "runtime_quota_unknown"))
 
 
 async def h_ping(msg: types.Message):

@@ -100,11 +100,11 @@ STRINGS = {
         "debounce_usage": "Текущий: `{sec}s`\nИспользование: `/debounce 5`",
         "reconnecting": "⚠️ Переподключаюсь... (попытка {n})",
         "error_retry": "⚠️ Ошибка, перезапуск сессии (попытка {n})...",
-        "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.",
+        "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.{quota}",
         "context_limit": "🧠 Контекст заполнен. Отправь /compact, чтобы продолжить без очистки.",
         "context_reserve": "🧠 Контекст почти заполнен. Отправь /compact, затем повтори сообщение.",
         "context_unknown": "⚠️ Не удалось проверить свободный контекст. Повтори сообщение чуть позже.",
-        "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.",
+        "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.{quota}",
         "context_runtime_invariant": "⚠️ Рантайм не совпал с ожидаемой конфигурацией (ждём {expected}: 1M контекст, 64k вывода, авто-компакт выключен). Сообщение не отправлено — проверь конфиг.",
         "context_runtime_unhealthy": "⚠️ Рантайм не отвечает — не смог проверить свободный контекст даже со второй попытки, поэтому сообщение не отправил. Клиент переподключён, отправь ещё раз.",
         "session_unavailable": "⚠️ Сохранённая сессия недоступна. Отправь /clear, чтобы начать новую.",
@@ -112,8 +112,10 @@ STRINGS = {
         "compact_native_done": "✅ Контекст сжат средствами {runtime}: {before:.0f}% → {after:.0f}% ({tokens} токенов).",
         "compact_native_failed": "⚠️ Родное сжатие не удалось: {error}",
         "runtime_status": "🧩 Рантайм: *{current}* ({model})\nДоступны: {available}\n{quota}\nПереключить: `/runtime {other}`",
-        "runtime_quota": "📊 Лимит: {used}% использовано, сброс {reset}",
         "runtime_quota_unknown": "📊 Лимит: неизвестен",
+        # Окно квоты: утилизация% (сколько % окна прошло) осталось-до-сброса · темп
+        "quota_pace_ok": "темп ok",
+        "quota_pace_over": "темп +{value}",
         "runtime_switched": "🔄 Рантайм: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "История передана выжимкой.",
         "runtime_handoff_none": "История не передана (пустая или недоступна) — начинаю с чистого листа.",
@@ -153,7 +155,7 @@ STRINGS = {
             "📊 Rate limit: `{rate_limit}`\n"
             "💰 Стоимость сессии: `${cost}`\n"
             "📁 Медиа: `{media_count}` файлов\n"
-            "📝 Лог: `{log_size}`"
+            "📝 Лог: `{log_size}`{quota}"
         ),
     },
     "en": {
@@ -175,11 +177,11 @@ STRINGS = {
         "debounce_usage": "Current: `{sec}s`\nUsage: `/debounce 5`",
         "reconnecting": "⚠️ Reconnecting... (attempt {n})",
         "error_retry": "⚠️ Error, restarting session (attempt {n})...",
-        "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.",
+        "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.{quota}",
         "context_limit": "🧠 Context is full. Send /compact to continue without clearing it.",
         "context_reserve": "🧠 Context is almost full. Send /compact, then resend your message.",
         "context_unknown": "⚠️ Could not verify free context. Please resend the message shortly.",
-        "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.",
+        "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.{quota}",
         "context_runtime_invariant": "⚠️ The runtime did not match the expected configuration (want {expected}: 1M context, 64k output, auto-compact off). Message not sent — check the config.",
         "context_runtime_unhealthy": "⚠️ The runtime is not responding — I could not verify free context even on a second attempt, so I did not send your message. The client has been reconnected; please send it again.",
         "session_unavailable": "⚠️ The saved session is unavailable. Send /clear to start a new one.",
@@ -187,8 +189,9 @@ STRINGS = {
         "compact_native_done": "✅ Context compacted via {runtime}: {before:.0f}% → {after:.0f}% ({tokens} tokens).",
         "compact_native_failed": "⚠️ Native compaction failed: {error}",
         "runtime_status": "🧩 Runtime: *{current}* ({model})\nAvailable: {available}\n{quota}\nSwitch: `/runtime {other}`",
-        "runtime_quota": "📊 Quota: {used}% used, resets {reset}",
         "runtime_quota_unknown": "📊 Quota: unknown",
+        "quota_pace_ok": "pace ok",
+        "quota_pace_over": "pace +{value}",
         "runtime_switched": "🔄 Runtime: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "History carried over as a summary.",
         "runtime_handoff_none": "History not carried over (empty or unavailable) — starting fresh.",
@@ -228,7 +231,7 @@ STRINGS = {
             "📊 Rate limit: `{rate_limit}`\n"
             "💰 Session cost: `${cost}`\n"
             "📁 Media: `{media_count}` files\n"
-            "📝 Log: `{log_size}`"
+            "📝 Log: `{log_size}`{quota}"
         ),
     },
 }
@@ -253,9 +256,22 @@ def render(key: str, lang: str = "ru", **kw) -> str:
     return STRINGS[lang][key].format_map(_Blank(kw))
 
 
+def lang_of(msg) -> str:
+    """Locale of a message, or the default when there is no message at all
+    (reminders and other bot-initiated turns have no sender).
+
+    Never raises: a message with no sender (channel posts) must not take down
+    the rendering of a terminal notice — losing the explanation is worse than
+    picking the wrong locale for it.
+    """
+    sender = getattr(msg, "from_user", None)
+    if sender is None:
+        return "ru"
+    return (sender.language_code or "en")[:2]
+
+
 def t(msg: types.Message, key: str, **kw) -> str:
-    lang = (msg.from_user.language_code or "en")[:2]
-    return render(key, lang, **kw)
+    return render(key, lang_of(msg), **kw)
 
 
 # --- System Prompt ---

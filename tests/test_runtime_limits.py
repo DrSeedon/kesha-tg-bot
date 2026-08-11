@@ -7,6 +7,7 @@ BOTH: whose limit, and when it resets.
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import response_stream  # noqa: E402
-from config import STRINGS  # noqa: E402
+from config import STRINGS, render  # noqa: E402
 
 RAW = "You've hit your usage limit"
 
@@ -190,6 +191,135 @@ async def test_limit_is_terminal_and_not_retried():
     assert len(calls) == 1, f"limit was retried {len(calls)} times"
 
 
+# ---------- #6: the limit notice carries the real windows ----------
+
+
+@pytest.fixture
+def claude_windows(monkeypatch):
+    """Claude's oauth/usage payload, frozen — no network, no wall clock."""
+    import quota
+
+    now = datetime.now(timezone.utc)
+
+    async def fake_fetch():
+        return {
+            "five_hour": {"utilization": 99.0,
+                          "resets_at": (now + timedelta(minutes=18)).isoformat()},
+            "seven_day": {"utilization": 15.0,
+                          "resets_at": (now + timedelta(days=6)).isoformat()},
+        }
+
+    monkeypatch.setattr(quota, "fetch_claude_usage", fake_fetch)
+
+
+@pytest.mark.asyncio
+async def test_the_stream_limit_notice_shows_the_windows(claude_windows):
+    """A bare "wait for the reset" is what this ticket exists to remove."""
+
+    class LimitedClaude(LimitedCodexSession):
+        def quota_summary(self):
+            return None
+
+    text = visible_text(await run_turn(LimitedClaude(), runtime_id="claude"))
+
+    assert "5h: 99%" in text, f"5h window missing: {text!r}"
+    assert "7d: 15%" in text, f"7d window missing: {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_reserve_limit_notice_shows_the_windows(claude_windows):
+    """The pre-turn rejection path renders the same block."""
+
+    class Refusing(LimitedCodexSession):
+        def quota_summary(self):
+            return None
+
+        async def check_context_reserve(self, combined="", *, manual=False):
+            return {"ok": False, "reason": "usage_limit"}
+
+    chat = _chat_with(Refusing(), runtime_id="claude")
+    chat._activity_store.finish_activity = lambda *a, **kw: ""
+    await chat._run_batch([_entry()])
+
+    text = " ".join(t for _, t in chat.bot.sent)
+    assert "5h: 99%" in text, f"5h window missing: {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_no_quota_data_leaves_the_old_message_untouched():
+    """Absent windows must not leave a dangling blank line or placeholder."""
+    bot = await run_turn(LimitedCodexSession(quota=False))
+    final = bot.edits[-1][0]
+
+    assert "5h:" not in final and "{quota}" not in final
+    assert final == final.strip(), f"notice ends with a dangling blank line: {final!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_notice_survives_a_registry_that_dies_at_the_limit(claude_windows):
+    """Nothing gathered for the decoration may cost the notice itself.
+
+    The session lookup is only reachable here because the limit already
+    happened — if it fails now, the user must still learn why the turn died.
+    """
+    state_box = {}
+
+    class Dying(LimitedCodexSession):
+        def quota_summary(self):
+            return None
+
+        async def send_message(self, prompt):
+            yield {"type": "text_delta", "content": "считаю"}
+            state_box["state"].dead = True
+            yield {"type": "error", "kind": "usage_limit", "content": RAW}
+
+    class DyingState:
+        dead = False
+
+        def __init__(self, session, runtime_id):
+            self._session = session
+            self.runtime_id = runtime_id
+
+        @property
+        def session(self):
+            if self.dead:
+                raise RuntimeError("session lookup gone")
+            return self._session
+
+        def should_stop(self):
+            return False
+
+    class DyingRegistry(FakeRegistry):
+        def __init__(self, session, runtime_id):
+            self.state = DyingState(session, runtime_id)
+
+        def get(self, chat_id):
+            return self.state
+
+    bot = FakeBot()
+    registry = DyingRegistry(Dying(), "claude")
+    state_box["state"] = registry.state
+    response_stream.set_bot(bot)
+    response_stream.set_registry(registry)
+    typer = asyncio.create_task(completed_typer())
+    await typer
+    await response_stream._ask_inner(None, "посчитай", 7, typer)
+
+    assert "лимит" in visible_text(bot).lower(), "the explanation was lost"
+
+
+def test_a_message_without_a_sender_still_renders_a_notice():
+    """Channel posts have from_user=None; the notice must not die on it."""
+    from config import lang_of, render
+
+    class NoSender:
+        from_user = None
+
+    assert lang_of(NoSender()) == "ru"
+    assert "лимит" in render("session_limit", lang_of(NoSender()),
+                             runtime="claude", reset="").lower()
+
+
 # ---------- the helpers, directly ----------
 
 
@@ -275,21 +405,23 @@ async def test_reserve_rejection_names_the_runtime_and_its_reset():
     assert "Claude" not in text, "named the wrong subscription"
 
 
-def test_reserve_rejection_omits_a_reset_it_does_not_know():
+@pytest.mark.asyncio
+async def test_reserve_rejection_omits_a_reset_it_does_not_know():
     chat = _chat_with(LimitedCodexSession(quota=False), runtime_id="codex")
-    fmt = chat._limit_fmt()
+    fmt = await chat._limit_fmt()
 
     assert fmt["reset"] == ""
-    rendered = STRINGS["ru"]["context_usage_limit"].format(**fmt)
+    rendered = render("context_usage_limit", **fmt)
     assert "(сброс" not in rendered
 
 
-def test_reserve_rejection_still_names_claude_on_the_default_runtime():
+@pytest.mark.asyncio
+async def test_reserve_rejection_still_names_claude_on_the_default_runtime():
     class Bare:
         pass
 
     chat = _chat_with(Bare(), runtime_id="claude")
-    rendered = STRINGS["ru"]["context_usage_limit"].format(**chat._limit_fmt())
+    rendered = render("context_usage_limit", **await chat._limit_fmt())
     assert "claude" in rendered.lower()
 
 
@@ -339,9 +471,8 @@ def test_render_still_substitutes_what_it_is_given():
 
 def test_limit_string_carries_both_runtime_and_reset():
     for lang in ("ru", "en"):
-        rendered = STRINGS[lang]["session_limit"].format(
-            runtime="codex", reset=" (сброс 08.08 12:53)"
-        )
+        rendered = render("session_limit", lang,
+                          runtime="codex", reset=" (сброс 08.08 12:53)")
         assert "codex" in rendered
         assert "08.08 12:53" in rendered
 
