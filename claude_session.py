@@ -1,6 +1,7 @@
 """Claude session via ClaudeSDKClient — persistent connection with injection support."""
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -30,6 +31,34 @@ from runtime_protocol import RuntimeCapabilities
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path("./storage/sessions")
+EXTERNAL_MCP_CONFIG = Path(__file__).parent / "storage" / "mcp-external.json"
+
+
+def write_external_mcp_config(servers: dict, path: Optional[Path] = None) -> str:
+    """Hand external MCP servers to the CLI by path, never by value.
+
+    The SDK serialises an `mcp_servers` dict straight into argv
+    (`subprocess_cli.py`, `--mcp-config <json>`), so every `env` block — API
+    keys, passwords — ends up readable by any local process through `ps`.
+    A 0600 file carries the same content off the process table. The path is
+    absolute because the CLI resolves it against its own cwd, not the bot's.
+    """
+    path = path or EXTERNAL_MCP_CONFIG
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A fixed `.tmp` name would be both a race between chats (two sessions
+    # truncating one file) and a symlink others could pre-create: O_TRUNC
+    # follows it and mode 0600 is not applied to a file that already exists.
+    # mkstemp creates a fresh 0600 file or fails. Same idiom as _write_session_id.
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"mcpServers": servers}, f)
+        os.replace(temp_path, path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return str(path.resolve())
 
 
 def resolve_context_model(model: str, use_1m: bool = True) -> str:
@@ -314,7 +343,19 @@ class ClaudeSession:
         if self.system_prompt:
             options.system_prompt = self.system_prompt
         if self.mcp_servers:
-            options.mcp_servers = self.mcp_servers
+            # In-process SDK servers must stay in the dict — that is how the SDK
+            # finds their `instance` to route tool calls (`_internal/client.py`).
+            # Only these three fields are read by anyone (`instance` by the SDK,
+            # type/name by the CLI), so rebuilding the entry instead of copying
+            # it keeps a stray `env` out of argv rather than trusting it absent.
+            in_process = {n: {"type": "sdk", "name": c.get("name", n), "instance": c["instance"]}
+                          for n, c in self.mcp_servers.items()
+                          if isinstance(c, dict) and c.get("type") == "sdk"}
+            external = {n: c for n, c in self.mcp_servers.items() if n not in in_process}
+            if in_process:
+                options.mcp_servers = in_process
+            if external:
+                options.extra_args = {"mcp-config": write_external_mcp_config(external)}
         if self.session_id:
             options.resume = self.session_id
         return options
