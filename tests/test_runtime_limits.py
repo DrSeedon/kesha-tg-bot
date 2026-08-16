@@ -7,7 +7,6 @@ BOTH: whose limit, and when it resets.
 
 import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -191,30 +190,11 @@ async def test_limit_is_terminal_and_not_retried():
     assert len(calls) == 1, f"limit was retried {len(calls)} times"
 
 
-# ---------- #6: the limit notice carries the real windows ----------
-
-
-@pytest.fixture
-def claude_windows(monkeypatch):
-    """Claude's oauth/usage payload, frozen — no network, no wall clock."""
-    import quota
-
-    now = datetime.now(timezone.utc)
-
-    async def fake_fetch():
-        return {
-            "five_hour": {"utilization": 99.0,
-                          "resets_at": (now + timedelta(minutes=18)).isoformat()},
-            "seven_day": {"utilization": 15.0,
-                          "resets_at": (now + timedelta(days=6)).isoformat()},
-        }
-
-    monkeypatch.setattr(quota, "fetch_claude_usage", fake_fetch)
+# ---------- the terminal path points to the canonical multi-provider view ----------
 
 
 @pytest.mark.asyncio
-async def test_the_stream_limit_notice_shows_the_windows(claude_windows):
-    """A bare "wait for the reset" is what this ticket exists to remove."""
+async def test_the_stream_limit_notice_points_to_limits():
 
     class LimitedClaude(LimitedCodexSession):
         def quota_summary(self):
@@ -222,12 +202,11 @@ async def test_the_stream_limit_notice_shows_the_windows(claude_windows):
 
     text = visible_text(await run_turn(LimitedClaude(), runtime_id="claude"))
 
-    assert "5h: 99%" in text, f"5h window missing: {text!r}"
-    assert "7d: 15%" in text, f"7d window missing: {text!r}"
+    assert "/limits" in text
 
 
 @pytest.mark.asyncio
-async def test_the_reserve_limit_notice_shows_the_windows(claude_windows):
+async def test_the_reserve_limit_notice_points_to_limits():
     """The pre-turn rejection path renders the same block."""
 
     class Refusing(LimitedCodexSession):
@@ -242,21 +221,21 @@ async def test_the_reserve_limit_notice_shows_the_windows(claude_windows):
     await chat._run_batch([_entry()])
 
     text = " ".join(t for _, t in chat.bot.sent)
-    assert "5h: 99%" in text, f"5h window missing: {text!r}"
+    assert "/limits" in text
 
 
 @pytest.mark.asyncio
-async def test_no_quota_data_leaves_the_old_message_untouched():
-    """Absent windows must not leave a dangling blank line or placeholder."""
+async def test_no_runtime_summary_still_points_to_the_canonical_view():
     bot = await run_turn(LimitedCodexSession(quota=False))
     final = bot.edits[-1][0]
 
     assert "5h:" not in final and "{quota}" not in final
+    assert "/limits" in final
     assert final == final.strip(), f"notice ends with a dangling blank line: {final!r}"
 
 
 @pytest.mark.asyncio
-async def test_the_notice_survives_a_registry_that_dies_at_the_limit(claude_windows):
+async def test_the_notice_survives_a_registry_that_dies_at_the_limit():
     """Nothing gathered for the decoration may cost the notice itself.
 
     The session lookup is only reachable here because the limit already

@@ -10,6 +10,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
     BotCommandScopeDefault,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -34,7 +35,7 @@ from media import (
     transcribe,
 )
 from message_log import ActivityPersistenceError
-from quota import quota_block
+from limits import fetch_limits_card, fetch_limits_usage, format_limits_message
 from telegram_io import (
     _send_safe,
     extract_caption_with_urls,
@@ -157,22 +158,13 @@ async def h_status(msg: types.Message):
     cs = _registry.get(msg.chat.id)
     s = cs.session
     sid = s.session_id
-    rl = s.rate_limit
-    if rl:
-        util = rl.get('utilization')
-        util_str = f" {int(util*100)}%" if util is not None else ""
-        rl_str = f"{rl.get('status', '?')} ({rl.get('type', '?')}){util_str}"
-    else:
-        rl_str = "n/a"
     ctx = await s.get_context_usage()
     if ctx:
         ctx_str = f"{ctx['percentage']:.0f}% ({ctx['totalTokens']}/{ctx['maxTokens']})"
     else:
         ctx_str = "n/a"
     uptime = _uptime_fn() if _uptime_fn else "unknown"
-    block = await quota_block(cs.runtime_id, s, lang_of(msg))
     await _send_safe(msg, t(msg, "status",
-        quota=f"\n\n{block}" if block else "",
         model=s.model,
         session=sid[:8] + "..." if sid else "none",
         cwd=WORK_DIR,
@@ -180,11 +172,32 @@ async def h_status(msg: types.Message):
         debug="on" if _cfg.DEBUG else "off",
         uptime=uptime,
         context=ctx_str,
-        rate_limit=rl_str,
         cost=f"{s.total_cost_usd:.4f}",
         media_count=media_count(),
         log_size=log_size(),
     ))
+
+
+async def h_limits(msg: types.Message):
+    """Send Orchestra's authoritative limits card unchanged."""
+    if not allowed(msg.from_user.id):
+        return await _deny_once(msg)
+    if msg.chat.type != "private":
+        return
+    response = None
+    try:
+        usage = await fetch_limits_usage()
+        response = format_limits_message(usage)
+        image = await fetch_limits_card()
+        await msg.answer_photo(
+            photo=BufferedInputFile(image, filename="limits.png"),
+            caption=response,
+        )
+    except Exception as exc:
+        detail = str(exc).strip() or "(без сообщения)"
+        logger.error("/limits failed: %s: %s", type(exc).__name__, detail)
+        error = f"❌ /limits: {type(exc).__name__}: {detail}"
+        await _send_safe(msg, f"{error}\n{response}" if response else error)
 
 
 async def h_clear(msg: types.Message):
@@ -277,7 +290,6 @@ def _runtime_keyboard(current: str) -> InlineKeyboardMarkup:
 async def _runtime_panel_text(source, cs) -> str:
     from runtime_registry import list_runtimes
     available = list_runtimes()
-    quota = await _runtime_quota_line(source, cs)
     other = next((r for r in available if r != cs.runtime_id), cs.runtime_id)
     return t(
         source,
@@ -285,7 +297,6 @@ async def _runtime_panel_text(source, cs) -> str:
         current=cs.runtime_id,
         model=getattr(cs.session, "model", "?"),
         available=", ".join(available),
-        quota=quota,
         other=other,
     )
 
@@ -372,18 +383,6 @@ async def h_runtime_callback(query: types.CallbackQuery):
     except Exception as exc:
         if "message is not modified" not in str(exc).lower():
             logger.warning(f"runtime callback edit failed: {exc}")
-
-
-async def _runtime_quota_line(msg: types.Message, cs) -> str:
-    """Render the runtime's quota windows, refreshing them when the backend can."""
-    reader = getattr(cs.session, "read_quota", None)
-    if callable(reader) and not cs.is_busy:
-        try:
-            await asyncio.wait_for(reader(), timeout=30)
-        except Exception as exc:
-            logger.debug(f"quota refresh failed: {exc}")
-    return (await quota_block(cs.runtime_id, cs.session, lang_of(msg))
-            or t(msg, "runtime_quota_unknown"))
 
 
 async def h_ping(msg: types.Message):
@@ -666,6 +665,7 @@ COMMANDS_RU = [
     BotCommand(command="start", description="Статус бота"),
     BotCommand(command="help", description="Справка по командам"),
     BotCommand(command="status", description="Подробный статус"),
+    BotCommand(command="limits", description="Лимиты Claude, Codex, Spark и Grok"),
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
     BotCommand(command="runtime", description="Рантайм и лимит (Claude/Codex)"),
@@ -681,6 +681,7 @@ COMMANDS_EN = [
     BotCommand(command="start", description="Bot status"),
     BotCommand(command="help", description="Command reference"),
     BotCommand(command="status", description="Detailed status"),
+    BotCommand(command="limits", description="Claude, Codex, Spark and Grok limits"),
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
     BotCommand(command="runtime", description="Runtime and quota (Claude/Codex)"),
@@ -732,6 +733,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_start, CommandStart())
     dp.message.register(h_help, Command("help"))
     dp.message.register(h_status, Command("status"))
+    dp.message.register(h_limits, Command("limits"))
     dp.message.register(h_clear, Command("clear"))
     dp.message.register(h_compact, Command("compact"))
     dp.message.register(h_runtime, Command("runtime"))

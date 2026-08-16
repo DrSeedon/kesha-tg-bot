@@ -28,6 +28,7 @@ One chat = one agent process with a persistent session. Like chatting in a Claud
 - **Smart tool display** — tool calls shown in a separate live bubble with timers, replaced by the next text block
 - **Context tracking** — context usage percentage via `get_bot_status` (Claude; on Codex only after the first turn reports usage)
 - **Two runtimes** — Claude (default) and Codex, switched manually with `/runtime`. Each chat keeps its own session file per runtime, so switching back resumes that runtime's own history
+- **Canonical `/limits`** — forwards Orchestra's exact Claude/Codex/Spark/Grok card, including measured Claude weekly headroom and burn pace
 - **Per-chat edit budget** — streaming stays visible under Telegram flood control: when edits are rate-limited it falls back to send+delete instead of freezing
 - **Persistent session** — survives bot restarts via `storage/sessions/<chat_id>`
 - **Debounce** — batches rapid messages into one prompt (configurable delay)
@@ -54,10 +55,11 @@ One chat = one agent process with a persistent session. Like chatting in a Claud
 |---------|-------------|
 | `/start` | Bot status & session info |
 | `/help` | Command reference |
-| `/status` | Detailed status (model, uptime, rate limit, cost) |
+| `/status` | Detailed status (model, uptime, context, cost) |
+| `/limits` | Canonical Claude, Codex, Spark and Grok limits card from Orchestra |
 | `/clear` | Reset session (new context) |
 | `/compact` | Compact context into a summary and continue |
-| `/runtime` | Show current runtime, its model and remaining quota with reset time |
+| `/runtime` | Show the current runtime and its model |
 | `/runtime <claude\|codex>` | Switch this chat to another runtime (only while idle) |
 | `/stop` | Interrupt the current answer |
 | `/ping` | Check if bot is alive |
@@ -117,6 +119,8 @@ python bot.py
 | `LOG_DIR` | Log files path | ./logs |
 | `DEBOUNCE_SEC` | Message batching delay | 3 |
 | `NOTIFY_CHAT` | Chat for reminders/system notices | first of `ALLOWED_USERS` |
+| `ORCHESTRA_URL` | Local Orchestra API used by `/limits` | `http://127.0.0.1:8888` |
+| `ORCHESTRA_ENV_FILE` | Shared Orchestra env file containing `INTERNAL_TOKEN` | `/home/kesha/orchestra/.env` |
 
 ## Systemd (auto-start)
 
@@ -144,6 +148,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - `response_stream.py` — streaming, per-chat edit budget, tool status, retries
 - `runtime_protocol.py` / `runtime_registry.py` — the runtime contract and its fail-loud registry
 - `claude_session.py` / `codex_session.py` — the two backend adapters
+- `limits.py` / `quota_gate.py` — canonical Orchestra limits delivery / minimal provider admission check
 - `tool_bridge.py` — unix-socket MCP bridge for the Codex runtime (capability token, TTL)
 - `file_access.py` — whitelist + TOCTOU-safe reads for outgoing files
 - `kesha_tools.py` — MCP tools (media, reactions, reminders CRUD, search_memory, self-config)
@@ -187,6 +192,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - **Умный показ тулов** — вызовы тулов в отдельном живом пузыре с таймерами, заменяется следующим текстом
 - **Контекст** — процент использования через `get_bot_status` (на Claude; на Codex — только после первого хода с usage)
 - **Два рантайма** — Claude (по умолчанию) и Codex, переключение вручную через `/runtime`. У каждого чата свой файл сессии на каждый рантайм, поэтому возврат обратно продолжает его собственную историю
+- **Канонический `/limits`** — пересылает точную карточку Orchestra для Claude/Codex/Spark/Grok с недельным остатком Claude и темпом расхода
 - **Общий бюджет правок на чат** — стриминг остаётся видимым при флуд-контроле Telegram: когда правки упираются в лимит, бот переходит на send+delete вместо заморозки
 - **Persistent session** — переживает рестарт бота (`storage/sessions/<chat_id>`)
 - **Дебаунс** — склейка сообщений в один промпт (настраиваемая задержка)
@@ -213,10 +219,11 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 |---------|----------|
 | `/start` | Статус бота и сессии |
 | `/help` | Справка по командам |
-| `/status` | Подробный статус (модель, uptime, rate limit, стоимость) |
+| `/status` | Подробный статус (модель, uptime, контекст, стоимость) |
+| `/limits` | Каноническая карточка лимитов Claude, Codex, Spark и Grok из Orchestra |
 | `/clear` | Сбросить сессию |
 | `/compact` | Сжать контекст в выжимку и продолжить |
-| `/runtime` | Показать текущий рантайм, его модель и остаток квоты с датой сброса |
+| `/runtime` | Показать текущий рантайм и его модель |
 | `/runtime <claude\|codex>` | Переключить чат на другой рантайм (только когда бот свободен) |
 | `/stop` | Прервать текущий ответ |
 | `/ping` | Проверить что бот жив |
@@ -276,6 +283,8 @@ python bot.py
 | `LOG_DIR` | Путь для логов | ./logs |
 | `DEBOUNCE_SEC` | Задержка склейки сообщений | 3 |
 | `NOTIFY_CHAT` | Чат для напоминаний и системных уведомлений | первый из `ALLOWED_USERS` |
+| `ORCHESTRA_URL` | Локальный API Orchestra для `/limits` | `http://127.0.0.1:8888` |
+| `ORCHESTRA_ENV_FILE` | Общий env Orchestra с `INTERNAL_TOKEN` | `/home/kesha/orchestra/.env` |
 
 ## Архитектура
 
@@ -294,6 +303,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - `response_stream.py` — стриминг, общий бюджет правок на чат, статус тулов, ретраи
 - `runtime_protocol.py` / `runtime_registry.py` — контракт рантайма и его fail-loud реестр
 - `claude_session.py` / `codex_session.py` — два адаптера бэкендов
+- `limits.py` / `quota_gate.py` — доставка канонических лимитов Orchestra / минимальный admission-гейт провайдера
 - `tool_bridge.py` — MCP-мост через unix-сокет для рантайма Codex (capability-токен, TTL)
 - `file_access.py` — whitelist и TOCTOU-безопасное чтение для исходящих файлов
 - `kesha_tools.py` — MCP tools (медиа, реакции, напоминания CRUD, search_memory, самонастройка)

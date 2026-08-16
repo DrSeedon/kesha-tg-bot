@@ -100,22 +100,18 @@ STRINGS = {
         "debounce_usage": "Текущий: `{sec}s`\nИспользование: `/debounce 5`",
         "reconnecting": "⚠️ Переподключаюсь... (попытка {n})",
         "error_retry": "⚠️ Ошибка, перезапуск сессии (попытка {n})...",
-        "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.{quota}",
+        "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.\n📊 Все окна: /limits",
         "context_limit": "🧠 Контекст заполнен. Отправь /compact, чтобы продолжить без очистки.",
         "context_reserve": "🧠 Контекст почти заполнен. Отправь /compact, затем повтори сообщение.",
         "context_unknown": "⚠️ Не удалось проверить свободный контекст. Повтори сообщение чуть позже.",
-        "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.{quota}",
+        "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.\n📊 Все окна: /limits",
         "context_runtime_invariant": "⚠️ Рантайм не совпал с ожидаемой конфигурацией (ждём {expected}: 1M контекст, 64k вывода, авто-компакт выключен). Сообщение не отправлено — проверь конфиг.",
         "context_runtime_unhealthy": "⚠️ Рантайм не отвечает — не смог проверить свободный контекст даже со второй попытки, поэтому сообщение не отправил. Клиент переподключён, отправь ещё раз.",
         "session_unavailable": "⚠️ Сохранённая сессия недоступна. Отправь /clear, чтобы начать новую.",
         "compact_native_start": "🗜 Сжимаю контекст средствами {runtime} (было {before:.0f}%)...",
         "compact_native_done": "✅ Контекст сжат средствами {runtime}: {before:.0f}% → {after:.0f}% ({tokens} токенов).",
         "compact_native_failed": "⚠️ Родное сжатие не удалось: {error}",
-        "runtime_status": "🧩 Рантайм: *{current}* ({model})\nДоступны: {available}\n{quota}\nКоманды: /claude · /codex",
-        "runtime_quota_unknown": "📊 Лимит: неизвестен",
-        # Окно квоты: утилизация% (сколько % окна прошло) осталось-до-сброса · темп
-        "quota_pace_ok": "темп ok",
-        "quota_pace_over": "темп +{value}",
+        "runtime_status": "🧩 Рантайм: *{current}* ({model})\nДоступны: {available}\nЛимиты: /limits\nКоманды: /claude · /codex",
         "runtime_switched": "🔄 Рантайм: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "Последние видимые сообщения переданы в новый рантайм.",
         "runtime_handoff_none": "История не передана (пустая или недоступна) — начинаю с чистого листа.",
@@ -139,6 +135,8 @@ STRINGS = {
             "/clear — сбросить сессию\n"
             "/ping — проверить сессию\n"
             "/status — подробный статус\n"
+            "/limits — лимиты Claude, Codex, Spark и Grok\n"
+            "/runtime — посмотреть или сменить рантайм\n"
             "/debounce `<sec>` — задержка склейки сообщений\n"
             "/debug — вкл/выкл debug логирование\n"
             "/restart — перезапустить бота\n\n"
@@ -153,10 +151,10 @@ STRINGS = {
             "🐛 Debug: `{debug}`\n"
             "⏳ Аптайм: `{uptime}`\n"
             "🧠 Контекст: `{context}`\n"
-            "📊 Rate limit: `{rate_limit}`\n"
+            "📊 Лимиты: /limits\n"
             "💰 Стоимость сессии: `${cost}`\n"
             "📁 Медиа: `{media_count}` файлов\n"
-            "📝 Лог: `{log_size}`{quota}"
+            "📝 Лог: `{log_size}`"
         ),
     },
     "en": {
@@ -178,21 +176,18 @@ STRINGS = {
         "debounce_usage": "Current: `{sec}s`\nUsage: `/debounce 5`",
         "reconnecting": "⚠️ Reconnecting... (attempt {n})",
         "error_retry": "⚠️ Error, restarting session (attempt {n})...",
-        "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.{quota}",
+        "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.\n📊 All windows: /limits",
         "context_limit": "🧠 Context is full. Send /compact to continue without clearing it.",
         "context_reserve": "🧠 Context is almost full. Send /compact, then resend your message.",
         "context_unknown": "⚠️ Could not verify free context. Please resend the message shortly.",
-        "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.{quota}",
+        "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.\n📊 All windows: /limits",
         "context_runtime_invariant": "⚠️ The runtime did not match the expected configuration (want {expected}: 1M context, 64k output, auto-compact off). Message not sent — check the config.",
         "context_runtime_unhealthy": "⚠️ The runtime is not responding — I could not verify free context even on a second attempt, so I did not send your message. The client has been reconnected; please send it again.",
         "session_unavailable": "⚠️ The saved session is unavailable. Send /clear to start a new one.",
         "compact_native_start": "🗜 Compacting context via {runtime} (was {before:.0f}%)...",
         "compact_native_done": "✅ Context compacted via {runtime}: {before:.0f}% → {after:.0f}% ({tokens} tokens).",
         "compact_native_failed": "⚠️ Native compaction failed: {error}",
-        "runtime_status": "🧩 Runtime: *{current}* ({model})\nAvailable: {available}\n{quota}\nCommands: /claude · /codex",
-        "runtime_quota_unknown": "📊 Quota: unknown",
-        "quota_pace_ok": "pace ok",
-        "quota_pace_over": "pace +{value}",
+        "runtime_status": "🧩 Runtime: *{current}* ({model})\nAvailable: {available}\nLimits: /limits\nCommands: /claude · /codex",
         "runtime_switched": "🔄 Runtime: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "Recent visible messages were carried to the new runtime.",
         "runtime_handoff_none": "History not carried over (empty or unavailable) — starting fresh.",
@@ -216,6 +211,8 @@ STRINGS = {
             "/clear — reset session\n"
             "/ping — check session\n"
             "/status — detailed status\n"
+            "/limits — Claude, Codex, Spark and Grok limits\n"
+            "/runtime — inspect or switch runtime\n"
             "/debounce `<sec>` — message batching delay\n"
             "/debug — toggle debug logs\n"
             "/restart — restart bot\n\n"
@@ -230,10 +227,10 @@ STRINGS = {
             "🐛 Debug: `{debug}`\n"
             "⏳ Uptime: `{uptime}`\n"
             "🧠 Context: `{context}`\n"
-            "📊 Rate limit: `{rate_limit}`\n"
+            "📊 Limits: /limits\n"
             "💰 Session cost: `${cost}`\n"
             "📁 Media: `{media_count}` files\n"
-            "📝 Log: `{log_size}`{quota}"
+            "📝 Log: `{log_size}`"
         ),
     },
 }

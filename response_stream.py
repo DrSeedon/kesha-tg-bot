@@ -25,7 +25,6 @@ from config import (
     render as _render,
     t as _t_cfg,
 )
-from quota import quota_block
 from telegram_io import (
     _send_safe,
     split_msg,
@@ -358,14 +357,7 @@ async def _ask_inner(message, prompt, cid, typer):
         reset = _runtime_limit_suffix(cid) or _session_limit_reset(err) or ""
         runtime = _runtime_label(cid) or "Claude"
         lang = _lang_of(message)
-        # Nothing gathered for the decoration may cost the notice itself.
-        try:
-            session = _get_session(cid)
-        except Exception:
-            session = None
-        block = await quota_block(runtime, session, lang)
-        notice = _render("session_limit", lang, reset=reset, runtime=runtime,
-                         quota=f"\n\n{block}" if block else "")
+        notice = _render("session_limit", lang, reset=reset, runtime=runtime)
         await _finalize_status()
         parts.clear()
         has_deltas = False

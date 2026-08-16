@@ -26,7 +26,7 @@ from claude_agent_sdk import (
 )
 
 from config import MODEL
-from quota import claude_windows, fetch_claude_usage, quota_exhausted
+from quota_gate import claude_windows, fetch_claude_usage, quota_exhausted
 from runtime_protocol import RuntimeCapabilities
 
 logger = logging.getLogger(__name__)

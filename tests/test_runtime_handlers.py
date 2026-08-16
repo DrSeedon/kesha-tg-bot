@@ -90,8 +90,6 @@ async def test_callback_is_acknowledged_before_slow_switch(monkeypatch):
     )
     monkeypatch.setattr(handlers, "_registry", SimpleNamespace(get=lambda _cid: state))
     monkeypatch.setattr(handlers, "ALLOWED", {1})
-    monkeypatch.setattr(handlers, "_runtime_quota_line", AsyncMock(return_value="quota"))
-
     await handlers.h_runtime_callback(query)
 
     assert order == ["ack", "switch"]

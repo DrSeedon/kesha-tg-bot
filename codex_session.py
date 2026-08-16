@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from runtime_protocol import RuntimeCapabilities
-from quota import codex_windows, quota_exhausted
+from quota_gate import codex_windows, quota_exhausted
 
 logger = logging.getLogger(__name__)
 
