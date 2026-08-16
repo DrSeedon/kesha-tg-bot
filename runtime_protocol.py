@@ -52,6 +52,10 @@ class ChatRuntime(Protocol):
         """
         ...
 
+    async def probe_readiness(self) -> dict:
+        """Prove the backend can accept a new turn, including quota and context."""
+        ...
+
     async def check_context_reserve(
         self,
         combined: str = "",

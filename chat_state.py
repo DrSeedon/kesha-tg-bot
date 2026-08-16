@@ -112,6 +112,7 @@ class ChatState:
         work_dir: str,
         runtime_id: str = "claude",
         build_runtime_fn=None,
+        reset_runtimes_fn=None,
     ):
         self.chat_id = chat_id
         self.session = session
@@ -146,6 +147,7 @@ class ChatState:
         self._shutdown: bool = False
         self.runtime_id: str = runtime_id
         self._build_runtime = build_runtime_fn
+        self._reset_runtimes = reset_runtimes_fn
 
     @property
     def is_busy(self) -> bool:
@@ -301,6 +303,11 @@ class ChatState:
             if self._shutdown: return False
             if self.phase in (ChatPhase.PROCESSING, ChatPhase.COMPACTING, ChatPhase.STOPPING):
                 return False
+            # Durable floor first: if storage is broken, do not pretend the
+            # clear succeeded and later resurrect old messages via handoff.
+            self._activity_store.mark_history_cleared(
+                self.chat_id, self.runtime_id
+            )
             # Cancel debounce timer
             if self._debounce_task and not self._debounce_task.done():
                 self._debounce_task.cancel()
@@ -319,7 +326,12 @@ class ChatState:
             logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_clear gen={self.generation}]")
 
         # I/O outside lock
-        await self.session.reset_async()
+        if self._reset_runtimes:
+            await self._reset_runtimes(
+                self.chat_id, self.session, self.runtime_id
+            )
+        else:
+            await self.session.reset_async()
         self._context_reserve_blocked = False
         try:
             self._activity_store.finish_activity(self.chat_id)
@@ -385,6 +397,9 @@ class ChatState:
                 passive=runtime_definition.capabilities.passive_handoff,
             )
 
+            # SQLite is the commit point. A restart after this write restores
+            # the same per-chat runtime instead of the process-wide default.
+            self._activity_store.set_runtime(self.chat_id, target)
             self.session = new_session
             self.runtime_id = target
         except asyncio.CancelledError:
@@ -522,21 +537,19 @@ class ChatState:
     @staticmethod
     async def _probe_runtime(session) -> dict:
         """Prove the runtime answers, not merely that its process started."""
-        probe = getattr(session, "read_quota", None)
+        probe = getattr(session, "probe_readiness", None)
         try:
-            if callable(probe):
-                await asyncio.wait_for(probe(), timeout=60)
-            else:
-                # No cheap probe on this backend: fall back to admission
-                # control, which also requires a live connection.
-                reserve = await asyncio.wait_for(
-                    session.check_context_reserve(""), timeout=60
+            if not callable(probe):
+                return {"ok": False, "error": "runtime has no readiness probe"}
+            result = await asyncio.wait_for(probe(), timeout=60)
+            if not isinstance(result, dict) or not result.get("ok"):
+                reason = (
+                    result.get("error") or result.get("reason")
+                    if isinstance(result, dict)
+                    else "invalid readiness response"
                 )
-                if not reserve.get("ok") and reserve.get("reason") in (
-                    "session_unavailable", "unknown",
-                ):
-                    return {"ok": False, "error": f"probe failed: {reserve.get('reason')}"}
-            return {"ok": True}
+                return {"ok": False, "error": f"probe failed: {reason}"}
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -584,11 +597,17 @@ class ChatState:
         """
         try:
             from message_log import get_db
+            db = get_db()
+            floor = db.get_history_floor(self.chat_id)
             # get_history returns newest-first; walk it that way and reverse at
             # the end so the oldest kept message leads the transcript.
             rows = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: get_db().get_history(self.chat_id, limit=HANDOFF_MESSAGE_LIMIT),
+                lambda: db.get_history(
+                    self.chat_id,
+                    limit=HANDOFF_MESSAGE_LIMIT,
+                    after_id=floor,
+                ),
             )
         except Exception as exc:
             logger.warning(f"Chat {self.chat_id}: handoff history unavailable: {exc}")
@@ -1345,8 +1364,7 @@ class ChatRegistry:
         from runtime_registry import RuntimeBuildContext, build_runtime
         # Session files are per runtime: each keeps its own thread/session id,
         # so switching back to a runtime resumes the history it already has.
-        name = str(chat_id) if runtime_id == "claude" else f"{chat_id}.{runtime_id}"
-        session_file = Path(__file__).parent / "storage" / "sessions" / name
+        session_file = self._session_file(runtime_id, chat_id)
         return build_runtime(
             runtime_id,
             RuntimeBuildContext(
@@ -1360,13 +1378,70 @@ class ChatRegistry:
             ),
         )
 
+    @staticmethod
+    def _session_file(runtime_id: str, chat_id: int) -> Path:
+        name = str(chat_id) if runtime_id == "claude" else f"{chat_id}.{runtime_id}"
+        return Path(__file__).parent / "storage" / "sessions" / name
+
+    async def reset_runtime_sessions(
+        self,
+        chat_id: int,
+        active_session,
+        active_runtime: str,
+    ) -> None:
+        """Clear every provider pointer so switching cannot resurrect a chat."""
+        from runtime_registry import list_runtimes
+
+        errors: list[str] = []
+        for runtime_id in list_runtimes():
+            session = (
+                active_session
+                if runtime_id == active_runtime
+                else self.build_session(runtime_id, chat_id)
+            )
+            try:
+                await session.reset_async()
+            except Exception as exc:
+                errors.append(f"{runtime_id}: {exc}")
+            finally:
+                if session is not active_session:
+                    try:
+                        await session.safe_disconnect()
+                    except Exception as exc:
+                        errors.append(f"{runtime_id} disconnect: {exc}")
+            try:
+                from tool_bridge import revoke_chat_sessions
+                revoke_chat_sessions(chat_id, runtime_id)
+            except Exception as exc:
+                logger.warning(
+                    "Chat %s: bridge revoke for %s failed: %s",
+                    chat_id,
+                    runtime_id,
+                    exc,
+                )
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
     def _model_for(self, runtime_id: str) -> str:
         """Each runtime needs its own model id; Claude's would be rejected by Codex."""
         return RUNTIME_MODELS.get(runtime_id, self._model)
 
     def get(self, chat_id: int) -> ChatState:
         if chat_id not in self._chats:
-            session = self.build_session(self._runtime, chat_id)
+            from runtime_registry import get_runtime
+
+            runtime_id = self._activity_store.get_runtime(chat_id) or self._runtime
+            try:
+                get_runtime(runtime_id)
+            except ValueError:
+                logger.error(
+                    "Chat %s: stored runtime %r is unknown; using %s",
+                    chat_id,
+                    runtime_id,
+                    self._runtime,
+                )
+                runtime_id = self._runtime
+            session = self.build_session(runtime_id, chat_id)
             self._chats[chat_id] = ChatState(
                 chat_id=chat_id,
                 session=session,
@@ -1378,16 +1453,22 @@ class ChatRegistry:
                 compact_session_fn=self._compact_session_fn,
                 activity_store=self._activity_store,
                 work_dir=self._work_dir,
-                runtime_id=self._runtime,
+                runtime_id=runtime_id,
                 build_runtime_fn=self.build_session,
+                reset_runtimes_fn=self.reset_runtime_sessions,
             )
-            logger.info(f"ChatRegistry: created ChatState for chat {chat_id}")
+            logger.info(
+                "ChatRegistry: created ChatState for chat %s on %s",
+                chat_id,
+                runtime_id,
+            )
         return self._chats[chat_id]
 
     async def start_auto_compact(self) -> None:
         """Restore one scheduler per durable quiescent chat after a process restart."""
         for chat_id in self._activity_store.list_quiescent_chat_ids():
-            session_file = Path(__file__).parent / "storage" / "sessions" / str(chat_id)
+            runtime_id = self._activity_store.get_runtime(chat_id) or self._runtime
+            session_file = self._session_file(runtime_id, chat_id)
             if not session_file.exists() or not session_file.read_text().strip():
                 continue
             self.get(chat_id)._arm_auto_compact()

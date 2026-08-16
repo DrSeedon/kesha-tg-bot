@@ -23,6 +23,48 @@ RAW_LIMIT = "You've hit your monthly spend limit · resets 2:20pm (Europe/Berlin
 RAW_CONTEXT_LIMIT = "Prompt is too long"
 
 
+@pytest.mark.asyncio
+async def test_readiness_rejects_fresh_exhausted_quota(tmp_path, monkeypatch):
+    session = ClaudeSession(cwd=str(tmp_path), session_file=tmp_path / "sid")
+
+    async def exhausted(*, force=False):
+        assert force is True
+        return {
+            "five_hour": {"utilization": 100, "resets_at": "2026-08-16T20:00:00+00:00"}
+        }
+
+    async def reserve(_combined="", *, manual=False):
+        raise AssertionError("quota rejection must happen before SDK startup")
+
+    monkeypatch.setattr("claude_session.fetch_claude_usage", exhausted)
+    monkeypatch.setattr(session, "check_context_reserve", reserve)
+
+    result = await session.probe_readiness()
+
+    assert result["ok"] is False
+    assert result["reason"] == "quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_readiness_propagates_every_negative_reserve_reason(tmp_path, monkeypatch):
+    session = ClaudeSession(cwd=str(tmp_path), session_file=tmp_path / "sid")
+
+    async def available(*, force=False):
+        assert force is True
+        return {"five_hour": {"utilization": 12}}
+
+    async def invariant(_combined="", *, manual=False):
+        return {"ok": False, "reason": "runtime_invariant"}
+
+    monkeypatch.setattr("claude_session.fetch_claude_usage", available)
+    monkeypatch.setattr(session, "check_context_reserve", invariant)
+
+    result = await session.probe_readiness()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_invariant"
+
+
 def result(
     *,
     error=False,

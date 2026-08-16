@@ -7,7 +7,12 @@ import os
 from aiogram import Dispatcher, F, types
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, BotCommandScopeDefault
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from aiogram_media_group import media_group_handler
 
 from chat_state import PendingEntry
@@ -191,6 +196,10 @@ async def h_clear(msg: types.Message):
     except ActivityPersistenceError:
         await _send_safe(msg, t(msg, "activity_retry"))
         return
+    except Exception as exc:
+        logger.exception(f"Chat {cid}: clear failed: {exc}")
+        await _send_safe(msg, t(msg, "clear_failed", error=str(exc)[:300]))
+        return
     if not cleared:
         await _send_safe(msg, t(msg, "clear_busy"))
         return
@@ -228,55 +237,141 @@ async def h_runtime(msg: types.Message):
         return
     from runtime_registry import list_runtimes
 
-    cs = _registry.get(msg.chat.id)
-    available = list_runtimes()
     target = (msg.text or "").split(maxsplit=1)
     argument = target[1].strip().lower() if len(target) > 1 else ""
 
     if not argument:
-        quota = await _runtime_quota_line(msg, cs)
-        other = next((r for r in available if r != cs.runtime_id), cs.runtime_id)
-        await _send_safe(msg, t(
-            msg, "runtime_status",
-            current=cs.runtime_id,
-            model=getattr(cs.session, "model", "?"),
-            available=", ".join(available),
-            quota=quota,
-            other=other,
-        ))
+        await _send_runtime_panel(msg)
         return
 
-    result = await cs.switch_runtime(argument)
+    await _switch_runtime_command(msg, argument, list_runtimes())
+
+
+async def h_claude(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "claude", list_runtimes())
+
+
+async def h_codex(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "codex", list_runtimes())
+
+
+def _runtime_keyboard(current: str) -> InlineKeyboardMarkup:
+    def button(runtime_id: str, title: str) -> InlineKeyboardButton:
+        marker = "✅ " if runtime_id == current else ""
+        return InlineKeyboardButton(
+            text=f"{marker}{title}", callback_data=f"runtime:{runtime_id}"
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [button("claude", "Claude"), button("codex", "Codex")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="runtime:refresh")],
+    ])
+
+
+async def _runtime_panel_text(source, cs) -> str:
+    from runtime_registry import list_runtimes
+    available = list_runtimes()
+    quota = await _runtime_quota_line(source, cs)
+    other = next((r for r in available if r != cs.runtime_id), cs.runtime_id)
+    return t(
+        source,
+        "runtime_status",
+        current=cs.runtime_id,
+        model=getattr(cs.session, "model", "?"),
+        available=", ".join(available),
+        quota=quota,
+        other=other,
+    )
+
+
+async def _send_runtime_panel(msg: types.Message) -> None:
+    cs = _registry.get(msg.chat.id)
+    await _send_safe(
+        msg,
+        await _runtime_panel_text(msg, cs),
+        reply_markup=_runtime_keyboard(cs.runtime_id),
+    )
+
+
+def _runtime_result_text(source, cs, target: str, available: list[str], result: dict) -> str:
     if result["ok"]:
         if result.get("handoff_status") == "unsupported":
-            handoff = t(msg, "runtime_handoff_unsupported")
+            handoff = t(source, "runtime_handoff_unsupported")
         else:
-            handoff = t(msg, "runtime_handoff_ok" if result.get("handoff")
+            handoff = t(source, "runtime_handoff_ok" if result.get("handoff")
                         else "runtime_handoff_none")
-        await _send_safe(msg, t(
-            msg, "runtime_switched",
+        return t(
+            source, "runtime_switched",
             previous=result["previous"],
             current=result["runtime"],
             model=result.get("model") or "?",
             handoff=handoff,
-        ))
-        return
+        )
 
     reason = result.get("reason")
     if reason == "same":
-        await _send_safe(msg, t(msg, "runtime_same", current=cs.runtime_id))
-    elif reason == "unknown":
-        await _send_safe(msg, t(msg, "runtime_unknown", runtime=argument,
-                                available=", ".join(available)))
-    elif reason == "busy":
-        await _send_safe(msg, t(msg, "runtime_busy"))
-    else:
-        await _send_safe(msg, t(
-            msg, "runtime_failed",
-            runtime=argument,
-            error=str(result.get("error") or reason)[:300],
-            fallback=result.get("fallback") or cs.runtime_id,
-        ))
+        return t(source, "runtime_same", current=cs.runtime_id)
+    if reason == "unknown":
+        return t(source, "runtime_unknown", runtime=target,
+                 available=", ".join(available))
+    if reason == "busy":
+        return t(source, "runtime_busy")
+    return t(
+        source, "runtime_failed",
+        runtime=target,
+        error=str(result.get("error") or reason)[:300],
+        fallback=result.get("fallback") or cs.runtime_id,
+    )
+
+
+async def _switch_runtime_command(
+    msg: types.Message,
+    target: str,
+    available: list[str],
+) -> None:
+    cs = _registry.get(msg.chat.id)
+    result = await cs.switch_runtime(target)
+    await _send_safe(
+        msg,
+        _runtime_result_text(msg, cs, target, available, result),
+        reply_markup=_runtime_keyboard(cs.runtime_id),
+    )
+
+
+async def h_runtime_callback(query: types.CallbackQuery):
+    """Acknowledge Telegram immediately, then refresh or switch the chat."""
+    if not allowed(query.from_user.id):
+        await query.answer(t(query, "no_access", uid=query.from_user.id), show_alert=True)
+        return
+    await query.answer()
+    if query.message is None or not query.data:
+        return
+
+    from runtime_registry import list_runtimes
+
+    cs = _registry.get(query.message.chat.id)
+    action = query.data.removeprefix("runtime:")
+    prefix = ""
+    if action != "refresh":
+        available = list_runtimes()
+        result = await cs.switch_runtime(action)
+        prefix = _runtime_result_text(query, cs, action, available, result) + "\n\n"
+
+    text = prefix + await _runtime_panel_text(query, cs)
+    try:
+        await query.message.edit_text(
+            text,
+            reply_markup=_runtime_keyboard(cs.runtime_id),
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.warning(f"runtime callback edit failed: {exc}")
 
 
 async def _runtime_quota_line(msg: types.Message, cs) -> str:
@@ -574,6 +669,8 @@ COMMANDS_RU = [
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
     BotCommand(command="runtime", description="Рантайм и лимит (Claude/Codex)"),
+    BotCommand(command="claude", description="Переключиться на Claude"),
+    BotCommand(command="codex", description="Переключиться на Codex"),
     BotCommand(command="ping", description="Проверить сессию"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
@@ -587,6 +684,8 @@ COMMANDS_EN = [
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
     BotCommand(command="runtime", description="Runtime and quota (Claude/Codex)"),
+    BotCommand(command="claude", description="Switch to Claude"),
+    BotCommand(command="codex", description="Switch to Codex"),
     BotCommand(command="ping", description="Check session"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
@@ -636,6 +735,9 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_clear, Command("clear"))
     dp.message.register(h_compact, Command("compact"))
     dp.message.register(h_runtime, Command("runtime"))
+    dp.message.register(h_claude, Command("claude"))
+    dp.message.register(h_codex, Command("codex"))
+    dp.callback_query.register(h_runtime_callback, F.data.startswith("runtime:"))
     dp.message.register(h_ping, Command("ping"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))

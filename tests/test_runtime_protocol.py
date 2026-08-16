@@ -18,6 +18,7 @@ def test_claude_session_satisfies_protocol(tmp_path):
     "name",
     [
         "send_message",
+        "probe_readiness",
         "check_context_reserve",
         "get_context_usage",
         "interrupt",

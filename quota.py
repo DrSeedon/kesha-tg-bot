@@ -76,7 +76,7 @@ async def _fetch_usage_uncached() -> Optional[dict]:
         return None
 
 
-async def fetch_claude_usage() -> Optional[dict]:
+async def fetch_claude_usage(*, force: bool = False) -> Optional[dict]:
     """Cached `oauth/usage` payload, or None. Never raises.
 
     Failures are cached too: a stale token would otherwise mean one dead HTTP
@@ -84,7 +84,11 @@ async def fetch_claude_usage() -> Optional[dict]:
     """
     global _cache
     async with _fetch_lock:
-        if _cache is not None and monotonic() - _cache[0] < CACHE_TTL_SEC:
+        if (
+            not force
+            and _cache is not None
+            and monotonic() - _cache[0] < CACHE_TTL_SEC
+        ):
             return _cache[1]
         payload = await _fetch_usage_uncached()
         _cache = (monotonic(), payload)
@@ -160,6 +164,11 @@ def codex_windows(rate_limit: Optional[dict]) -> list[dict]:
         if window:
             out.append(window)
     return out
+
+
+def quota_exhausted(windows: list[dict]) -> bool:
+    """A fresh provider window at 100% cannot admit another model turn."""
+    return any(window["utilization"] >= 100.0 for window in windows)
 
 
 # --- Rendering (pure: `now` is an argument, never read from the clock) ---

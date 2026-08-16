@@ -29,6 +29,7 @@ class FakeSession:
         self.reconnects = 0
         self.received: list[str] = []
         self.injected: list[str] = []
+        self.resets = 0
         self._probe_ok = probe_ok
 
     async def read_quota(self):
@@ -37,6 +38,12 @@ class FakeSession:
         self.rate_limit = {"primary": {"usedPercent": 42, "resetsAt": 1786168425},
                            "planType": "prolite"}
         return self.rate_limit
+
+    async def probe_readiness(self):
+        if not self._probe_ok:
+            return {"ok": False, "reason": "runtime_unhealthy"}
+        await self.read_quota()
+        return {"ok": True, "reason": None}
 
     def quota_summary(self):
         if not self.rate_limit:
@@ -65,13 +72,17 @@ class FakeSession:
         self.reconnects += 1
 
     async def reset_async(self):
-        pass
+        self.resets += 1
 
     async def safe_disconnect(self):
         self.disconnected = True
 
 
 class FakeActivityStore:
+    def __init__(self):
+        self.runtime = None
+        self.floor = 0
+
     def begin_activity(self, chat_id, now_utc=None):
         return ""
 
@@ -84,8 +95,30 @@ class FakeActivityStore:
     def claim_auto_attempt(self, chat_id, last_activity_utc):
         return False
 
+    def get_runtime(self, chat_id):
+        return self.runtime
 
-def make_chat(tmp_path, monkeypatch, *, new_session=None, history=None):
+    def set_runtime(self, chat_id, runtime_id):
+        self.runtime = runtime_id
+
+    def get_history_floor(self, chat_id):
+        return self.floor
+
+    def mark_history_cleared(self, chat_id, runtime_id):
+        self.runtime = runtime_id
+        self.floor = 1
+        return self.floor
+
+
+def make_chat(
+    tmp_path,
+    monkeypatch,
+    *,
+    new_session=None,
+    history=None,
+    store=None,
+    reset_runtimes_fn=None,
+):
     """A ChatState wired with fakes, plus the sessions it can switch between."""
     built: dict[str, FakeSession] = {}
     current = FakeSession("claude")
@@ -95,6 +128,7 @@ def make_chat(tmp_path, monkeypatch, *, new_session=None, history=None):
         built[runtime_id] = session
         return session
 
+    store = store or FakeActivityStore()
     chat = ChatState(
         chat_id=42,
         session=current,
@@ -104,14 +138,18 @@ def make_chat(tmp_path, monkeypatch, *, new_session=None, history=None):
         set_current_chat_fn=lambda cid: None,
         get_lazy_block_fn=lambda cid: ("", [], []),
         compact_session_fn=None,
-        activity_store=FakeActivityStore(),
+        activity_store=store,
         work_dir=str(tmp_path),
         runtime_id="claude",
         build_runtime_fn=build,
+        reset_runtimes_fn=reset_runtimes_fn,
     )
 
     class FakeDB:
-        def get_history(self, chat_id, limit=50, offset=0):
+        def get_history_floor(self, chat_id):
+            return 0
+
+        def get_history(self, chat_id, limit=50, offset=0, after_id=0):
             return history or []
 
     monkeypatch.setattr("message_log.get_db", lambda: FakeDB())
@@ -141,7 +179,8 @@ def test_switch_refused_while_a_turn_is_active(tmp_path, monkeypatch, phase):
 
 
 def test_switch_succeeds_from_idle(tmp_path, monkeypatch):
-    chat, built = make_chat(tmp_path, monkeypatch)
+    store = FakeActivityStore()
+    chat, built = make_chat(tmp_path, monkeypatch, store=store)
     old = chat.session
 
     result = asyncio.run(chat.switch_runtime("codex"))
@@ -151,6 +190,49 @@ def test_switch_succeeds_from_idle(tmp_path, monkeypatch):
     assert chat.session is built["codex"]
     assert old.disconnected, "old runtime was left connected"
     assert chat.phase is ChatPhase.IDLE
+    assert store.runtime == "codex"
+
+
+def test_runtime_persistence_failure_keeps_the_old_runtime(tmp_path, monkeypatch):
+    class BrokenStore(FakeActivityStore):
+        def set_runtime(self, chat_id, runtime_id):
+            raise RuntimeError("disk full")
+
+    new = FakeSession("codex")
+    chat, _ = make_chat(
+        tmp_path, monkeypatch, new_session=new, store=BrokenStore()
+    )
+    old = chat.session
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is False
+    assert chat.runtime_id == "claude"
+    assert chat.session is old
+    assert not old.disconnected
+    assert new.disconnected
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["quota_exhausted", "runtime_unhealthy", "runtime_invariant", "reserve"],
+)
+def test_negative_readiness_is_never_adopted(tmp_path, monkeypatch, reason):
+    new = FakeSession("codex")
+
+    async def refused():
+        return {"ok": False, "reason": reason}
+
+    new.probe_readiness = refused
+    chat, _ = make_chat(tmp_path, monkeypatch, new_session=new)
+    old = chat.session
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is False
+    assert reason in result["error"]
+    assert chat.session is old
+    assert new.disconnected
 
 
 def test_switch_to_the_same_runtime_is_a_noop(tmp_path, monkeypatch):
@@ -209,13 +291,13 @@ def test_old_runtime_is_probed_before_the_incumbent_is_dropped(tmp_path, monkeyp
 
     async def probe():
         order.append(f"probe(old_disconnected={old.disconnected})")
-        return {"primary": {"usedPercent": 1}}
+        return {"ok": True, "reason": None}
 
     async def disconnect():
         order.append("old_disconnect")
         old.disconnected = True
 
-    new.read_quota = probe
+    new.probe_readiness = probe
     old.safe_disconnect = disconnect
 
     chat, _ = make_chat(tmp_path, monkeypatch, new_session=new)
@@ -307,6 +389,88 @@ def test_handoff_respects_its_character_budget(tmp_path, monkeypatch):
     asyncio.run(chat.switch_runtime("codex"))
 
     assert len(new.injected[0]) < HANDOFF_MAX_CHARS + 2_000
+
+
+def test_handoff_only_reads_messages_after_the_last_clear(tmp_path, monkeypatch):
+    new = FakeSession("codex")
+    chat, _ = make_chat(tmp_path, monkeypatch, new_session=new)
+    seen = {}
+
+    class FakeDB:
+        def get_history_floor(self, chat_id):
+            return 17
+
+        def get_history(self, chat_id, limit=50, offset=0, after_id=0):
+            seen["after_id"] = after_id
+            return [{"role": "user", "content": "after clear"}]
+
+    monkeypatch.setattr("message_log.get_db", lambda: FakeDB())
+
+    result = asyncio.run(chat.switch_runtime("codex"))
+
+    assert result["ok"] is True
+    assert seen["after_id"] == 17
+    assert "after clear" in new.injected[0]
+
+
+def test_clear_marks_history_floor_and_resets_every_runtime(tmp_path, monkeypatch):
+    calls = []
+    store = FakeActivityStore()
+
+    async def reset_all(chat_id, active_session, active_runtime):
+        calls.append((chat_id, active_session, active_runtime))
+
+    chat, _ = make_chat(
+        tmp_path,
+        monkeypatch,
+        store=store,
+        reset_runtimes_fn=reset_all,
+    )
+    active = chat.session
+
+    assert asyncio.run(chat.request_clear()) is True
+
+    assert store.floor == 1
+    assert calls == [(42, active, "claude")]
+
+
+def test_registry_restores_each_chats_runtime_independently(tmp_path):
+    class Store(FakeActivityStore):
+        def get_runtime(self, chat_id):
+            return {42: "codex", 99: "claude"}.get(chat_id)
+
+    registry = ChatRegistry.__new__(ChatRegistry)
+    registry._chats = {}
+    registry._runtime = "claude"
+    registry._bot = None
+    registry._debounce_sec = 1
+    registry._ask_fn = None
+    registry._set_current_chat = lambda _cid: None
+    registry._get_lazy_block = lambda _cid: ("", [], [])
+    registry._compact_session_fn = None
+    registry._activity_store = Store()
+    registry._work_dir = str(tmp_path)
+    registry.build_session = lambda runtime_id, chat_id: FakeSession(runtime_id)
+
+    maxim = registry.get(42)
+    katya = registry.get(99)
+
+    assert maxim.runtime_id == "codex"
+    assert katya.runtime_id == "claude"
+
+
+def test_registry_clear_resets_active_and_inactive_provider(tmp_path, monkeypatch):
+    active = FakeSession("claude")
+    inactive = FakeSession("codex")
+    registry = ChatRegistry.__new__(ChatRegistry)
+    registry.build_session = lambda runtime_id, chat_id: inactive
+    monkeypatch.setattr("runtime_registry.list_runtimes", lambda: ["claude", "codex"])
+
+    asyncio.run(registry.reset_runtime_sessions(42, active, "claude"))
+
+    assert active.resets == 1
+    assert inactive.resets == 1
+    assert inactive.disconnected is True
 
 
 def test_agentic_only_runtime_skips_handoff_instead_of_running_it(
@@ -670,9 +834,9 @@ def test_an_urgent_reminder_firing_mid_switch_is_delivered_exactly_once(
     async def probe_then_remind():
         # The reminder fires at the worst possible moment: mid-switch.
         await chat.run_urgent_prompt("прими таблетки")
-        return {"primary": {"usedPercent": 1}}
+        return {"ok": True, "reason": None}
 
-    new.read_quota = probe_then_remind
+    new.probe_readiness = probe_then_remind
 
     result = asyncio.run(chat.switch_runtime("codex"))
 
@@ -700,9 +864,9 @@ def test_a_reminder_is_not_lost_when_the_switch_fails(tmp_path, monkeypatch):
 
     async def fail_after_reminder():
         await chat.run_urgent_prompt("прими таблетки")
-        raise RuntimeError("app-server did not answer")
+        return {"ok": False, "reason": "runtime_unhealthy"}
 
-    broken.read_quota = fail_after_reminder
+    broken.probe_readiness = fail_after_reminder
 
     result = asyncio.run(chat.switch_runtime("codex"))
 

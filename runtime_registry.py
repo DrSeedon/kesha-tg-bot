@@ -37,6 +37,7 @@ _RUNTIMES: dict[str, RuntimeDefinition] = {}
 # chat_state.py, response_stream.py, compact.py and handlers.py.
 _REQUIRED_METHODS = (
     "send_message",
+    "probe_readiness",
     "check_context_reserve",
     "get_context_usage",
     "interrupt",

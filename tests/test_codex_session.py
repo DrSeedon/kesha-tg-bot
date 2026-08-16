@@ -1016,6 +1016,37 @@ def test_legacy_underscore_disconnect_alias_exists(tmp_path):
     assert make_session(tmp_path)._safe_disconnect is not None
 
 
+@pytest.mark.asyncio
+async def test_readiness_rejects_exhausted_quota(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+
+    async def exhausted():
+        session._absorb_rate_limits(
+            {"primary": {"usedPercent": 100, "windowDurationMins": 300}}
+        )
+        return session.rate_limit
+
+    async def reserve(_combined="", *, manual=False):
+        raise AssertionError("quota rejection must happen before reserve probe")
+
+    monkeypatch.setattr(session, "read_quota", exhausted)
+    monkeypatch.setattr(session, "check_context_reserve", reserve)
+
+    result = await session.probe_readiness()
+
+    assert result["ok"] is False
+    assert result["reason"] == "quota_exhausted"
+
+
+def test_fresh_healthy_rate_limits_clear_stale_limit_latch(tmp_path):
+    session = make_session(tmp_path)
+    session.usage_limit_active = True
+
+    session._absorb_rate_limits({"primary": {"usedPercent": 1}})
+
+    assert session.usage_limit_active is False
+
+
 # ---------- helpers ----------
 
 

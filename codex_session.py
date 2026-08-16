@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from runtime_protocol import RuntimeCapabilities
+from quota import codex_windows, quota_exhausted
 
 logger = logging.getLogger(__name__)
 
@@ -837,8 +838,7 @@ class CodexSession:
 
     def _absorb_rate_limits(self, limits: dict) -> None:
         self.rate_limit = limits or None
-        if limits.get("rateLimitReachedType"):
-            self.usage_limit_active = True
+        self.usage_limit_active = bool(limits.get("rateLimitReachedType"))
 
     # ---------- context accounting ----------
 
@@ -908,6 +908,25 @@ class CodexSession:
         if rate:
             self._absorb_rate_limits(rate)
         return rate or None
+
+    async def probe_readiness(self) -> dict:
+        """Verify app-server RPC, fresh subscription quota, and thread reserve."""
+        rate = await self.read_quota()
+        if self.usage_limit_active or quota_exhausted(codex_windows(rate)):
+            return {
+                "ok": False,
+                "reason": "quota_exhausted",
+                "error": "Codex subscription quota is exhausted",
+            }
+        reserve = await self.check_context_reserve("")
+        if not reserve.get("ok"):
+            reason = str(reserve.get("reason") or "unknown")
+            return {
+                **reserve,
+                "ok": False,
+                "error": f"Codex readiness failed: {reason}",
+            }
+        return {"ok": True, "reason": None}
 
     def quota_summary(self) -> Optional[dict]:
         """Normalized quota view: percent used and when it resets."""

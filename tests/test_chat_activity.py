@@ -3,7 +3,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from message_log import ActivityPersistenceError, MessageLog
+from message_log import (
+    ActivityPersistenceError,
+    MessageLog,
+    RuntimeStatePersistenceError,
+)
 
 
 def utc(hour=0, minute=0):
@@ -85,3 +89,45 @@ def test_activity_write_failure_is_typed_and_leaves_old_row(monkeypatch, tmp_pat
     row = reopened.get_activity(7)
     assert row["last_activity_utc"] == old
     assert row["quiescent"] == 1
+
+
+def test_runtime_and_clear_floor_survive_restart(tmp_path):
+    path = tmp_path / "messages.db"
+    first = MessageLog(path)
+    first.log_user(7, "old question")
+    first.log_assistant(7, "old answer")
+    first.set_runtime(7, "codex")
+
+    floor = first.mark_history_cleared(7, "codex")
+    first.log_user(7, "new question")
+    first.conn.close()
+
+    reopened = MessageLog(path)
+    assert reopened.get_runtime(7) == "codex"
+    assert reopened.get_history_floor(7) == floor
+    rows = reopened.get_history(7, after_id=floor)
+    assert [row["content"] for row in rows] == ["new question"]
+
+
+def test_set_runtime_preserves_existing_clear_floor(tmp_path):
+    db = MessageLog(tmp_path / "messages.db")
+    db.log_user(7, "old")
+    floor = db.mark_history_cleared(7, "claude")
+
+    db.set_runtime(7, "codex")
+
+    assert db.get_runtime(7) == "codex"
+    assert db.get_history_floor(7) == floor
+
+
+def test_runtime_write_failure_is_typed(monkeypatch, tmp_path):
+    db = MessageLog(tmp_path / "messages.db")
+
+    class FailingConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(db, "conn", FailingConnection())
+
+    with pytest.raises(RuntimeStatePersistenceError, match="runtime selection"):
+        db.set_runtime(7, "codex")

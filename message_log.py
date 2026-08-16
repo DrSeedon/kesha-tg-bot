@@ -18,6 +18,10 @@ class ActivityPersistenceError(RuntimeError):
     """Durable conversation activity could not be recorded."""
 
 
+class RuntimeStatePersistenceError(ActivityPersistenceError):
+    """Durable per-chat runtime state could not be recorded."""
+
+
 class MessageLog:
     def __init__(self, path: Path = DB_PATH):
         self._on_message: Optional[OnMessage] = None
@@ -40,6 +44,12 @@ class MessageLog:
                 last_activity_utc TEXT NOT NULL,
                 quiescent INTEGER NOT NULL CHECK (quiescent IN (0, 1)),
                 auto_attempted_for_utc TEXT
+            );
+            CREATE TABLE IF NOT EXISTS chat_runtime_state (
+                chat_id INTEGER PRIMARY KEY,
+                active_runtime TEXT NOT NULL,
+                history_floor_message_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             );
         """)
         columns = {
@@ -125,6 +135,61 @@ class MessageLog:
         ).fetchall()
         return [int(row["chat_id"]) for row in rows]
 
+    def get_runtime(self, chat_id: int) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT active_runtime FROM chat_runtime_state WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        return str(row["active_runtime"]) if row else None
+
+    def set_runtime(self, chat_id: int, runtime_id: str) -> None:
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO chat_runtime_state(chat_id, active_runtime)
+                VALUES(?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    active_runtime=excluded.active_runtime,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%S', 'now')
+                """,
+                (chat_id, runtime_id),
+            )
+        except sqlite3.Error as exc:
+            raise RuntimeStatePersistenceError(
+                "runtime selection write failed"
+            ) from exc
+
+    def get_history_floor(self, chat_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT history_floor_message_id FROM chat_runtime_state WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        return int(row["history_floor_message_id"]) if row else 0
+
+    def mark_history_cleared(self, chat_id: int, runtime_id: str) -> int:
+        """Move the handoff floor without deleting the durable audit log."""
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO chat_runtime_state(
+                    chat_id, active_runtime, history_floor_message_id
+                )
+                VALUES(
+                    ?, ?, COALESCE((SELECT MAX(id) FROM messages WHERE chat_id=?), 0)
+                )
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    active_runtime=excluded.active_runtime,
+                    history_floor_message_id=excluded.history_floor_message_id,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%S', 'now')
+                """,
+                (chat_id, runtime_id, chat_id),
+            )
+        except sqlite3.Error as exc:
+            raise RuntimeStatePersistenceError(
+                "history clear floor write failed"
+            ) from exc
+        return self.get_history_floor(chat_id)
+
     def set_on_message(self, cb: Optional[OnMessage]) -> None:
         """Late-bind RAG indexing callback (set from bot.py after event loop is up)."""
         self._on_message = cb
@@ -162,10 +227,20 @@ class MessageLog:
         )
         return int(cur.lastrowid or 0)
 
-    def get_history(self, chat_id: int, limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
+    def get_history(
+        self,
+        chat_id: int,
+        limit: int = 50,
+        offset: int = 0,
+        after_id: int = 0,
+    ) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
-            (chat_id, limit, offset),
+            """
+            SELECT * FROM messages
+            WHERE chat_id=? AND id>?
+            ORDER BY id DESC LIMIT ? OFFSET ?
+            """,
+            (chat_id, after_id, limit, offset),
         ).fetchall()
 
     def search(self, chat_id: int, query: str, limit: int = 20) -> list[sqlite3.Row]:

@@ -123,11 +123,11 @@ def split_msg(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
     return parts
 
 
-async def _send_safe(message: types.Message, text: str):
+async def _send_safe(message: types.Message, text: str, **kwargs):
     from aiogram.exceptions import TelegramRetryAfter
     for attempt in range(3):
         try:
-            return await message.answer(text)
+            return await message.answer(text, **kwargs)
         except TelegramRetryAfter as e:
             logger.warning(f"Flood control, retry after {e.retry_after}s (attempt {attempt+1})")
             await asyncio.sleep(e.retry_after + 1)
@@ -135,7 +135,9 @@ async def _send_safe(message: types.Message, text: str):
             err_str = str(e)
             if "can't parse" in err_str.lower() or "parse entities" in err_str.lower():
                 try:
-                    return await message.answer(text, parse_mode=None)
+                    return await message.answer(
+                        text, **{**kwargs, "parse_mode": None}
+                    )
                 except TelegramRetryAfter as e2:
                     logger.warning(f"Flood control (plain), retry after {e2.retry_after}s")
                     await asyncio.sleep(e2.retry_after + 1)
@@ -145,9 +147,10 @@ async def _send_safe(message: types.Message, text: str):
             else:
                 logger.error(f"_send_safe unexpected error: {e}")
                 try:
-                    return await message.answer(text, parse_mode=None)
+                    return await message.answer(
+                        text, **{**kwargs, "parse_mode": None}
+                    )
                 except Exception:
                     return None
     return None
-
 

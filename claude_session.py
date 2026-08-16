@@ -26,6 +26,7 @@ from claude_agent_sdk import (
 )
 
 from config import MODEL
+from quota import claude_windows, fetch_claude_usage, quota_exhausted
 from runtime_protocol import RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
@@ -809,6 +810,25 @@ class ClaudeSession:
             "required": required,
             "usage": usage,
         }
+
+    async def probe_readiness(self) -> dict:
+        """Verify fresh subscription quota and the live SDK control channel."""
+        usage = await fetch_claude_usage(force=True)
+        if quota_exhausted(claude_windows(usage)):
+            return {
+                "ok": False,
+                "reason": "quota_exhausted",
+                "error": "Claude subscription quota is exhausted",
+            }
+        reserve = await self.check_context_reserve("")
+        if not reserve.get("ok"):
+            reason = str(reserve.get("reason") or "unknown")
+            return {
+                **reserve,
+                "ok": False,
+                "error": f"Claude readiness failed: {reason}",
+            }
+        return {"ok": True, "reason": None}
 
     async def inject(self, text: str) -> bool:
         if not (self._client and self._connected and self._is_processing):
