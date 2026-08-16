@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,6 +87,53 @@ def test_build_runtime_accepts_codex(tmp_path):
     assert isinstance(backend, CodexSession)
     assert backend.model == "gpt-5.6-sol"
     assert backend.chat_id == 42
+
+
+# ---------- app-server transport ----------
+
+
+def test_connect_allows_large_thread_resume_frames(tmp_path, monkeypatch):
+    """Production returned a 20,005,654-byte thread/resume JSONL frame."""
+    captured = {}
+
+    async def stop_after_spawn(*args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capturing subprocess options")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stop_after_spawn)
+    session = make_session(tmp_path)
+
+    with pytest.raises(RuntimeError, match="stop after capturing"):
+        asyncio.run(session._connect())
+
+    assert captured["limit"] == 64 * 1024 * 1024
+
+
+def test_oversized_stdout_frame_fails_waiters_without_retry_loop(tmp_path):
+    class OversizedOnce:
+        def __init__(self):
+            self.calls = 0
+
+        async def readline(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+            return b""
+
+    async def run():
+        session = make_session(tmp_path)
+        stream = OversizedOnce()
+        session._proc = SimpleNamespace(stdout=stream)
+        waiter = asyncio.get_running_loop().create_future()
+        session._pending_requests[1] = waiter
+
+        await session._read_stdout()
+
+        assert stream.calls == 1
+        with pytest.raises(RuntimeError, match="stdout frame exceeded"):
+            await waiter
+
+    asyncio.run(run())
 
 
 # ---------- MCP isolation (the T3 bridge must not be bypassable) ----------

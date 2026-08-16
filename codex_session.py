@@ -49,6 +49,11 @@ INTERRUPT_TIMEOUT_SECONDS = 5
 COMPACT_TIMEOUT_SECONDS = 300
 CONTEXT_INJECT_TIMEOUT_SECONDS = 10
 
+# thread/resume returns the complete thread as one JSONL frame. A 65-turn
+# production thread measured 20,005,654 bytes, so the old 16 MiB StreamReader
+# limit dropped the response and left the request waiting until timeout.
+APP_SERVER_FRAME_LIMIT_BYTES = 64 * 1024 * 1024
+
 # Terminal Codex error classes. `usageLimitExceeded` is the subscription limit
 # we must never retry; `contextWindowExceeded` needs a compact, not a reconnect.
 _USAGE_LIMIT_INFOS = ("usageLimitExceeded", "sessionBudgetExceeded")
@@ -187,15 +192,20 @@ class CodexSession:
     async def _read_stdout(self) -> None:
         assert self._proc and self._proc.stdout
         stream = self._proc.stdout
+        reader_failure: Optional[str] = None
         while True:
             try:
                 line = await stream.readline()
             except (asyncio.LimitOverrunError, ValueError) as exc:
-                # Fail soft on an oversized frame rather than killing the reader.
-                logger.warning(f"Codex: oversized stdout frame skipped: {exc}")
-                continue
+                reader_failure = (
+                    "Codex app-server stdout frame exceeded "
+                    f"{APP_SERVER_FRAME_LIMIT_BYTES // (1024 * 1024)} MiB limit: {exc}"
+                )
+                logger.error(reader_failure)
+                break
             except Exception as exc:
-                logger.warning(f"Codex: stdout read failed: {exc}")
+                reader_failure = f"Codex app-server stdout read failed: {exc}"
+                logger.warning(reader_failure)
                 break
             if not line:
                 break
@@ -216,9 +226,10 @@ class CodexSession:
         self._connected = False
         for future in list(self._pending_requests.values()):
             if not future.done():
-                future.set_exception(
-                    RuntimeError(f"Codex app-server exited: {self._last_stderr[-300:]}")
+                message = reader_failure or (
+                    f"Codex app-server exited: {self._last_stderr[-300:]}"
                 )
+                future.set_exception(RuntimeError(message))
         self._pending_requests.clear()
         self._revoke_bridge_session()
         self._notifications.put_nowait({"method": "_process/exited", "params": {}})
@@ -486,7 +497,7 @@ class CodexSession:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
             env=env,
-            limit=16 * 1024 * 1024,
+            limit=APP_SERVER_FRAME_LIMIT_BYTES,
         )
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
