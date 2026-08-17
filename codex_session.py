@@ -948,54 +948,77 @@ class CodexSession:
             raise RuntimeError("Codex thread is not initialized")
         if self._active_turn_id:
             raise RuntimeError("cannot compact during an active turn")
-        async with asyncio.timeout(COMPACT_TIMEOUT_SECONDS):
-            await self._request(
-                "thread/compact/start",
-                {"threadId": self.session_id},
-                timeout=COMPACT_TIMEOUT_SECONDS,
-            )
-            # Measured event order (docs/tasks/16/spikes/compact_events.txt):
-            # compact/start first INTERRUPTS any running turn, which emits its
-            # own turn/completed{status:interrupted}, and only then opens a
-            # SECOND turn carrying the contextCompaction item. Breaking on the
-            # first turn/completed therefore returns before compaction has
-            # begun — the bug this replaces.
-            compaction_item: str | None = None
-            while True:
-                msg = await self._notifications.get()
-                method = msg.get("method") or ""
-                params = msg.get("params") or {}
+        # No turn is active, so queued turn/item notifications are stale.  A
+        # previous contextCompaction completion must not prove this request.
+        self._discard_turn_events(None)
+        try:
+            async with asyncio.timeout(COMPACT_TIMEOUT_SECONDS):
+                await self._request(
+                    "thread/compact/start",
+                    {"threadId": self.session_id},
+                    timeout=COMPACT_TIMEOUT_SECONDS,
+                )
+                # Measured event order (docs/tasks/16/spikes/compact_events.txt):
+                # compact/start first INTERRUPTS any running turn, which emits its
+                # own turn/completed{status:interrupted}, and only then opens a
+                # SECOND turn carrying the contextCompaction item. Breaking on the
+                # first turn/completed therefore returns before compaction has
+                # begun — the bug this replaces.
+                compaction_item: str | None = None
+                while True:
+                    msg = await self._notifications.get()
+                    method = msg.get("method") or ""
+                    params = msg.get("params") or {}
 
-                if method == "thread/tokenUsage/updated":
-                    self._absorb_usage(params.get("tokenUsage") or {})
-                    continue
-                if method == "_process/exited":
-                    raise RuntimeError("Codex app-server exited during compact")
+                    if method == "thread/tokenUsage/updated":
+                        self._absorb_usage(params.get("tokenUsage") or {})
+                        continue
+                    if method == "_process/exited":
+                        raise RuntimeError("Codex app-server exited during compact")
 
-                item = params.get("item") or {}
-                if item.get("type") == "contextCompaction":
-                    if method == "item/started":
-                        compaction_item = str(item.get("id") or "")
-                        continue
-                    if method == "item/completed":
-                        break
-                # A turn/completed only ends the wait once the compaction item
-                # has actually finished; the interrupt's own completion and the
-                # compaction turn's opening are both passed over.
-                if method == "turn/completed" and compaction_item is None:
-                    if (params.get("turn") or {}).get("status") == "interrupted":
-                        continue
-                if method == "thread/compact/completed":
-                    break
+                    item = params.get("item") or {}
+                    if item.get("type") == "contextCompaction":
+                        item_id = str(item.get("id") or "")
+                        if method == "item/started":
+                            if item_id:
+                                compaction_item = item_id
+                            continue
+                        if method == "item/completed":
+                            if compaction_item and item_id == compaction_item:
+                                break
+                            continue
+                    # A turn/completed only ends the wait once the compaction item
+                    # has actually finished; the interrupt's own completion and the
+                    # compaction turn's opening are both passed over.
+                    if method == "turn/completed" and compaction_item is None:
+                        if (params.get("turn") or {}).get("status") == "interrupted":
+                            continue
+        except BaseException:
+            # The app-server may still be compacting after our wait is cancelled
+            # or times out.  Reusing it would mix that turn's notifications into
+            # the next user turn, so fail closed and resume the same thread in a
+            # fresh process on demand.
+            try:
+                await asyncio.wait_for(
+                    self._teardown_process(),
+                    timeout=INTERRUPT_TIMEOUT_SECONDS + 1,
+                )
+            except BaseException as cleanup_exc:
+                logger.warning("Codex compact cleanup failed: %s", cleanup_exc)
+                self.reconnect()
+            raise
 
         # Context size is only knowable from the NEXT turn's inputTokens: the
-        # usage notifications during compaction still carry the pre-compaction
-        # totals, so this deliberately reports what is known rather than
-        # inventing a post-compaction figure.
+        # completion notification reports inputTokens=0.  Keeping the previous
+        # high-water value would reserve-block that next turn, so successful
+        # completion invalidates the gauge instead of inventing a new figure.
+        self._context_tokens = None
+        self._last_ctx_usage = None
         return {
             "context_tokens": self._context_tokens,
             "max_tokens": self._context_window,
             "measured_after": False,
+            "completed": True,
         }
 
     # ---------- lifecycle ----------

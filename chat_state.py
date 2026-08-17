@@ -1198,20 +1198,27 @@ class ChatState:
             )
             return {"ok": False, "reason": "native_compact_failed"}
 
-        after = await self.session.get_context_usage()
-        after_pct = (after or {}).get("percentage", 0) or 0
-        tokens = (result or {}).get("context_tokens")
-        await notify(
-            STRINGS["ru"]["compact_native_done"].format(
+        measured_after = bool((result or {}).get("measured_after"))
+        after_pct = None
+        if measured_after:
+            after = await self.session.get_context_usage()
+            after_pct = (after or {}).get("percentage")
+        if after_pct is None:
+            text = STRINGS["ru"]["compact_native_done_unmeasured"].format(
+                runtime=self.runtime_id,
+                before=before_pct,
+            )
+        else:
+            tokens = (result or {}).get("context_tokens")
+            text = STRINGS["ru"]["compact_native_done"].format(
                 runtime=self.runtime_id,
                 before=before_pct,
                 after=after_pct,
                 tokens=tokens if tokens is not None else "?",
-            ),
-            replace=True,
-        )
+            )
+        await notify(text, replace=True)
         return {"ok": True, "before_pct": before_pct, "after_pct": after_pct,
-                "native": True}
+                "native": True, "measured_after": measured_after}
 
     async def _do_compact(self, automatic: bool = False) -> None:
         """Execute one custom compact request outside the state lock."""
@@ -1260,11 +1267,17 @@ class ChatState:
             if result and result.get("ok"):
                 async with self._lock:
                     self._context_reserve_blocked = False
-                logger.info(
-                    f"Chat {self.chat_id}: compact ok, "
-                    f"{result.get('before_pct', 0):.1f}% → "
-                    f"{result.get('after_pct', 0):.1f}%"
-                )
+                if result.get("after_pct") is None:
+                    logger.info(
+                        f"Chat {self.chat_id}: compact ok, "
+                        f"{result.get('before_pct', 0):.1f}% → pending measurement"
+                    )
+                else:
+                    logger.info(
+                        f"Chat {self.chat_id}: compact ok, "
+                        f"{result.get('before_pct', 0):.1f}% → "
+                        f"{result.get('after_pct', 0):.1f}%"
+                    )
         except Exception as e:
             logger.error(f"Chat {self.chat_id}: compact failed: {e}", exc_info=True)
         finally:

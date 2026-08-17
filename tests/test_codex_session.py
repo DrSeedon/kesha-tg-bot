@@ -857,6 +857,39 @@ def test_compact_waits_past_the_interrupt_for_the_real_compaction(tmp_path):
     assert session._notifications.qsize() == 0
 
 
+def test_compact_requires_the_current_started_item_to_complete(tmp_path):
+    """Queued or mismatched compaction completions cannot prove this request."""
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    for event in (
+        {"method": "item/started", "params": {
+            "turnId": "OLD", "item": {"type": "contextCompaction", "id": "old"}}},
+        {"method": "item/completed", "params": {
+            "turnId": "OLD", "item": {"type": "contextCompaction", "id": "old"}}},
+    ):
+        session._notifications.put_nowait(event)
+
+    async def fake_request(method, params, **kwargs):
+        for event in (
+            {"method": "item/started", "params": {
+                "turnId": "NEW", "item": {"type": "contextCompaction", "id": "new"}}},
+            {"method": "item/completed", "params": {
+                "turnId": "OTHER", "item": {"type": "contextCompaction", "id": "wrong"}}},
+            {"method": "item/completed", "params": {
+                "turnId": "NEW", "item": {"type": "contextCompaction", "id": "new"}}},
+        ):
+            session._notifications.put_nowait(event)
+        return {}
+
+    session._request = fake_request
+    result = asyncio.run(session.compact_context())
+
+    assert result["completed"] is True
+    assert session._notifications.qsize() == 0
+
+
 def test_compact_does_not_claim_a_post_compaction_measurement(tmp_path):
     """Usage during compaction still reports pre-compaction totals.
 
@@ -869,13 +902,169 @@ def test_compact_does_not_claim_a_post_compaction_measurement(tmp_path):
     session._proc = type("P", (), {"returncode": None})()
 
     async def fake_request(method, params, **kwargs):
+        session._notifications.put_nowait({"method": "item/started", "params": {
+            "turnId": "T1", "item": {"type": "contextCompaction", "id": "c1"}}})
         session._notifications.put_nowait({"method": "item/completed", "params": {
-            "item": {"type": "contextCompaction", "id": "c1"}}})
+            "turnId": "T1", "item": {"type": "contextCompaction", "id": "c1"}}})
         return {}
 
     session._request = fake_request
     result = asyncio.run(session.compact_context())
     assert result["measured_after"] is False
+
+
+def test_compact_releases_precompact_high_water_before_next_message(tmp_path):
+    """Production #24: 236056 -> 236056 kept the next message reserve-blocked.
+
+    Codex records a real compaction while its completion usage has zero input
+    tokens.  Zero means "not measured yet", not "keep the old 91.4% gauge".
+    """
+    session = make_session(tmp_path)
+    session.session_id = "019fe9bc-dbe9-7c63-bcc8-4789feeb7044"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    session._context_window = 258_400
+    session._context_tokens = 236_056
+    session._last_ctx_usage = {
+        "totalTokens": 236_056,
+        "maxTokens": 258_400,
+        "percentage": 91.4,
+        "model": session.model,
+    }
+
+    async def fake_request(method, params, **kwargs):
+        session._notifications.put_nowait({
+            "method": "item/started",
+            "params": {"turnId": "T1", "item": {
+                "type": "contextCompaction", "id": "c1"
+            }},
+        })
+        session._notifications.put_nowait({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {
+                "modelContextWindow": 258_400,
+                "last": {"inputTokens": 0, "outputTokens": 57_136,
+                         "totalTokens": 57_136},
+                "total": {"totalTokens": 1_000_000},
+            }},
+        })
+        session._notifications.put_nowait({
+            "method": "item/completed",
+            "params": {"turnId": "T1", "item": {
+                "type": "contextCompaction", "id": "c1"
+            }},
+        })
+        return {}
+
+    session._request = fake_request
+
+    async def scenario():
+        compact = await session.compact_context()
+        usage = await session.get_context_usage()
+        reserve = await session.check_context_reserve("Ку")
+        return compact, usage, reserve
+
+    compact, usage, reserve = asyncio.run(scenario())
+    assert compact["measured_after"] is False
+    assert compact["context_tokens"] is None
+    assert usage is None, "the 236056 pre-compact gauge survived completion"
+    assert reserve["ok"] is True, "the next message was blocked by stale usage"
+
+
+def test_compact_timeout_disconnects_without_clearing_unverified_usage(
+    tmp_path, monkeypatch
+):
+    import codex_session
+
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    session._context_tokens = 236_056
+    cleaned = []
+
+    async def fake_request(method, params, **kwargs):
+        return {}
+
+    async def fake_teardown():
+        cleaned.append(True)
+        session._connected = False
+        session._proc = None
+
+    session._request = fake_request
+    session._teardown_process = fake_teardown
+    monkeypatch.setattr(codex_session, "COMPACT_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(session.compact_context())
+
+    assert cleaned == [True]
+    assert session.is_alive is False
+    assert session._context_tokens == 236_056
+
+
+def test_compact_process_error_disconnects_without_clearing_unverified_usage(tmp_path):
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    session._context_tokens = 236_056
+    cleaned = []
+
+    async def fake_request(method, params, **kwargs):
+        session._notifications.put_nowait({
+            "method": "_process/exited", "params": {}
+        })
+        return {}
+
+    async def fake_teardown():
+        cleaned.append(True)
+        session._connected = False
+        session._proc = None
+
+    session._request = fake_request
+    session._teardown_process = fake_teardown
+
+    with pytest.raises(RuntimeError, match="exited during compact"):
+        asyncio.run(session.compact_context())
+
+    assert cleaned == [True]
+    assert session.is_alive is False
+    assert session._context_tokens == 236_056
+
+
+def test_compact_cancel_disconnects_without_clearing_unverified_usage(tmp_path):
+    session = make_session(tmp_path)
+    session.session_id = "thread-1"
+    session._connected = True
+    session._proc = type("P", (), {"returncode": None})()
+    session._context_tokens = 236_056
+    request_started = asyncio.Event()
+    cleaned = []
+
+    async def fake_request(method, params, **kwargs):
+        request_started.set()
+        return {}
+
+    async def fake_teardown():
+        cleaned.append(True)
+        session._connected = False
+        session._proc = None
+
+    session._request = fake_request
+    session._teardown_process = fake_teardown
+
+    async def scenario():
+        task = asyncio.create_task(session.compact_context())
+        await request_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(scenario())
+    assert cleaned == [True]
+    assert session.is_alive is False
+    assert session._context_tokens == 236_056
 
 
 def test_process_exit_ends_the_stream(tmp_path):

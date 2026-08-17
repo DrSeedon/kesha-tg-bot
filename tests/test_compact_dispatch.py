@@ -187,6 +187,17 @@ def test_native_compact_reports_the_result_to_the_user(tmp_path):
     assert "✅" in text
 
 
+def test_native_compact_does_not_repeat_an_unmeasured_percentage(tmp_path):
+    session = make_session_class(native=True, pct=91.4)()
+    chat, _ = make_chat(tmp_path, session, runtime_id="codex")
+
+    asyncio.run(chat._do_compact(automatic=False))
+
+    text = " ".join(chat.bot.sent)
+    assert "91% → 91%" not in text
+    assert "следующего сообщения" in text
+
+
 def test_failed_native_compact_is_reported_not_swallowed(tmp_path):
     session = make_session_class(
         native=True, compact_raises=RuntimeError("app-server exited")
@@ -209,6 +220,33 @@ def test_a_failed_compact_still_releases_the_chat(tmp_path):
 
     asyncio.run(chat._do_compact(automatic=True))
 
+    assert chat.compact_requested is False
+    assert chat._compact_started is False
+
+
+def test_cancelled_native_compact_releases_the_chat(tmp_path):
+    started = asyncio.Event()
+
+    class Session(make_session_class(native=True)):
+        async def compact_context(self):
+            started.set()
+            await asyncio.Event().wait()
+
+    session = Session()
+    chat, _ = make_chat(tmp_path, session, runtime_id="codex")
+    chat.phase = ChatPhase.COMPACTING
+    chat.compact_requested = True
+    chat._compact_started = True
+
+    async def scenario():
+        task = asyncio.create_task(chat._do_compact(automatic=True))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert chat.phase is ChatPhase.IDLE
     assert chat.compact_requested is False
     assert chat._compact_started is False
 
