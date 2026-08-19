@@ -530,21 +530,15 @@ async def _ask_inner(message, prompt, cid, typer):
                 ct = chunk["type"]
                 _last_chunk_type = ct
                 if ct == "text_delta":
-                    if status is not None:
-                        await _finalize_status()
                     has_deltas = True
                     parts.append(chunk["content"])
                     await _edit_update()
                 elif ct == "text" and not has_deltas:
-                    if status is not None:
-                        await _finalize_status()
                     parts.append(chunk["content"])
                     await _edit_update()
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
-                    if parts:
-                        await _finalize_text_block()
                     if status is None:
                         status = ToolStatusTracker(edit_bot, message, cid)
                     try:

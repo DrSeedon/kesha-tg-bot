@@ -39,6 +39,8 @@ EDIT_INTERVAL = 1.0         # min seconds between message edits (TG limit ~1 edi
 TICK_INTERVAL = 1.0         # how often the timer refreshes the display
 STALL_HINT_AFTER = 60       # seconds — show "⏱ still working" hint when current tool runs longer
 MAX_HINT_LEN = 120
+MAX_VISIBLE_TOOLS = 20      # bubble lives the whole turn now — keep it under the 4096 TG limit
+MAX_BUBBLE_LEN = 3900
 
 
 def _tool_icon(name: str) -> str:
@@ -142,7 +144,12 @@ class ToolStatusTracker:
         else:
             header = "🤖 *Сделано:*" if final else "🤖 *Работаю...*"
         lines = [header]
+        hidden = max(0, len(self.tools) - MAX_VISIBLE_TOOLS)
+        if hidden:
+            lines.append(f"… ещё {hidden}")
         for i, t in enumerate(self.tools):
+            if i < hidden:
+                continue
             is_current = (i == self._current_idx) and not final and t["end"] is None
             end = t["end"] if t["end"] is not None else now
             dur = int(end - t["start"])
@@ -155,7 +162,7 @@ class ToolStatusTracker:
                 lines.append(f"⚠️ {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
             else:
                 lines.append(f"✅ {t['icon']} {_escape_md(t['name'])}{t['hint']} · {dur}s")
-        return "\n".join(lines)
+        return "\n".join(lines)[:MAX_BUBBLE_LEN]
 
     async def _render(self, force: bool = False):
         if self._stopped:
@@ -209,9 +216,12 @@ class ToolStatusTracker:
         self._current_idx = None
         if self._tick_task and not self._tick_task.done():
             self._tick_task.cancel()
+            # Тикер, отменённый до первого запуска, не успевает поймать
+            # CancelledError у себя внутри — она BaseException и пролетала
+            # мимо `except Exception`, обрывая весь ответ.
             try:
                 await self._tick_task
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 pass
         self._tick_task = None
         if not self.tools or self.status_msg is None:
@@ -235,9 +245,12 @@ class ToolStatusTracker:
             self.tools[self._current_idx]["end"] = now
         if self._tick_task and not self._tick_task.done():
             self._tick_task.cancel()
+            # Тикер, отменённый до первого запуска, не успевает поймать
+            # CancelledError у себя внутри — она BaseException и пролетала
+            # мимо `except Exception`, обрывая весь ответ.
             try:
                 await self._tick_task
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 pass
         self._tick_task = None
         if not self.tools or self.status_msg is None:

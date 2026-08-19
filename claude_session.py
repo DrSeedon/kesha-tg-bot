@@ -449,8 +449,15 @@ class ClaudeSession:
                         continue
                     if limit_seen or context_limit_seen:
                         continue
+                    # Subagent narration ("I'll research all four directions") is
+                    # internal: it interleaves with the main agent's own stream and
+                    # lands mid-word in the user's chat. Its tool calls still show
+                    # up in the status bubble as progress.
+                    from_subagent = getattr(msg, "parent_tool_use_id", None) is not None
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
+                            if from_subagent:
+                                continue
                             yield {"type": "text", "content": block.text}
                         elif isinstance(block, ToolUseBlock):
                             yield {"type": "tool", "name": block.name, "input": block.input}
@@ -596,6 +603,8 @@ class ClaudeSession:
                         yield {"type": "turn_done"}
                 elif isinstance(msg, StreamEvent):
                     if limit_seen or context_limit_seen:
+                        continue
+                    if getattr(msg, "parent_tool_use_id", None) is not None:
                         continue
                     evt = msg.event
                     if evt.get("type") == "content_block_delta":
