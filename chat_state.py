@@ -14,6 +14,7 @@ from config import (
     AUTO_COMPACT_TZ,
     AUTO_COMPACT_WINDOW_END,
     AUTO_COMPACT_WINDOW_START,
+    PHOTO_CAPTION_WAIT_SEC,
     RUNTIME_MODELS,
     STRINGS,
     render as _render,
@@ -79,6 +80,7 @@ class PendingEntry:
     message: "types.Message | None" = None  # None for reminder/system entries
     source: Literal["user", "reminder"] = "user"
     reply_target: "int | None" = None  # chat_id to send response to
+    bare_photo: bool = False  # фото без подписи — ждём голосовое/текст следом
 
 
 @dataclass(slots=True)
@@ -763,13 +765,21 @@ class ChatState:
             self._debounce_task.cancel()
         prev = self.phase
         self.phase = ChatPhase.COLLECTING
-        logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [arm_debounce]")
-        self._debounce_task = asyncio.create_task(self._on_debounce_elapsed())
+        # Пока в батче только фото без подписи — ждём дольше: подпись к нему
+        # приходит отдельным голосовым. Любая другая запись возвращает обычный
+        # дебаунс, поэтому дальше батчинг работает как раньше.
+        delay = self.debounce_sec
+        if self.pending and all(entry.bare_photo for entry in self.pending):
+            delay = max(delay, PHOTO_CAPTION_WAIT_SEC)
+        logger.info(
+            f"Chat {self.chat_id}: phase {prev} → {self.phase} [arm_debounce {delay}s]"
+        )
+        self._debounce_task = asyncio.create_task(self._on_debounce_elapsed(delay))
 
-    async def _on_debounce_elapsed(self) -> None:
+    async def _on_debounce_elapsed(self, delay: float) -> None:
         """Debounce timer coroutine. Runs outside lock."""
         try:
-            await asyncio.sleep(self.debounce_sec)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
 

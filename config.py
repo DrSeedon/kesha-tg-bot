@@ -29,6 +29,9 @@ DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
 DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
+# Фото без подписи почти всегда ждёт следом голосовое (в фото войс не вложить) —
+# держим батч дольше обычного дебаунса, чтобы подпись уехала тем же ходом.
+PHOTO_CAPTION_WAIT_SEC = int(os.getenv("PHOTO_CAPTION_WAIT_SEC", "10"))
 AUTO_COMPACT_TZ = ZoneInfo("Asia/Krasnoyarsk")
 AUTO_COMPACT_WINDOW_START = dt_time(23, 0)
 AUTO_COMPACT_WINDOW_END = dt_time(8, 0)

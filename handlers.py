@@ -77,7 +77,7 @@ async def _deny_once(msg: types.Message):
         await _send_safe(msg, t(msg, "no_access", uid=uid))
 
 
-async def enqueue(msg: types.Message, prompt: str, *, media=None):
+async def enqueue(msg: types.Message, prompt: str, *, media=None, bare_photo: bool = False):
     """Enqueue a user message into the ChatState pipeline."""
     chat_id = msg.chat.id
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
@@ -107,6 +107,7 @@ async def enqueue(msg: types.Message, prompt: str, *, media=None):
         message=msg,
         source="user",
         reply_target=chat_id,
+        bare_photo=bare_photo,
     )
     try:
         if media is None:
@@ -531,7 +532,10 @@ async def h_media_album(messages: list[types.Message]):
             break
     fwd = forward_meta(messages[0])
     media_block = "\n".join(parts)
-    await enqueue(messages[0], f"{fwd}{media_block}{caption}", media=media)
+    bare_photo = not caption and all(m.photo for m in messages)
+    await enqueue(
+        messages[0], f"{fwd}{media_block}{caption}", media=media, bare_photo=bare_photo
+    )
 
 
 async def h_photo(msg: types.Message):
@@ -543,7 +547,7 @@ async def h_photo(msg: types.Message):
     path = await download_file(msg.photo[-1].file_id, _media_name("photo", ".jpg", msg), msg.photo[-1].file_unique_id)
     caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
     tag = f"[photo: {path}]" if path else "[photo: файл слишком большой]"
-    await enqueue(msg, f"{tag}{caption}", media=media)
+    await enqueue(msg, f"{tag}{caption}", media=media, bare_photo=not msg.caption)
 
 
 async def h_video_note(msg: types.Message):
