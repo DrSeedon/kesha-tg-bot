@@ -173,6 +173,10 @@ async def _ask_inner(message, prompt, cid, typer):
     finalized: list[int] = []
     completed_text_blocks: list[str] = []
     terminal_handled = False
+    # Пузырь тулов родился ПОД уже отправленным куском текста. Порядок
+    # сообщений в Telegram необратим, поэтому текст пересылаем под пузырь:
+    # читается «сначала работал — потом ответил», а не наоборот.
+    text_needs_move = False
 
     status: Optional[ToolStatusTracker] = None
 
@@ -203,12 +207,19 @@ async def _ask_inner(message, prompt, cid, typer):
         return True
 
     async def _edit_update():
-        nonlocal current_msg_id, last_edit_time, last_edit_text
+        nonlocal current_msg_id, last_edit_time, last_edit_text, text_needs_move
         text = "".join(parts)
         if not text:
             return
         visible_text = text[:TG_MSG_LIMIT]
         now = monotonic()
+
+        # Переезд под пузырь тулов — вне троттлинга: пока он не случился,
+        # текст стоит выше пузыря и выглядит как ответ раньше работы.
+        if text_needs_move and current_msg_id is not None:
+            if await _replace_live_message(text, now, parse_mode=None):
+                text_needs_move = False
+            return
 
         # First chunk — send immediately without throttle
         if current_msg_id is None:
@@ -254,6 +265,7 @@ async def _ask_inner(message, prompt, cid, typer):
 
     async def _finalize_text_block():
         nonlocal parts, has_deltas, current_msg_id, last_edit_time, last_edit_text
+        nonlocal text_needs_move
         raw = "".join(parts)
         if not raw:
             return
@@ -273,6 +285,16 @@ async def _ask_inner(message, prompt, cid, typer):
             ent_dicts = [e.to_dict() for e in chunk_ents] if chunk_ents else None
 
             if i == 0 and current_msg_id is not None:
+                if text_needs_move:
+                    if await _replace_live_message(
+                        chunk_text,
+                        monotonic(),
+                        parse_mode=None,
+                        entities=ent_dicts,
+                    ):
+                        text_needs_move = False
+                        finalized.append(current_msg_id)
+                        continue
                 if chunk_text == last_edit_text and not ent_dicts:
                     finalized.append(current_msg_id)
                     continue
@@ -337,6 +359,7 @@ async def _ask_inner(message, prompt, cid, typer):
         last_edit_text = ""
         parts = []
         has_deltas = False
+        text_needs_move = False
 
     async def _finalize_status():
         nonlocal status
@@ -540,6 +563,9 @@ async def _ask_inner(message, prompt, cid, typer):
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})
                     if status is None:
+                        # Пузырь уедет ниже уже показанного текста — пометим,
+                        # что текст надо переслать под него.
+                        text_needs_move = current_msg_id is not None
                         status = ToolStatusTracker(edit_bot, message, cid)
                     try:
                         _ti_short = json.dumps(tool_input, ensure_ascii=False)[:400]
@@ -588,6 +614,7 @@ async def _ask_inner(message, prompt, cid, typer):
                                 has_deltas = False
                                 current_msg_id = None  # EC-6: reset live message on reconnect
                                 last_edit_text = ""
+                                text_needs_move = False
                                 if status:
                                     if status.tools:
                                         await status.finalize()

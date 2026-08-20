@@ -110,9 +110,13 @@ async def test_interleaved_tools_do_not_split_the_answer(monkeypatch):
 
     await response_stream._ask_inner(message, "prompt", 7, typer)
 
-    # Ровно одно текстовое сообщение и ровно один пузырь тулов за ход.
-    assert len(_text_msgs(message)) == 1
+    # Ровно один пузырь тулов, и он ВЫШЕ ответа: сначала работа, потом текст.
     assert len(_bubbles(message)) == 1
+    alive = [a for a in message.answers if a[2] not in {d[1] for d in bot.deleted}]
+    text_alive = [a for a in alive if a[1].get("parse_mode") != "Markdown"]
+    bubble = _bubbles(message)[0]
+    assert len(text_alive) == 1
+    assert bubble[2] < text_alive[0][2], "пузырь тулов обязан быть выше ответа"
     # Текст не потерян и не разорван.
     final = [e[0] for e in bot.edits if "часть" in e[0]]
     assert final and final[-1] == "часть один часть два часть три"
