@@ -20,11 +20,14 @@ app-server (docs/tasks/16/spikes/turn_probe_events.jsonl):
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -59,6 +62,21 @@ APP_SERVER_FRAME_LIMIT_BYTES = 64 * 1024 * 1024
 # we must never retry; `contextWindowExceeded` needs a compact, not a reconnect.
 _USAGE_LIMIT_INFOS = ("usageLimitExceeded", "sessionBudgetExceeded")
 _CONTEXT_LIMIT_INFOS = ("contextWindowExceeded",)
+_MCP_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_MCP_RESERVED_ENV_NAMES = {
+    "CODEX_HOME",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+}
 
 
 def _codex_binary() -> str:
@@ -137,6 +155,7 @@ class CodexSession:
         self.reasoning_effort = reasoning_effort
         self.chat_id = chat_id
         self._bridge_session: str | None = None
+        self._mcp_config_path: Path | None = None
 
         self.session_id: Optional[str] = self._load_session()
 
@@ -347,7 +366,7 @@ class CodexSession:
             await self._proc.stdin.drain()
 
     def _ensure_codex_home(self) -> str:
-        """Build a private CODEX_HOME so Kesha inherits no foreign MCP servers.
+        """Build a per-session CODEX_HOME while preserving the shared thread store.
 
         Measured (docs/tasks/16/spikes/mcp_isolation_probe.py): `-c mcp_servers={}`
         MERGES into the user's ~/.codex/config.toml and leaves serena, kwin,
@@ -355,21 +374,44 @@ class CodexSession:
         separate CODEX_HOME drops that table. Auth is symlinked, so the user's
         subscription login still applies without copying credentials around.
         """
-        home = Path(
+        root = Path(
             os.getenv("KESHA_CODEX_HOME")
             or Path(self._session_file.parent if self._session_file else Path("./storage"))
             / "codex-home"
         ).expanduser()
+        identity = (
+            str(self._session_file.resolve())
+            if self._session_file
+            else f"chat:{self.chat_id}:instance:{id(self)}"
+        )
+        home = root / "kesha-sessions" / hashlib.sha256(identity.encode()).hexdigest()[:24]
+        root.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
-        try:
-            home.chmod(0o700)
-        except OSError:
-            pass
+        for private_dir in (root, home):
+            try:
+                private_dir.chmod(0o700)
+            except OSError:
+                pass
+
+        # Existing thread ids resolve through rollouts under CODEX_HOME/sessions.
+        # Keep one shared store while the config containing per-chat credentials
+        # stays in the isolated child directory.
+        shared_sessions = root / "sessions"
+        shared_sessions.mkdir(exist_ok=True)
+        sessions_link = home / "sessions"
+        if sessions_link.is_symlink():
+            if sessions_link.resolve() != shared_sessions.resolve():
+                raise RuntimeError("Codex session-store link points outside the private root")
+        elif sessions_link.exists():
+            raise RuntimeError("Codex session-store path is not a symlink")
+        else:
+            sessions_link.symlink_to(shared_sessions.resolve(), target_is_directory=True)
 
         config = home / "config.toml"
         desired = (
             f'model = {_toml_str(self.model)}\n'
             "project_doc_max_bytes = 131072\n"
+            f"sqlite_home = {_toml_str(str(root.resolve()))}\n"
         )
         if not config.exists() or config.read_text() != desired:
             config.write_text(desired)
@@ -444,13 +486,13 @@ class CodexSession:
             self._bridge_session = None
 
     def _mcp_config_args(self) -> list[str]:
-        """Pin MCP servers to exactly what Kesha passes.
+        """Disable MCP sources outside Kesha's private profile.
 
         `--disable apps` removes the built-in `codex_apps` server, which is a
         feature flag rather than a config entry and therefore survives a private
-        CODEX_HOME. Together these leave the thread with only Kesha's bridge.
+        CODEX_HOME.
         """
-        args: list[str] = [
+        return [
             "--disable",
             "apps",
             # This VPS cannot create the loopback interface required by
@@ -459,23 +501,85 @@ class CodexSession:
             "--enable",
             "use_legacy_landlock",
         ]
+
+    def _normalized_mcp_servers(self) -> tuple[dict[str, dict], set[str]]:
+        """Build file-backed MCP config and names to scrub from app-server env."""
+        servers: dict[str, dict] = {}
+        shared_values: dict[str, str] = {}
         for name, cfg in self.mcp_servers.items():
             if name == "kesha" and isinstance(cfg, dict) and cfg.get("type") == "sdk":
                 cfg = self._kesha_bridge_config()
             command = cfg.get("command") if isinstance(cfg, dict) else None
             if not command:
                 continue
-            args += ["-c", f"mcp_servers.{name}.enabled=true"]
-            args += ["-c", f"mcp_servers.{name}.command={_toml_str(str(command))}"]
-            srv_args = cfg.get("args") or []
-            rendered = ", ".join(_toml_str(str(a)) for a in srv_args)
-            args += ["-c", f"mcp_servers.{name}.args=[{rendered}]"]
             env = cfg.get("env") or {}
+            normalized_env: dict[str, str] = {}
             for key, value in env.items():
-                args += ["-c", f"mcp_servers.{name}.env.{key}={_toml_str(str(value))}"]
-        return args
+                if not isinstance(key, str) or not _MCP_ENV_NAME.fullmatch(key):
+                    raise ValueError(f"Invalid MCP environment variable name for {name!r}")
+                if key in _MCP_RESERVED_ENV_NAMES:
+                    raise ValueError(f"MCP environment variable {key} is reserved")
+                rendered_value = str(value)
+                if key in shared_values and shared_values[key] != rendered_value:
+                    raise ValueError(
+                        f"MCP environment variable {key!r} has divergent values"
+                    )
+                shared_values[key] = rendered_value
+                normalized_env[key] = rendered_value
+            servers[str(name)] = {
+                "command": str(command),
+                "args": [str(arg) for arg in (cfg.get("args") or [])],
+                "env": normalized_env,
+            }
+        return servers, set(shared_values)
+
+    def _write_mcp_config(self, home: Path, servers: dict[str, dict]) -> None:
+        """Write owner-only config whose literal env reaches only MCP spawns."""
+        self._remove_mcp_config()
+        if not servers:
+            return
+
+        path = home / "config.toml"
+        lines: list[str] = [path.read_text().rstrip(), ""]
+        for name, cfg in servers.items():
+            table = f"mcp_servers.{_toml_str(name)}"
+            rendered_args = ", ".join(_toml_str(arg) for arg in cfg["args"])
+            lines += [
+                f"[{table}]",
+                "enabled = true",
+                f"command = {_toml_str(cfg['command'])}",
+                f"args = [{rendered_args}]",
+            ]
+            if cfg["env"]:
+                lines += ["", f"[{table}.env]"]
+                lines += [
+                    f"{_toml_str(key)} = {_toml_str(value)}"
+                    for key, value in cfg["env"].items()
+                ]
+            lines.append("")
+
+        fd, temp_name = tempfile.mkstemp(dir=home, prefix=f".{path.name}.")
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as file:
+                file.write("\n".join(lines))
+            os.replace(temp_path, path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+        self._mcp_config_path = path
+
+    def _remove_mcp_config(self) -> None:
+        path = self._mcp_config_path
+        self._mcp_config_path = None
+        if path is not None:
+            path.unlink(missing_ok=True)
 
     async def _connect(self) -> None:
+        async with self._connect_lock:
+            await self._connect_locked()
+
+    async def _connect_locked(self) -> None:
         """Start the app-server and attach to a thread (resume when possible)."""
         if self.is_alive:
             return
@@ -487,23 +591,28 @@ class CodexSession:
 
         await self._teardown_process()
 
-        cmd = [_codex_binary(), "app-server", "--stdio", *self._mcp_config_args()]
-        env = dict(os.environ)
-        env["CODEX_HOME"] = self._ensure_codex_home()
-        logger.info(f"Codex: starting app-server (model={self.model})")
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.cwd,
-            env=env,
-            limit=APP_SERVER_FRAME_LIMIT_BYTES,
-        )
-        self._reader_task = asyncio.create_task(self._read_stdout())
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-
         try:
+            servers, mcp_env_names = self._normalized_mcp_servers()
+            home = Path(self._ensure_codex_home())
+            self._write_mcp_config(home, servers)
+            cmd = [_codex_binary(), "app-server", "--stdio", *self._mcp_config_args()]
+            env = dict(os.environ)
+            env["CODEX_HOME"] = str(home)
+            for name in mcp_env_names:
+                env.pop(name, None)
+            logger.info(f"Codex: starting app-server (model={self.model})")
+            self._proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
+                env=env,
+                limit=APP_SERVER_FRAME_LIMIT_BYTES,
+            )
+            self._reader_task = asyncio.create_task(self._read_stdout())
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+
             async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
                 await self._request(
                     "initialize",
@@ -514,6 +623,9 @@ class CodexSession:
         except BaseException:
             await self._teardown_process()
             raise
+        # The app-server has loaded the config and owns the MCP launch recipe.
+        # Remove the on-disk credential copy before any model turn can run.
+        self._remove_mcp_config()
         self._connected = True
 
     async def _start_or_resume_thread(self) -> None:
@@ -579,6 +691,7 @@ class CodexSession:
             except asyncio.QueueEmpty:
                 break
         self._revoke_bridge_session()
+        self._remove_mcp_config()
 
     # ---------- streaming ----------
 
@@ -1056,6 +1169,7 @@ class CodexSession:
             except ProcessLookupError:
                 pass
         self._revoke_bridge_session()
+        self._remove_mcp_config()
         logger.info("Codex: reconnecting (keeping thread id)")
 
     async def reset_async(self) -> None:
@@ -1079,7 +1193,7 @@ class CodexSession:
 
 def _toml_str(value: str) -> str:
     """TOML basic string for `-c key=value` overrides."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return json.dumps(value, ensure_ascii=True)
 
 
 def _estimate_tokens(text: str) -> int:

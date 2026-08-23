@@ -1,0 +1,2 @@
+- Worktrees have no local venv; run tests with `/home/kesha/projects/kesha-tg-bot/.venv/bin/python -m pytest`.
+- Never put MCP values in the Codex app-server environment: 0.149 hooks snapshot the whole parent env outside `shell_environment_policy`. Use literal `mcp_servers.<id>.env` in a per-session 0600 config, scrub those exact names from app-server env, and verify both a model shell and a generic notify child.

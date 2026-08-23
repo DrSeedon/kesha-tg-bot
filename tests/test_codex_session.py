@@ -7,7 +7,9 @@ docs/tasks/16/spikes/turn_probe_events.jsonl, not invented.
 import asyncio
 import json
 import os
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,6 +111,39 @@ def test_connect_allows_large_thread_resume_frames(tmp_path, monkeypatch):
     assert captured["limit"] == 64 * 1024 * 1024
 
 
+def test_concurrent_connects_serialize_config_lifecycle(tmp_path):
+    session = make_session(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    active = 0
+    max_active = 0
+
+    async def fake_connect_locked():
+        nonlocal calls, active, max_active
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        entered.set()
+        await release.wait()
+        active -= 1
+
+    session._connect_locked = fake_connect_locked
+
+    async def run():
+        first = asyncio.create_task(session._connect())
+        await entered.wait()
+        second = asyncio.create_task(session._connect())
+        await asyncio.sleep(0)
+        assert calls == 1
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+    assert calls == 2
+    assert max_active == 1
+
+
 def test_oversized_stdout_frame_fails_waiters_without_retry_loop(tmp_path):
     class OversizedOnce:
         def __init__(self):
@@ -151,15 +186,13 @@ def test_only_kesha_bridge_is_configured(tmp_path):
         mcp_servers={"kesha": {"command": "/usr/bin/kesha-bridge", "args": ["--stdio"]}},
     )
     args = session._mcp_config_args()
+    servers, env_names = session._normalized_mcp_servers()
 
     assert "--disable" in args and "apps" in args, "built-in codex_apps must be disabled"
-
-    configured = {
-        part.split("mcp_servers.")[1].split(".")[0]
-        for part in args
-        if part.startswith("mcp_servers.")
+    assert servers == {
+        "kesha": {"command": "/usr/bin/kesha-bridge", "args": ["--stdio"], "env": {}}
     }
-    assert configured == {"kesha"}, f"unexpected MCP servers configured: {configured}"
+    assert env_names == set()
 
 
 def test_sdk_kesha_server_becomes_chat_bound_stdio_bridge(tmp_path, monkeypatch):
@@ -180,15 +213,172 @@ def test_sdk_kesha_server_becomes_chat_bound_stdio_bridge(tmp_path, monkeypatch)
         mcp_servers={"kesha": {"type": "sdk", "instance": object()}},
     )
 
-    args = session._mcp_config_args()
-    rendered = "\n".join(args)
+    servers, env_names = session._normalized_mcp_servers()
+    bridge = servers["kesha"]
 
     assert issued == [(42, 24 * 60 * 60, "codex")]
-    assert "mcp_servers.kesha.enabled=true" in rendered
-    assert "kesha_mcp_proxy.py" in rendered
-    assert "KESHA_BRIDGE_SESSION" in rendered
-    assert "opaque-session" in rendered
-    assert "chat_id" not in rendered
+    assert bridge["command"] == sys.executable
+    assert bridge["args"] == [str(Path(__file__).parent.parent / "kesha_mcp_proxy.py")]
+    assert bridge["env"][tool_bridge.TOKEN_ENV] == "bridge-token"
+    assert bridge["env"]["KESHA_BRIDGE_SESSION"] == "opaque-session"
+    assert env_names == {
+        "KESHA_BRIDGE_SOCKET",
+        tool_bridge.TOKEN_ENV,
+        "KESHA_BRIDGE_SESSION",
+    }
+
+
+def test_mcp_secrets_reach_only_the_private_profile(tmp_path, monkeypatch):
+    secrets = {
+        "ORCHID_LAMP": "arbitrary bridge value / with spaces",
+        "COPPER_RAIN": "third-party-value-123",
+    }
+    for key in secrets:
+        monkeypatch.delenv(key, raising=False)
+
+    session = make_session(
+        tmp_path,
+        mcp_servers={
+            "kesha": {
+                "command": "/usr/bin/kesha-bridge",
+                "args": ["--stdio"],
+                "env": {"ORCHID_LAMP": secrets["ORCHID_LAMP"]},
+            },
+            "search": {
+                "command": "/usr/bin/search-mcp",
+                "args": ["serve"],
+                "env": {"COPPER_RAIN": secrets["COPPER_RAIN"]},
+            },
+        },
+    )
+    captured = {}
+
+    async def stop_after_spawn(*args, **kwargs):
+        captured["argv"] = args
+        captured["env"] = kwargs["env"]
+        config_path = Path(kwargs["env"]["CODEX_HOME"]) / "config.toml"
+        captured["config"] = tomllib.loads(config_path.read_text())
+        captured["config_path"] = config_path
+        captured["config_mode"] = config_path.stat().st_mode & 0o777
+        raise RuntimeError("stop after capturing subprocess launch")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stop_after_spawn)
+    with pytest.raises(RuntimeError, match="stop after capturing"):
+        asyncio.run(session._connect())
+
+    argv = "\0".join(captured["argv"])
+    assert "--profile" not in captured["argv"]
+    assert all(secret not in argv for secret in secrets.values())
+    assert all(key not in argv for key in secrets)
+    configured = captured["config"]["mcp_servers"]
+    assert configured["kesha"] == {
+        "enabled": True,
+        "command": "/usr/bin/kesha-bridge",
+        "args": ["--stdio"],
+        "env": {"ORCHID_LAMP": secrets["ORCHID_LAMP"]},
+    }
+    assert configured["search"] == {
+        "enabled": True,
+        "command": "/usr/bin/search-mcp",
+        "args": ["serve"],
+        "env": {"COPPER_RAIN": secrets["COPPER_RAIN"]},
+    }
+    generic_child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os,sys; print(','.join('present' if n in os.environ else 'absent' for n in sys.argv[1:]))",
+            *secrets,
+        ],
+        env=captured["env"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert generic_child.stdout.strip() == "absent,absent"
+    assert all(key not in captured["env"] for key in secrets)
+    assert captured["config_mode"] == 0o600
+    assert not captured["config_path"].exists(), "failed launches must remove credentials"
+    assert all(key not in os.environ for key in secrets)
+
+
+@pytest.mark.parametrize("name", ["1SECRET", "SECRET-NAME", "SECRET=NAME", "SÉCRET", 42])
+def test_mcp_environment_names_must_be_safe(tmp_path, name):
+    session = make_session(
+        tmp_path,
+        mcp_servers={"unsafe": {"command": "mcp", "env": {name: "fake-value"}}},
+    )
+
+    with pytest.raises(ValueError, match="Invalid MCP environment variable name"):
+        session._normalized_mcp_servers()
+
+
+def test_mcp_environment_rejects_divergent_values(tmp_path):
+    session = make_session(
+        tmp_path,
+        mcp_servers={
+            "one": {"command": "mcp-one", "env": {"SHARED_KEY": "fake-one"}},
+            "two": {"command": "mcp-two", "env": {"SHARED_KEY": "fake-two"}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="SHARED_KEY.*divergent"):
+        session._normalized_mcp_servers()
+
+
+@pytest.mark.parametrize("name", ["CODEX_HOME", "PATH"])
+def test_mcp_environment_rejects_app_server_runtime_names(tmp_path, name):
+    session = make_session(
+        tmp_path,
+        mcp_servers={"unsafe": {"command": "mcp", "env": {name: "fake"}}},
+    )
+
+    with pytest.raises(ValueError, match=rf"{name} is reserved"):
+        session._normalized_mcp_servers()
+
+
+def test_mcp_environment_allows_identical_shared_values(tmp_path):
+    session = make_session(
+        tmp_path,
+        mcp_servers={
+            "one": {"command": "mcp-one", "env": {"SHARED_KEY": "same-fake"}},
+            "two": {"command": "mcp-two", "env": {"SHARED_KEY": "same-fake"}},
+        },
+    )
+
+    servers, env_names = session._normalized_mcp_servers()
+    assert env_names == {"SHARED_KEY"}
+    assert servers["one"]["env"] == {"SHARED_KEY": "same-fake"}
+    assert servers["two"]["env"] == {"SHARED_KEY": "same-fake"}
+
+
+def test_mcp_config_homes_are_isolated_per_chat_session(tmp_path):
+    root = tmp_path / "shared-codex-home"
+    one = CodexSession(
+        cwd=str(tmp_path),
+        chat_id=1,
+        session_file=tmp_path / "sessions" / "1",
+        mcp_servers={"mcp": {"command": "server", "env": {"ORCHID_LAMP": "one"}}},
+    )
+    two = CodexSession(
+        cwd=str(tmp_path),
+        chat_id=2,
+        session_file=tmp_path / "sessions" / "2",
+        mcp_servers={"mcp": {"command": "server", "env": {"ORCHID_LAMP": "two"}}},
+    )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("KESHA_CODEX_HOME", str(root))
+        one_home = Path(one._ensure_codex_home())
+        two_home = Path(two._ensure_codex_home())
+    one._write_mcp_config(one_home, one._normalized_mcp_servers()[0])
+    two._write_mcp_config(two_home, two._normalized_mcp_servers()[0])
+
+    assert one_home != two_home
+    one_config = tomllib.loads((one_home / "config.toml").read_text())
+    two_config = tomllib.loads((two_home / "config.toml").read_text())
+    assert one_config["mcp_servers"]["mcp"]["env"]["ORCHID_LAMP"] == "one"
+    assert two_config["mcp_servers"]["mcp"]["env"]["ORCHID_LAMP"] == "two"
 
 
 def test_thread_uses_owner_requested_full_access(tmp_path):
@@ -251,13 +441,16 @@ def test_private_codex_home_is_used_and_isolated(tmp_path):
     assert "mcp_servers" not in config, "private config must not define servers"
     assert "project_doc_max_bytes = 131072" in config
     assert oct(home.stat().st_mode)[-3:] == "700"
+    assert (home / "sessions").is_symlink()
 
 
 def test_codex_home_is_overridable(tmp_path, monkeypatch):
     target = tmp_path / "custom-home"
     monkeypatch.setenv("KESHA_CODEX_HOME", str(target))
     session = make_session(tmp_path)
-    assert Path(session._ensure_codex_home()) == target
+    home = Path(session._ensure_codex_home())
+    assert home.parent == target / "kesha-sessions"
+    assert (home / "sessions").resolve() == (target / "sessions").resolve()
 
 
 def test_apps_feature_is_disabled_not_just_config(tmp_path):
@@ -400,14 +593,28 @@ def test_live_thread_declares_only_the_bridge(tmp_path):
     assert started == set(), f"foreign MCP servers leaked into Kesha's thread: {started}"
 
 
-def test_mcp_args_are_toml_escaped(tmp_path):
+def test_mcp_profile_preserves_toml_special_characters(tmp_path):
     session = make_session(
         tmp_path,
-        mcp_servers={"kesha": {"command": '/opt/we"ird/path', "args": ['a"b']}},
+        mcp_servers={
+            'ke"sha': {
+                "command": '/opt/we"ird/path',
+                "args": ['a"b', "line\nbreak"],
+                "env": {"FAKE_VALUE": "slash\\quote\"newline\n"},
+            }
+        },
     )
-    args = session._mcp_config_args()
-    rendered = " ".join(args)
-    assert '\\"' in rendered, "quotes must be escaped so the override stays parseable"
+    servers, _ = session._normalized_mcp_servers()
+    home = Path(session._ensure_codex_home())
+    session._write_mcp_config(home, servers)
+    parsed = tomllib.loads((home / "config.toml").read_text())
+
+    assert parsed["mcp_servers"]['ke"sha'] == {
+        "enabled": True,
+        "command": '/opt/we"ird/path',
+        "args": ['a"b', "line\nbreak"],
+        "env": {"FAKE_VALUE": "slash\\quote\"newline\n"},
+    }
 
 
 # ---------- auth linking (a re-login must not silently deauthorize Kesha) ----------
