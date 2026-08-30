@@ -5,7 +5,7 @@ import logging
 import os
 
 from aiogram import Dispatcher, F, types
-from aiogram.enums import ChatAction
+from aiogram.enums import ChatAction, ContentType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -656,11 +656,16 @@ async def h_text(msg: types.Message):
 async def h_fallback(msg: types.Message):
     if not allowed(msg.from_user.id):
         return await _deny_once(msg)
-    text = msg.text or msg.caption or ""
     content_type = msg.content_type or "unknown"
+    rich_message = getattr(msg, "rich_message", None)
+    if content_type == ContentType.RICH_MESSAGE and rich_message is not None:
+        text = f"[rich_message] {rich_message.model_dump_json(exclude_none=True)}"
+    else:
+        text = msg.text or msg.caption or (
+            f"[unhandled message: {getattr(content_type, 'value', content_type)}]"
+        )
     logger.warning(f"Chat {msg.chat.id}: unhandled message type={content_type}, text={text[:100]}")
-    if text:
-        await enqueue(msg, text)
+    await enqueue(msg, text)
 
 
 # --- Command lists ---
