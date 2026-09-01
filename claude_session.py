@@ -409,6 +409,7 @@ class ClaudeSession:
         context_limit_content = ""
         batch_had_error = False
         generic_errors: list[str] = []
+        result_has_visible_main_output = False
 
         try:
             logger.info("send_message: ensuring connected...")
@@ -458,6 +459,7 @@ class ClaudeSession:
                         if isinstance(block, TextBlock) and block.text:
                             if from_subagent:
                                 continue
+                            result_has_visible_main_output = True
                             yield {"type": "text", "content": block.text}
                         elif isinstance(block, ToolUseBlock):
                             yield {"type": "tool", "name": block.name, "input": block.input}
@@ -481,13 +483,20 @@ class ClaudeSession:
                     # production), and reading that as "the expected model is
                     # missing" would weld admission shut again.
                     raw_result = str(msg.result or "")
-                    result_is_limit = (
+                    typed_result_limit = (
                         pending_limit is not None
                         or limit_seen
                         or getattr(msg, "api_error_status", None) == 429
                         or getattr(msg, "terminal_reason", None) == "blocking_limit"
-                        or usage_limit_reset(raw_result) is not None
                     )
+                    raw_result_limit = (
+                        usage_limit_reset(raw_result) is not None
+                        and (
+                            msg.is_error
+                            or not result_has_visible_main_output
+                        )
+                    )
+                    result_is_limit = typed_result_limit or raw_result_limit
                     # A context-limit short circuit is equally not evidence about
                     # the runtime, and latching here would block the very
                     # /compact the message tells the user to run.
@@ -573,6 +582,7 @@ class ClaudeSession:
                         if raw_result:
                             generic_errors.append(raw_result)
                     pending_limit = None
+                    result_has_visible_main_output = False
 
                     async with self._query_lock:
                         self._expected_results = max(0, self._expected_results - 1)
@@ -610,7 +620,10 @@ class ClaudeSession:
                     if evt.get("type") == "content_block_delta":
                         delta = evt.get("delta", {})
                         if delta.get("type") == "text_delta":
-                            yield {"type": "text_delta", "content": delta.get("text", "")}
+                            text = delta.get("text", "")
+                            if text:
+                                result_has_visible_main_output = True
+                            yield {"type": "text_delta", "content": text}
                 elif isinstance(msg, SystemMessage):
                     if msg.subtype == "init":
                         commands = msg.data.get("slash_commands")

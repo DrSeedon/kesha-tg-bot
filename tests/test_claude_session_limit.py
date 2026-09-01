@@ -6,6 +6,7 @@ from claude_agent_sdk import (
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
+    StreamEvent,
     TextBlock,
 )
 
@@ -178,6 +179,119 @@ async def test_typed_limit_without_late_result_error_is_still_terminal(tmp_path)
     assert [chunk["type"] for chunk in chunks] == ["error"]
     assert chunks[0]["kind"] == "usage_limit"
     assert session._expected_results == 0
+
+
+@pytest.mark.asyncio
+async def test_successful_answer_quoting_limit_is_not_self_censored(tmp_path):
+    session, client = make_session(tmp_path)
+    answer = "The documentation calls this a session limit, but the answer is ready."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        AssistantMessage(content=[TextBlock(answer)], model="claude")
+    )
+    await client.events.put(result(text=answer))
+
+    chunks = await task
+
+    assert chunks == [
+        {"type": "text", "content": answer},
+    ]
+    assert session.usage_limit_active is False
+
+
+@pytest.mark.asyncio
+async def test_successful_stream_delta_quoting_limit_is_not_self_censored(tmp_path):
+    session, client = make_session(tmp_path)
+    answer = "The docs mention a usage limit, but this request succeeded."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        StreamEvent(
+            uuid="delta",
+            session_id="sid",
+            event={
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": answer},
+            },
+        )
+    )
+    await client.events.put(result(text=answer))
+
+    chunks = await task
+
+    assert chunks == [
+        {"type": "text_delta", "content": answer},
+    ]
+    assert session.usage_limit_active is False
+
+
+@pytest.mark.asyncio
+async def test_visible_output_evidence_resets_before_injected_raw_limit(tmp_path):
+    session, client = make_session(tmp_path)
+    answer = "This successful answer quotes a session limit without being one."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    assert await session.inject("injected") is True
+    await client.events.put(
+        AssistantMessage(content=[TextBlock(answer)], model="claude")
+    )
+    await client.events.put(result(text=answer, sid="sid-success"))
+    await client.events.put(limit_result_without_model_usage())
+
+    chunks = await task
+
+    assert chunks[-1]["type"] == "error"
+    assert chunks[-1]["kind"] == "usage_limit"
+    assert session.usage_limit_active is True
+
+
+@pytest.mark.asyncio
+async def test_subagent_narration_does_not_immunize_raw_limit(tmp_path):
+    session, client = make_session(tmp_path)
+    narration = "The subagent found a usage limit mention while researching."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        AssistantMessage(
+            content=[TextBlock(narration)],
+            model="claude",
+            parent_tool_use_id="tool-1",
+        )
+    )
+    await client.events.put(limit_result_without_model_usage(narration))
+
+    chunks = await task
+
+    assert chunks == [
+        {"type": "error", "kind": "usage_limit", "content": narration},
+    ]
+    assert session.usage_limit_active is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["429", "blocking_limit"])
+async def test_typed_result_limit_wins_after_visible_output(tmp_path, variant):
+    session, client = make_session(tmp_path)
+    answer = "A normal answer before the provider reports a limit."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        AssistantMessage(content=[TextBlock(answer)], model="claude")
+    )
+    terminal = result(status=429 if variant == "429" else None)
+    if variant == "blocking_limit":
+        terminal.terminal_reason = "blocking_limit"
+    await client.events.put(terminal)
+
+    chunks = await task
+
+    assert chunks[-1] == {
+        "type": "error",
+        "kind": "usage_limit",
+        "content": "usage limit",
+    }
+    assert session.usage_limit_active is True
 
 
 @pytest.mark.asyncio
