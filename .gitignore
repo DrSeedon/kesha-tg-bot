@@ -11,3 +11,6 @@ storage/
 krsk-state.json
 .credentials.json
 token.pickle
+# Orchestra project state is canonical Git data.
+!.orchestra/
+!.orchestra/**
