@@ -3,17 +3,11 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from config import (
-    AUTO_COMPACT_IDLE,
-    AUTO_COMPACT_MIN_CONTEXT_PCT,
-    AUTO_COMPACT_TZ,
-    AUTO_COMPACT_WINDOW_END,
-    AUTO_COMPACT_WINDOW_START,
     PHOTO_CAPTION_WAIT_SEC,
     RUNTIME_MODELS,
     STRINGS,
@@ -38,31 +32,6 @@ HANDOFF_MESSAGE_CHARS = 2_000
 HANDOFF_MAX_CHARS = 24_000
 HANDOFF_TIMEOUT_SECONDS = 10
 SWITCH_CLEANUP_TIMEOUT_SECONDS = 10
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _is_auto_compact_night(now_utc: datetime) -> bool:
-    local_time = now_utc.astimezone(AUTO_COMPACT_TZ).time().replace(tzinfo=None)
-    return (
-        local_time >= AUTO_COMPACT_WINDOW_START
-        or local_time < AUTO_COMPACT_WINDOW_END
-    )
-
-
-def _seconds_until_night(now_utc: datetime) -> float:
-    local = now_utc.astimezone(AUTO_COMPACT_TZ)
-    if _is_auto_compact_night(now_utc):
-        return 0.0
-    target = datetime.combine(
-        local.date(),
-        AUTO_COMPACT_WINDOW_START,
-        tzinfo=AUTO_COMPACT_TZ,
-    )
-    return max(0.0, (target.astimezone(timezone.utc) - now_utc).total_seconds())
-
 
 class ChatPhase(StrEnum):
     IDLE = "idle"
@@ -138,10 +107,8 @@ class ChatState:
         self.media_generation: int = 0
         self._debounce_task: asyncio.Task | None = None
         self._processing_task: asyncio.Task | None = None
-        self._auto_compact_task: asyncio.Task | None = None
         self._runtime_switch_task: asyncio.Task | None = None
         self._compact_started: bool = False
-        self._context_reserve_blocked: bool = False
         self._runtime_cleanup_tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._shutdown: bool = False
@@ -158,7 +125,6 @@ class ChatState:
 
     async def accept_entry(self, entry: PendingEntry) -> None:
         """Durably admit an entry, deferring every arrival during an active turn."""
-        self._cancel_auto_compact()
         self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
@@ -219,13 +185,8 @@ class ChatState:
             logger.warning(f"Chat {self.chat_id}: verbatim tail unavailable: {exc}")
             return []
 
-    async def mark_context_reserve_blocked(self) -> None:
-        async with self._lock:
-            self._context_reserve_blocked = True
-
     async def media_started(self) -> tuple[int, int]:
         """Persist activity before starting asynchronous media work."""
-        self._cancel_auto_compact()
         self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
@@ -297,7 +258,6 @@ class ChatState:
 
     async def request_clear(self) -> bool:
         """Clear session. Rejected during PROCESSING/COMPACTING/STOPPING. Returns True if cleared."""
-        self._cancel_auto_compact()
         self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown: return False
@@ -332,7 +292,6 @@ class ChatState:
             )
         else:
             await self.session.reset_async()
-        self._context_reserve_blocked = False
         try:
             self._activity_store.finish_activity(self.chat_id)
         except ActivityPersistenceError as exc:
@@ -464,7 +423,6 @@ class ChatState:
         except Exception as exc:
             logger.warning(f"Chat {self.chat_id}: bridge revoke failed: {exc}")
 
-        self._context_reserve_blocked = False
         try:
             await self._drain_or_idle(record_activity=False)
         finally:
@@ -658,7 +616,6 @@ class ChatState:
     async def request_compact(self, automatic: bool = False) -> bool:
         """Request compaction; deferred requests preserve manual-over-automatic provenance."""
         if not automatic:
-            self._cancel_auto_compact()
             self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
@@ -702,7 +659,6 @@ class ChatState:
 
     async def run_urgent_prompt(self, prompt: str) -> None:
         """Run an urgent reminder now when idle, otherwise defer it safely."""
-        self._cancel_auto_compact()
         self._activity_store.begin_activity(self.chat_id)
         entry = PendingEntry(
             prompt=prompt,
@@ -822,161 +778,71 @@ class ChatState:
         """Kick off _run_batch as a tracked task."""
         self._processing_task = asyncio.create_task(self._run_batch(batch))
 
-    def _cancel_auto_compact(self) -> None:
-        if self.phase == ChatPhase.COMPACTING and self._compact_started:
-            return
-        task = self._auto_compact_task
-        if task and not task.done() and task is not asyncio.current_task():
-            task.cancel()
-        self._auto_compact_task = None
-
-    def _arm_auto_compact(self) -> None:
-        self._cancel_auto_compact()
-        if self._shutdown or not self.session.session_id:
-            return
-        if self._native_compact:
-            # The preventive timer (#14) fires after 55 min idle to compact
-            # while the prompt cache is still warm — calibrated against Claude's
-            # 60-minute cache TTL. Codex's TTL is ~30 min with a 10x cold
-            # penalty, and precompacting there DESTROYS the cache key
-            # (measured in Orchestra, docs: "precompact only for Claude"), so
-            # the timer would pay the cost and get none of the benefit.
-            # Disabled deliberately, not by omission; manual /compact still works.
-            logger.debug(
-                f"Chat {self.chat_id}: preventive compact timer off "
-                f"({self.runtime_id} compacts natively)"
-            )
-            return
-        try:
-            row = self._activity_store.get_activity(self.chat_id)
-        except Exception as exc:
-            logger.error(f"Chat {self.chat_id}: activity read failed: {exc}")
-            return
-        if (
-            not row
-            or not row["quiescent"]
-            or row["auto_attempted_for_utc"] == row["last_activity_utc"]
-        ):
-            return
-        self._auto_compact_task = asyncio.create_task(
-            self._run_auto_compact_scheduler()
+    async def _check_batch_context(self, combined: str) -> dict:
+        """Measure once, rebuilding one unhealthy runtime before giving up."""
+        result = await self.session.check_context_reserve(combined)
+        if result.get("reason") != "runtime_unhealthy":
+            return result
+        # The failed probe already dropped the wedged client while preserving
+        # its durable session id. One new measurement is safe because no user
+        # query or message-log write has happened yet.
+        logger.warning(
+            "Chat %s: runtime unhealthy, retrying the batch once",
+            self.chat_id,
         )
+        return await self.session.check_context_reserve(combined)
 
-    async def _run_auto_compact_scheduler(self) -> None:
-        try:
-            while not self._shutdown:
-                row = self._activity_store.get_activity(self.chat_id)
-                if (
-                    not row
-                    or not row["quiescent"]
-                    or row["auto_attempted_for_utc"] == row["last_activity_utc"]
-                ):
-                    return
-                last_activity = datetime.fromisoformat(row["last_activity_utc"])
-                now = _utc_now()
-                idle_delay = (
-                    last_activity + AUTO_COMPACT_IDLE - now
-                ).total_seconds()
-                delay = max(0.0, idle_delay)
-                if delay == 0 and not _is_auto_compact_night(now):
-                    delay = _seconds_until_night(now)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                    continue
-                await self._reserve_automatic_probe(row["last_activity_utc"])
-                return
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.error(
-                f"Chat {self.chat_id}: auto-compact scheduler failed: {exc}",
-                exc_info=True,
-            )
-        finally:
-            if self._auto_compact_task is asyncio.current_task():
-                self._auto_compact_task = None
+    async def _reject_batch_for_context(
+        self,
+        batch: list[PendingEntry],
+        result: dict,
+    ) -> None:
+        reason = result.get("reason")
+        fmt = {}
+        if reason == "reserve":
+            key = "context_auto_compact_failed"
+        elif reason == "session_unavailable":
+            key = "session_unavailable"
+        elif reason == "usage_limit":
+            key = "context_usage_limit"
+            fmt = await self._limit_fmt(batch[-1].message)
+        elif reason == "runtime_invariant":
+            key = "context_runtime_invariant"
+            fmt = {"expected": result.get("expected_model", "?")}
+        elif reason == "runtime_unhealthy":
+            key = "context_runtime_unhealthy"
+        else:
+            key = "context_unknown"
+        logger.warning(
+            "Chat %s: batch rejected before query (%s)",
+            self.chat_id,
+            reason,
+        )
+        await self._send_batch_terminal(batch, key, **fmt)
 
-    async def _reserve_automatic_probe(self, last_activity_utc: str) -> None:
+    async def _compact_admitted_batch(self, batch: list[PendingEntry]) -> dict:
+        """Run one compact while the caller retains ownership of `batch`."""
         async with self._lock:
-            row = self._activity_store.get_activity(self.chat_id)
-            eligible = (
-                row
-                and row["last_activity_utc"] == last_activity_utc
-                and row["quiescent"]
-                and row["auto_attempted_for_utc"] is None
-                and self.phase == ChatPhase.IDLE
-                and not self.pending
-                and not self.deferred
-                and self.pending_transcriptions == 0
-                and not self.compact_requested
-                and _is_auto_compact_night(_utc_now())
-                and not getattr(self.session, "usage_limit_active", False)
-            )
-            if not eligible:
-                return
-            if not self._activity_store.claim_auto_attempt(
-                self.chat_id, last_activity_utc
-            ):
-                return
-            self.compact_requested = True
-            self.compact_requested_automatic = True
-            self._compact_started = False
             self.phase = ChatPhase.COMPACTING
-
+            self._compact_started = True
         try:
-            usage = await self.session.get_context_usage(
-                refresh=True,
-                preserve_session=True,
-            )
+            return await self._compact_once(automatic=True)
         except asyncio.CancelledError:
-            async with self._lock:
-                if self.compact_requested_automatic:
-                    self.compact_requested = False
-                    self.compact_requested_automatic = False
-            await asyncio.shield(self._drain_or_idle(record_activity=False))
             raise
         except Exception as exc:
-            logger.error(f"Chat {self.chat_id}: context probe failed: {exc}")
-            usage = None
-        pct = usage.get("percentage") if usage else None
-
-        start_compact = False
-        automatic = True
-        async with self._lock:
-            row = self._activity_store.get_activity(self.chat_id)
-            manual = self.compact_requested and not self.compact_requested_automatic
-            runtime_work = bool(
-                self.pending
-                or self.deferred
-                or self.pending_transcriptions
+            logger.error(
+                "Chat %s: admission compact failed: %s",
+                self.chat_id,
+                exc,
+                exc_info=True,
             )
-            activity_changed = bool(
-                not row
-                or not row["quiescent"]
-                or row["last_activity_utc"] != last_activity_utc
-            )
-            automatic_eligible = (
-                not runtime_work
-                and not activity_changed
-                and _is_auto_compact_night(_utc_now())
-                and not getattr(self.session, "usage_limit_active", False)
-                and pct is not None
-                and pct >= AUTO_COMPACT_MIN_CONTEXT_PCT
-            )
-            if manual and not runtime_work:
-                start_compact = True
-                automatic = False
-            elif automatic_eligible:
-                start_compact = True
-            elif not manual:
-                self.compact_requested = False
-                self.compact_requested_automatic = False
-
-        if start_compact:
-            self._compact_started = True
-            await self._do_compact(automatic=automatic)
-        else:
-            await self._drain_or_idle(record_activity=False)
+            await self._send_batch_terminal(batch, "context_auto_compact_failed")
+            return {"ok": False, "reason": "exception"}
+        finally:
+            async with self._lock:
+                self._compact_started = False
+                if self.phase == ChatPhase.COMPACTING:
+                    self.phase = ChatPhase.PROCESSING
 
     async def _run_batch(self, batch: list[PendingEntry]) -> None:
         """Main processing loop. Runs OUTSIDE lock — lock acquired only for phase transitions."""
@@ -1017,50 +883,44 @@ class ChatState:
             except Exception as e:
                 logger.error(f"Chat {self.chat_id}: lazy reminder injection failed: {e}")
 
-            if self._context_reserve_blocked:
-                reserve = {"ok": False, "reason": "reserve"}
-            else:
-                reserve = await self.session.check_context_reserve(combined)
-                if reserve.get("reason") == "runtime_unhealthy":
-                    # The probe found a runtime that stopped answering and
-                    # reconnect() already dropped that client, so the retry
-                    # builds a fresh CLI process — there is nothing to wait for
-                    # and no delay helps (measured: docs/tasks/25 F2).
-                    # Safe because the reject happens BEFORE log_user/_ask_fn:
-                    # nothing was sent, logged, or marked delivered (F1).
-                    # Only this reason: retrying `reserve` would hammer a
-                    # context we just measured as full, and `usage_limit` must
-                    # never be retried.
+            reserve = await self._check_batch_context(combined)
+            if not reserve.get("ok"):
+                await self._reject_batch_for_context(batch, reserve)
+                return
+            if reserve.get("should_compact"):
+                compact_result = await self._compact_admitted_batch(batch)
+                if compact_result.get("ok"):
+                    reserve = await self._check_batch_context(combined)
+                    if not reserve.get("ok"):
+                        await self._reject_batch_for_context(batch, reserve)
+                        return
+                    if reserve.get("should_compact"):
+                        logger.warning(
+                            "Chat %s: context still high after one compact",
+                            self.chat_id,
+                        )
+                        await self._send_batch_terminal(
+                            batch,
+                            "context_auto_compact_failed",
+                        )
+                        return
+                elif compact_result.get("reason") == "usage_limit":
+                    # The one failure that never reached the user: the limit is
+                    # checked before any notifier runs, so returning here drops
+                    # the batch in silence. Worse, the latch only clears on a
+                    # successful turn — refusing at the trigger would keep it
+                    # set after the quota returns and wedge the chat exactly
+                    # like the reserve gate did. Send: the provider owns the
+                    # authoritative limit verdict and its terminal message.
                     logger.warning(
-                        "Chat %s: runtime unhealthy, retrying the batch once",
+                        "Chat %s: admission compact skipped (usage limit), "
+                        "sending anyway",
                         self.chat_id,
                     )
-                    reserve = await self.session.check_context_reserve(combined)
-            if not reserve.get("ok"):
-                reason = reserve.get("reason")
-                fmt = {}
-                if reason == "reserve":
-                    await self.mark_context_reserve_blocked()
-                    key = "context_reserve"
-                elif reason == "session_unavailable":
-                    key = "session_unavailable"
-                elif reason == "usage_limit":
-                    key = "context_usage_limit"
-                    fmt = await self._limit_fmt(batch[-1].message)
-                elif reason == "runtime_invariant":
-                    key = "context_runtime_invariant"
-                    fmt = {"expected": reserve.get("expected_model", "?")}
-                elif reason == "runtime_unhealthy":
-                    key = "context_runtime_unhealthy"
                 else:
-                    key = "context_unknown"
-                logger.warning(
-                    "Chat %s: batch rejected before query (%s)",
-                    self.chat_id,
-                    reason,
-                )
-                await self._send_batch_terminal(batch, key, **fmt)
-                return
+                    # Every other failure already surfaced its own bounded
+                    # terminal through the compact notifier.
+                    return
 
             previews = []
             for e in batch:
@@ -1177,8 +1037,8 @@ class ChatState:
         lies here fails at construction (runtime_registry checks capabilities
         against the registry).
         """
-        caps = getattr(type(self.session), "CAPABILITIES", None)
-        return bool(getattr(caps, "native_compact", False))
+        caps = getattr(self.session, "CAPABILITIES", None)
+        return getattr(caps, "native_compact", False) is True
 
     async def _do_native_compact(self) -> dict:
         """Compaction owned by the runtime (Codex `thread/compact/start`).
@@ -1230,6 +1090,21 @@ class ChatState:
         return {"ok": True, "before_pct": before_pct, "after_pct": after_pct,
                 "native": True, "measured_after": measured_after}
 
+    async def _compact_once(self, automatic: bool) -> dict:
+        """Run one runtime-specific compact without changing chat ownership."""
+        if automatic and getattr(self.session, "usage_limit_active", False):
+            logger.info(
+                f"Chat {self.chat_id}: automatic compact skipped (usage limit)"
+            )
+            return {"ok": False, "reason": "usage_limit"}
+        if self._native_compact:
+            return await self._do_native_compact()
+        return await self._compact_session_fn(
+            self.session,
+            notify=self._make_compact_notifier(),
+            recent_rows=self._recent_user_rows(),
+        )
+
     async def _do_compact(self, automatic: bool = False) -> None:
         """Execute one custom compact request outside the state lock."""
         result = None
@@ -1266,17 +1141,8 @@ class ChatState:
                         parse_mode=None,
                     )
                     return
-            if self._native_compact:
-                result = await self._do_native_compact()
-            else:
-                result = await self._compact_session_fn(
-                    self.session,
-                    notify=self._make_compact_notifier(),
-                    recent_rows=self._recent_user_rows(),
-                )
+            result = await self._compact_once(automatic=automatic)
             if result and result.get("ok"):
-                async with self._lock:
-                    self._context_reserve_blocked = False
                 if result.get("after_pct") is None:
                     logger.info(
                         f"Chat {self.chat_id}: compact ok, "
@@ -1300,7 +1166,6 @@ class ChatState:
     async def _drain_or_idle(self, *, record_activity: bool = True) -> None:
         """Atomically: if deferred exists → PROCESSING + drain, else → IDLE. No IDLE window."""
         merged: list[PendingEntry] | None = None
-        arm_auto = False
         async with self._lock:
             if self._shutdown:
                 self.phase = ChatPhase.IDLE
@@ -1336,11 +1201,8 @@ class ChatState:
                 prev = self.phase
                 self.phase = ChatPhase.IDLE
                 logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [idle]")
-                arm_auto = record_activity
         if merged:
             await self._start_processing(merged)
-        elif arm_auto:
-            self._arm_auto_compact()
 
 
 
@@ -1481,15 +1343,6 @@ class ChatRegistry:
             )
         return self._chats[chat_id]
 
-    async def start_auto_compact(self) -> None:
-        """Restore one scheduler per durable quiescent chat after a process restart."""
-        for chat_id in self._activity_store.list_quiescent_chat_ids():
-            runtime_id = self._activity_store.get_runtime(chat_id) or self._runtime
-            session_file = self._session_file(runtime_id, chat_id)
-            if not session_file.exists() or not session_file.read_text().strip():
-                continue
-            self.get(chat_id)._arm_auto_compact()
-
     async def shutdown(self) -> None:
         tasks = []
         for chat in self._chats.values():
@@ -1500,9 +1353,6 @@ class ChatRegistry:
             if chat._processing_task and not chat._processing_task.done():
                 chat._processing_task.cancel()
                 tasks.append(chat._processing_task)
-            if chat._auto_compact_task and not chat._auto_compact_task.done():
-                chat._auto_compact_task.cancel()
-                tasks.append(chat._auto_compact_task)
             if chat._runtime_switch_task and not chat._runtime_switch_task.done():
                 chat._runtime_switch_task.cancel()
                 tasks.append(chat._runtime_switch_task)

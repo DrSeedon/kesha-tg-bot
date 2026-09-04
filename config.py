@@ -3,10 +3,9 @@
 import logging
 import os
 import sys
-from datetime import datetime, time as dt_time, timezone, timedelta
+from datetime import datetime, timezone, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from aiogram import types
 from dotenv import load_dotenv
@@ -32,11 +31,8 @@ DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 # Фото без подписи почти всегда ждёт следом голосовое (в фото войс не вложить) —
 # держим батч дольше обычного дебаунса, чтобы подпись уехала тем же ходом.
 PHOTO_CAPTION_WAIT_SEC = int(os.getenv("PHOTO_CAPTION_WAIT_SEC", "10"))
-AUTO_COMPACT_TZ = ZoneInfo("Asia/Krasnoyarsk")
-AUTO_COMPACT_WINDOW_START = dt_time(23, 0)
-AUTO_COMPACT_WINDOW_END = dt_time(8, 0)
-AUTO_COMPACT_IDLE = timedelta(minutes=55)
-AUTO_COMPACT_MIN_CONTEXT_PCT = 20.0
+AUTO_COMPACT_TRIGGER_PCT = 92.0
+CODEX_AUTO_COMPACT_TRIGGER_PCT = 90.0
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
@@ -104,8 +100,8 @@ STRINGS = {
         "reconnecting": "⚠️ Переподключаюсь... (попытка {n})",
         "error_retry": "⚠️ Ошибка, перезапуск сессии (попытка {n})...",
         "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.\n📊 Все окна: /limits",
-        "context_limit": "🧠 Контекст заполнен. Отправь /compact, чтобы продолжить без очистки.",
-        "context_reserve": "🧠 Контекст почти заполнен. Отправь /compact, затем повтори сообщение.",
+        "context_limit": "🧠 Провайдер отклонил уже отправленный запрос из-за заполненного контекста. Кеша не запускает его снова, чтобы не дублировать действия.",
+        "context_auto_compact_failed": "⚠️ Автоматически освободить контекст не удалось. Сообщение не отправлено.",
         "context_unknown": "⚠️ Не удалось проверить свободный контекст. Повтори сообщение чуть позже.",
         "context_usage_limit": "🚧 Упёрлись в лимит подписки {runtime}{reset}. Подожди сброса и повтори — контекст тут ни при чём.\n📊 Все окна: /limits",
         "context_runtime_invariant": "⚠️ Рантайм не совпал с ожидаемой конфигурацией (ждём {expected}: 1M контекст, 64k вывода, авто-компакт выключен). Сообщение не отправлено — проверь конфиг.",
@@ -181,8 +177,8 @@ STRINGS = {
         "reconnecting": "⚠️ Reconnecting... (attempt {n})",
         "error_retry": "⚠️ Error, restarting session (attempt {n})...",
         "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.\n📊 All windows: /limits",
-        "context_limit": "🧠 Context is full. Send /compact to continue without clearing it.",
-        "context_reserve": "🧠 Context is almost full. Send /compact, then resend your message.",
+        "context_limit": "🧠 The provider rejected the submitted request because its context was full. Automatic replay is disabled to avoid duplicate actions.",
+        "context_auto_compact_failed": "⚠️ Automatic context compaction could not safely free enough space. The message was not sent.",
         "context_unknown": "⚠️ Could not verify free context. Please resend the message shortly.",
         "context_usage_limit": "🚧 Hit the {runtime} subscription limit{reset}. Wait for the reset and resend — this is not a context problem.\n📊 All windows: /limits",
         "context_runtime_invariant": "⚠️ The runtime did not match the expected configuration (want {expected}: 1M context, 64k output, auto-compact off). Message not sent — check the config.",

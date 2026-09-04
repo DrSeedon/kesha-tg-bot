@@ -329,7 +329,7 @@ def test_runtime_label_falls_back_when_the_registry_cannot_answer():
     assert response_stream._runtime_label(7) == ""
 
 
-# ---------- the pre-turn reserve path (chat_state) ----------
+# ---------- the pre-turn context path (chat_state) ----------
 
 
 def _chat_with(session, runtime_id="codex"):
@@ -358,7 +358,7 @@ def _chat_with(session, runtime_id="codex"):
 
 
 @pytest.mark.asyncio
-async def test_reserve_rejection_names_the_runtime_and_its_reset():
+async def test_context_preflight_rejection_names_the_runtime_and_its_reset():
     """The pre-turn reserve path had the same hardcoded 'Claude' as the stream.
 
     Drives the real rejection through _run_batch so that removing the
@@ -385,7 +385,7 @@ async def test_reserve_rejection_names_the_runtime_and_its_reset():
 
 
 @pytest.mark.asyncio
-async def test_reserve_rejection_omits_a_reset_it_does_not_know():
+async def test_context_preflight_rejection_omits_a_reset_it_does_not_know():
     chat = _chat_with(LimitedCodexSession(quota=False), runtime_id="codex")
     fmt = await chat._limit_fmt()
 
@@ -395,7 +395,7 @@ async def test_reserve_rejection_omits_a_reset_it_does_not_know():
 
 
 @pytest.mark.asyncio
-async def test_reserve_rejection_still_names_claude_on_the_default_runtime():
+async def test_context_preflight_rejection_still_names_claude_on_the_default_runtime():
     class Bare:
         pass
 
@@ -413,7 +413,7 @@ def test_no_user_facing_string_hardcodes_a_provider_on_a_shared_path():
     """
     shared_keys = (
         "session_limit", "context_usage_limit", "context_limit",
-        "context_reserve", "context_unknown", "session_unavailable",
+        "context_auto_compact_failed", "context_unknown", "session_unavailable",
         "compact_floor",
     )
     for lang in ("ru", "en"):
@@ -532,35 +532,12 @@ async def test_runtime_unhealthy_twice_refuses_once_and_stops():
 
 
 @pytest.mark.asyncio
-async def test_retry_reports_the_reason_the_retry_actually_returned():
-    """Fail-closed #14: if the retry measures a full context, say `reserve`."""
-    from config import STRINGS
-
-    session = ProbeSession([
-        {"ok": False, "reason": "runtime_unhealthy"},
-        {"ok": False, "reason": "reserve"},
-    ])
-    chat = _chat_with(session, runtime_id="claude")
-    chat._activity_store.finish_activity = lambda *a, **kw: ""
-
-    await chat._run_batch([_entry()])
-
-    text = " ".join(t for _, t in chat.bot.sent)
-    assert text == STRINGS["ru"]["context_reserve"], text
-    assert chat._context_reserve_blocked is True, "reserve latch not set on retry"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reason",
-    ["reserve", "usage_limit", "runtime_invariant", "session_unavailable", "unknown"],
+    ["usage_limit", "runtime_invariant", "session_unavailable", "unknown"],
 )
 async def test_other_reasons_are_never_retried(reason):
-    """Retrying a full context or an exhausted quota is forbidden.
-
-    `reserve` would hammer a context we just measured as full (against #14);
-    `usage_limit` would retry a quota error the project rule says to wait out.
-    """
+    """Quota, invariant, unavailable-session and unknown are never retried."""
     session = ProbeSession([{"ok": False, "reason": reason}])
     chat = _chat_with(session, runtime_id="claude")
     chat._activity_store.finish_activity = lambda *a, **kw: ""
@@ -568,18 +545,4 @@ async def test_other_reasons_are_never_retried(reason):
     await chat._run_batch([_entry()])
 
     assert session.calls == 1, f"{reason} must not be retried"
-    assert len(chat.bot.sent) == 1
-
-
-@pytest.mark.asyncio
-async def test_reserve_latch_short_circuit_does_not_trigger_a_retry():
-    """`_context_reserve_blocked` skips the session entirely — it is `reserve`."""
-    session = ProbeSession([{"ok": True, "reason": None}])
-    chat = _chat_with(session, runtime_id="claude")
-    chat._activity_store.finish_activity = lambda *a, **kw: ""
-    await chat.mark_context_reserve_blocked()
-
-    await chat._run_batch([_entry()])
-
-    assert session.calls == 0, "latched chat must not probe at all"
     assert len(chat.bot.sent) == 1

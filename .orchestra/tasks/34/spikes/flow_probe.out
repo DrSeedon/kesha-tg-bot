@@ -1,0 +1,8 @@
+Chat 7: batch rejected before query (reserve)
+claude_79pct remaining=210000 required_2000=210000 admit_2000=True required_2001=210001 admit_2001=False queries=0
+codex_stale_gauge pct=91.4 blocked_reason=reserve after_verified_compact_unknown_admits=True remaining_is_none=True
+current_rejection reserve_calls=1 ask_calls=0 user_log_calls=0 terminal_notices=1 latched=True pending=0 deferred=0 phase=idle
+nested_current_do_compact deferred_dispatched=[['LATER']] phase=processing outer_original_not_owned_by_helper=True
+candidate_success claude-replacement events=['measure:ORIGINAL-34', 'compact:claude-replacement', 'measure:ORIGINAL-34', 'send:ORIGINAL-34'] sent_exactly_once=True same_object_retained_until_send=True
+candidate_success codex-native events=['measure:ORIGINAL-34', 'compact:codex-native', 'measure:ORIGINAL-34', 'send:ORIGINAL-34'] sent_exactly_once=True same_object_retained_until_send=True
+candidate_failure events=['measure:ORIGINAL-FAIL', 'compact:claude-replacement'] sent=False same_batch_retained=True compact_attempts=1

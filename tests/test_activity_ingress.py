@@ -260,7 +260,7 @@ async def test_runtime_invariant_message_renders_without_keyerror():
 
 
 @pytest.mark.asyncio
-async def test_plain_terminal_keys_still_render():
+async def test_t3_plain_terminal_keys_still_render():
     """Keys without placeholders must survive the shared format path."""
     from types import SimpleNamespace
 
@@ -290,7 +290,7 @@ async def test_plain_terminal_keys_still_render():
     entry = PendingEntry(prompt="x", message_id=1, message=Msg())
 
     for key in (
-        "context_reserve",
+        "context_auto_compact_failed",
         "context_unknown",
         "context_usage_limit",
         "context_runtime_unhealthy",
@@ -300,7 +300,7 @@ async def test_plain_terminal_keys_still_render():
     assert len(sent) == 4
 
 
-def test_every_reserve_reason_has_strings_in_both_languages():
+def test_t3_every_context_preflight_reason_has_strings_in_both_languages():
     """#14 shipped a KeyError by adding a reason and updating only one path.
 
     Every reason `check_context_reserve` can return must map to a key that
@@ -309,7 +309,7 @@ def test_every_reserve_reason_has_strings_in_both_languages():
     from config import STRINGS
 
     keys = {
-        "context_reserve",
+        "context_auto_compact_failed",
         "context_unknown",
         "context_usage_limit",
         "context_runtime_invariant",

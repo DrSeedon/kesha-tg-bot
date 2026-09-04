@@ -62,7 +62,10 @@ class ChatRuntime(Protocol):
         *,
         manual: bool = False,
     ) -> dict:
-        """Fail closed unless there is proven headroom. Called before EVERY turn."""
+        """Report health and projected compact pressure before every turn.
+
+        With ``manual=True``, enforce the runtime's explicit compact floor.
+        """
         ...
 
     async def get_context_usage(

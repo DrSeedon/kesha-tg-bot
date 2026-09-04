@@ -1313,34 +1313,37 @@ def test_reasoning_items_do_not_leak_into_the_answer(tmp_path):
     assert not any("secret" in json.dumps(c, ensure_ascii=False) for c in chunks)
 
 
-# ---------- context reserve ----------
+# ---------- context pressure / manual compact floor ----------
 
 
-def test_reserve_is_open_but_honest_before_any_turn(tmp_path, monkeypatch):
+def test_context_pressure_is_open_but_honest_before_any_turn(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     monkeypatch.setattr(session, "_connect", _noop_async)
     result = asyncio.run(session.check_context_reserve("hi"))
     assert result["ok"] is True
+    assert result["should_compact"] is False
     # Must not claim a verified headroom it never measured.
     assert result["remaining"] is None
 
 
-def test_reserve_blocks_when_context_is_nearly_full(tmp_path, monkeypatch):
+def test_context_pressure_requests_compact_when_nearly_full(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     monkeypatch.setattr(session, "_connect", _noop_async)
     session._context_window = DEFAULT_CONTEXT_WINDOW
     session._context_tokens = DEFAULT_CONTEXT_WINDOW - 100
     result = asyncio.run(session.check_context_reserve("hello"))
-    assert result["ok"] is False
-    assert result["reason"] == "reserve"
+    assert result["ok"] is True
+    assert result["reason"] is None
+    assert result["should_compact"] is True
 
 
-def test_reserve_admits_a_roomy_thread(tmp_path, monkeypatch):
+def test_context_pressure_admits_a_roomy_thread(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     monkeypatch.setattr(session, "_connect", _noop_async)
     session._context_tokens = 18_676
     result = asyncio.run(session.check_context_reserve("hello"))
     assert result["ok"] is True
+    assert result["should_compact"] is False
     assert result["remaining"] == DEFAULT_CONTEXT_WINDOW - 18_676
 
 
@@ -1358,9 +1361,12 @@ def test_reserve_reports_session_unavailable(tmp_path, monkeypatch):
 def test_manual_compact_uses_the_lower_floor(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     monkeypatch.setattr(session, "_connect", _noop_async)
-    normal = asyncio.run(session.check_context_reserve("x" * 1000))["required"]
+    session._context_tokens = DEFAULT_CONTEXT_WINDOW - 100
+    normal = asyncio.run(session.check_context_reserve("x" * 1000))
     manual = asyncio.run(session.check_context_reserve(manual=True))["required"]
-    assert manual < normal
+    assert normal["ok"] is True
+    assert normal["should_compact"] is True
+    assert manual == 12_000
 
 
 async def _noop_async(*args, **kwargs):

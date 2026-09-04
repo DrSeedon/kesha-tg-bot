@@ -25,7 +25,7 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 
-from config import MODEL
+from config import AUTO_COMPACT_TRIGGER_PCT, MODEL
 from quota_gate import claude_windows, fetch_claude_usage, quota_exhausted
 from runtime_protocol import RuntimeCapabilities
 
@@ -78,7 +78,6 @@ EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
 MANUAL_COMPACT_FLOOR_TOKENS = 80_000
-NORMAL_TURN_RESERVE_TOKENS = 208_000
 # Read can repeat an image's base64 twice in one NDJSON result. At Telegram's
 # 20 MiB download ceiling that is ~53.4 MiB before JSON overhead.
 CLAUDE_MAX_BUFFER_SIZE = 64 * 1024 * 1024
@@ -725,11 +724,11 @@ class ClaudeSession:
         *,
         manual: bool = False,
     ) -> dict:
-        """Fail closed unless a fresh control response proves enough headroom."""
+        """Measure context pressure; manual mode retains the compact floor gate."""
         required = (
             MANUAL_COMPACT_FLOOR_TOKENS
             if manual
-            else NORMAL_TURN_RESERVE_TOKENS + len(combined.encode("utf-8"))
+            else 0
         )
         try:
             await self._ensure_connected(preserve_session=True)
@@ -825,6 +824,19 @@ class ClaudeSession:
             }
 
         remaining = maximum - total
+        if not manual:
+            projected = total + len(combined.encode("utf-8"))
+            trigger_tokens = int(raw_maximum * AUTO_COMPACT_TRIGGER_PCT / 100)
+            return {
+                "ok": True,
+                "reason": None,
+                "should_compact": projected >= trigger_tokens,
+                "projected_tokens": projected,
+                "max_tokens": raw_maximum,
+                "remaining": remaining,
+                "required": required,
+                "usage": usage,
+            }
         return {
             "ok": remaining >= required,
             "reason": None if remaining >= required else "reserve",

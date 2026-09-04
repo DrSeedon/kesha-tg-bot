@@ -415,15 +415,11 @@ async def _ask_inner(message, prompt, cid, typer):
 
     async def _handle_context_limit(
         key: str = "context_limit",
-        *,
-        latch: bool = True,
         **fmt,
     ) -> None:
         nonlocal parts, has_deltas, current_msg_id, last_edit_time
         nonlocal last_edit_text, terminal_handled
 
-        if latch:
-            await _registry.get(cid).mark_context_reserve_blocked()
         notice = (
             _t_cfg(message, key, **fmt)
             if message is not None
@@ -476,7 +472,7 @@ async def _ask_inner(message, prompt, cid, typer):
                 reason = reserve.get("reason")
                 fmt = {}
                 if reason == "reserve":
-                    key = "context_reserve"
+                    key = "context_auto_compact_failed"
                 elif reason == "session_unavailable":
                     key = "session_unavailable"
                 elif reason == "runtime_invariant":
@@ -491,11 +487,14 @@ async def _ask_inner(message, prompt, cid, typer):
                     cid,
                     reason,
                 )
-                await _handle_context_limit(
-                    key,
-                    latch=reason == "reserve",
-                    **fmt,
+                await _handle_context_limit(key, **fmt)
+                break
+            if reserve.get("should_compact"):
+                logger.warning(
+                    "Chat %s: retry stopped at automatic compact boundary",
+                    cid,
                 )
+                await _handle_context_limit("context_auto_compact_failed")
                 break
             if message is not None:
                 await _send_safe(
@@ -600,7 +599,6 @@ async def _ask_inner(message, prompt, cid, typer):
                         )
                         await _handle_context_limit(
                             "session_unavailable",
-                            latch=False,
                         )
                         break
                     if "session" in err.lower() or "process" in err.lower():

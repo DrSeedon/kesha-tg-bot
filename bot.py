@@ -167,8 +167,6 @@ async def main():
     _rs.set_registry(registry)
     _handlers.set_registry(registry)
     _handlers.set_uptime_fn(uptime_str)
-    await registry.start_auto_compact()
-
     # Register all handlers
     _handlers.register(dp)
 

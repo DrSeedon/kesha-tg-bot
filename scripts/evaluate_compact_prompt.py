@@ -16,17 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from claude_session import (
-    ClaudeSession,
-    EXPECTED_CONTEXT_TOKENS,
-    NORMAL_TURN_RESERVE_TOKENS,
-)
-from compact import (
-    COMPACT_PROMPT,
-    CONTINUATION_PREAMBLE,
-    _collect_summary,
-    compact_session,
-)
+from claude_session import ClaudeSession
+from compact import COMPACT_PROMPT, _collect_summary
 from compact_summary_scorer import load_cases, render_case, score_case
 
 
@@ -139,130 +130,6 @@ async def normal_generation(case: dict, root: Path) -> tuple[str, str | None]:
         await disconnect(session)
 
 
-async def reserve_recovery_generation(
-    case: dict,
-    root: Path,
-) -> tuple[str, str | None, dict[str, bool | str]]:
-    evidence: dict[str, bool | str] = {
-        "reserve_rejected_without_query": False,
-        "manual_floor_admitted": False,
-        "candidate_sid_changed": False,
-        "candidate_resumed": False,
-    }
-    session = EvaluationSession(
-        cwd=str(root),
-        model=MODEL,
-        system_prompt=system_prompt(case),
-        session_file=root / ".session",
-        evaluation_tools=[],
-    )
-    try:
-        source_ready = []
-        async for chunk in session.send_message(
-            "Reply with exactly SOURCE_READY and nothing else."
-        ):
-            if chunk.get("type") in {"text", "text_delta"}:
-                source_ready.append(str(chunk.get("content") or ""))
-            elif chunk.get("type") == "error":
-                content = str(chunk.get("content") or "")
-                return "", (
-                    "transient_overloaded"
-                    if is_transient_overload(content)
-                    else "source_session_error"
-                ), evidence
-        if "SOURCE_READY" not in "".join(source_ready) or not session.session_id:
-            return "", "source_session_missing", evidence
-
-        client = session._client
-        real_get_usage = client.get_context_usage
-        real_query = client.query
-        real_usage = await real_get_usage()
-        if not isinstance(real_usage, dict):
-            return "", "missing_authoritative_usage", evidence
-
-        admitted_prompt = "reserve recovery candidate"
-        required = NORMAL_TURN_RESERVE_TOKENS + len(
-            admitted_prompt.encode("utf-8")
-        )
-        synthetic_usage = dict(real_usage)
-        synthetic_usage["totalTokens"] = (
-            EXPECTED_CONTEXT_TOKENS - required + 1
-        )
-        query_calls = 0
-
-        async def counted_query(text):
-            nonlocal query_calls
-            query_calls += 1
-            return await real_query(text)
-
-        async def reserved_usage():
-            return synthetic_usage
-
-        client.query = counted_query
-        client.get_context_usage = reserved_usage
-        try:
-            reserve = await session.check_context_reserve(admitted_prompt)
-        finally:
-            client.query = real_query
-            client.get_context_usage = real_get_usage
-        if reserve.get("ok") or reserve.get("reason") != "reserve":
-            return "", "reserve_rejection_missing", evidence
-        if query_calls:
-            return "", "reserve_rejection_queried", evidence
-        evidence["reserve_rejected_without_query"] = True
-
-        manual = await session.check_context_reserve(manual=True)
-        if not manual.get("ok"):
-            return (
-                "",
-                f"manual_floor_{manual.get('reason') or 'failed'}",
-                evidence,
-            )
-        evidence["manual_floor_admitted"] = True
-
-        source_sid = session.session_id
-        evidence["source_sid_sha256"] = digest(source_sid)
-        result = await compact_session(session)
-        if not result.get("ok"):
-            return "", str(result.get("reason") or "recovery_failed"), evidence
-        preamble = next(
-            (
-                text
-                for text in session.sent_prompts
-                if text.startswith("[PREVIOUS CONTEXT SUMMARY")
-            ),
-            "",
-        )
-        if not preamble:
-            return "", "missing_recovery_preamble", evidence
-        if not session.session_id or session.session_id == source_sid:
-            return "", "candidate_sid_not_committed", evidence
-        evidence["candidate_sid_changed"] = True
-        evidence["candidate_sid_sha256"] = digest(session.session_id)
-
-        control = []
-        async for chunk in session.send_message(
-            "Reply with exactly RESUME_OK and nothing else."
-        ):
-            if chunk.get("type") in {"text", "text_delta"}:
-                control.append(str(chunk.get("content") or ""))
-            elif chunk.get("type") == "error":
-                content = str(chunk.get("content") or "")
-                return "", (
-                    "transient_overloaded"
-                    if is_transient_overload(content)
-                    else "candidate_resume_error"
-                ), evidence
-        if "RESUME_OK" not in "".join(control):
-            return "", "candidate_resume_missing", evidence
-        evidence["candidate_resumed"] = True
-
-        prefix, suffix = CONTINUATION_PREAMBLE.split("{summary}")
-        return preamble[len(prefix): -len(suffix)], None, evidence
-    finally:
-        await disconnect(session)
-
-
 async def evaluate_one(case: dict, run: int) -> tuple[dict, list[str]]:
     secret_values = runtime_secrets(case, run)
     rendered = render_case(case, secret_values)
@@ -270,17 +137,10 @@ async def evaluate_one(case: dict, run: int) -> tuple[dict, list[str]]:
         root = Path(raw)
         seed_files(root, rendered.get("initial_files", {}))
         try:
-            recovery_evidence = {}
-            if rendered.get("requires_reserve_recovery"):
-                summary, reason, recovery_evidence = await asyncio.wait_for(
-                    reserve_recovery_generation(rendered, root),
-                    timeout=GENERATION_TIMEOUT_SECONDS,
-                )
-            else:
-                summary, reason = await asyncio.wait_for(
-                    normal_generation(rendered, root),
-                    timeout=GENERATION_TIMEOUT_SECONDS,
-                )
+            summary, reason = await asyncio.wait_for(
+                normal_generation(rendered, root),
+                timeout=GENERATION_TIMEOUT_SECONDS,
+            )
             files = file_state(root)
             score = score_case(
                 rendered,
@@ -306,10 +166,6 @@ async def evaluate_one(case: dict, run: int) -> tuple[dict, list[str]]:
                 "summary_chars": len(summary),
                 "file_state_sha256": file_state_hash(files),
                 "categories": score["categories"],
-                "reserve_recovery": bool(
-                    rendered.get("requires_reserve_recovery")
-                ),
-                "recovery_evidence": recovery_evidence,
             }
         except asyncio.CancelledError:
             raise
@@ -325,10 +181,6 @@ async def evaluate_one(case: dict, run: int) -> tuple[dict, list[str]]:
                 "summary_chars": 0,
                 "file_state_sha256": file_state_hash(file_state(root)),
                 "categories": {},
-                "reserve_recovery": bool(
-                    rendered.get("requires_reserve_recovery")
-                ),
-                "recovery_evidence": {},
             }
         return entry, list(secret_values.values())
 

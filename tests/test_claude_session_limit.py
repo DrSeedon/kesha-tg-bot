@@ -16,7 +16,6 @@ from claude_session import (
     EXPECTED_CONTEXT_MODEL,
     EXPECTED_CONTEXT_TOKENS,
     EXPECTED_MAX_OUTPUT_TOKENS,
-    NORMAL_TURN_RESERVE_TOKENS,
 )
 
 
@@ -546,22 +545,22 @@ def context_usage(total, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_reserve_exact_boundary_and_one_below(tmp_path):
+async def test_context_pressure_exact_92_percent_boundary_and_one_below(tmp_path):
     session, client = make_session(tmp_path)
     prompt = "Привет"
-    required = NORMAL_TURN_RESERVE_TOKENS + len(prompt.encode("utf-8"))
+    prompt_tokens = len(prompt.encode("utf-8"))
+    trigger_tokens = 920_000
 
-    client.context_usage = context_usage(EXPECTED_CONTEXT_TOKENS - required)
-    admitted = await session.check_context_reserve(prompt)
-    client.context_usage = context_usage(
-        EXPECTED_CONTEXT_TOKENS - required + 1
-    )
-    rejected = await session.check_context_reserve(prompt)
+    client.context_usage = context_usage(trigger_tokens - prompt_tokens - 1)
+    below = await session.check_context_reserve(prompt)
+    client.context_usage = context_usage(trigger_tokens - prompt_tokens)
+    boundary = await session.check_context_reserve(prompt)
 
-    assert admitted["ok"] is True
-    assert admitted["remaining"] == required
-    assert rejected["ok"] is False
-    assert rejected["reason"] == "reserve"
+    assert below["ok"] is True
+    assert below["should_compact"] is False
+    assert boundary["ok"] is True
+    assert boundary["should_compact"] is True
+    assert boundary["projected_tokens"] == trigger_tokens
     assert client.queries == []
 
 
@@ -1087,12 +1086,13 @@ async def test_no_reconnect_while_session_replacement_is_active(tmp_path, fast_p
 
 
 @pytest.mark.asyncio
-async def test_full_context_still_refused_when_probe_works(tmp_path):
-    """Hard constraint from #14: no new path admits into a full context."""
+async def test_full_context_requests_one_automatic_compact_when_probe_works(tmp_path):
+    """A known full context is a compact decision, not manual reserve UX."""
     session, client = make_session(tmp_path)
     client.context_usage = context_usage(EXPECTED_CONTEXT_TOKENS - 10)
 
     outcome = await session.check_context_reserve("hello")
 
-    assert outcome["ok"] is False
-    assert outcome["reason"] == "reserve"
+    assert outcome["ok"] is True
+    assert outcome["reason"] is None
+    assert outcome["should_compact"] is True

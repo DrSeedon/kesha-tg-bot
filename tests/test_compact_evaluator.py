@@ -69,56 +69,6 @@ def test_duplicate_cells_are_rejected_and_completed_cells_are_immutable(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_reserve_recovery_evidence_is_persisted_without_raw_session_ids(
-    monkeypatch,
-):
-    evidence = {
-        "reserve_rejected_without_query": True,
-        "manual_floor_admitted": True,
-        "source_sid_sha256": evaluator.digest("source-session"),
-        "candidate_sid_changed": True,
-        "candidate_sid_sha256": evaluator.digest("candidate-session"),
-        "candidate_resumed": True,
-    }
-
-    async def fake_generation(_case, _root):
-        return "summary", None, evidence
-
-    monkeypatch.setattr(
-        evaluator,
-        "reserve_recovery_generation",
-        fake_generation,
-    )
-    monkeypatch.setattr(
-        evaluator,
-        "score_case",
-        lambda *_args, **_kwargs: {
-            "passed": True,
-            "categories": {"source_ledger": True},
-            "failed_categories": [],
-        },
-    )
-
-    result, _secrets = await evaluator.evaluate_one(
-        {
-            "id": "reserve",
-            "context": "source",
-            "required_anchors": [],
-            "recent_messages": [],
-            "initial_files": {},
-            "expected_files": {},
-            "requires_reserve_recovery": True,
-        },
-        1,
-    )
-
-    assert result["passed"]
-    assert result["recovery_evidence"] == evidence
-    assert "source-session" not in json.dumps(result)
-    assert "candidate-session" not in json.dumps(result)
-
-
-@pytest.mark.asyncio
 async def test_overload_retry_keeps_one_cell_identity_then_succeeds():
     calls = []
     checkpoints = []

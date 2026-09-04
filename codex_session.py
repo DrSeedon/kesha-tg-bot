@@ -34,6 +34,7 @@ from typing import Any, AsyncGenerator, Optional
 
 from runtime_protocol import RuntimeCapabilities
 from quota_gate import codex_windows, quota_exhausted
+from config import CODEX_AUTO_COMPACT_TRIGGER_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,7 @@ logger = logging.getLogger(__name__)
 # guess used before the first turn reports.
 DEFAULT_CONTEXT_WINDOW = 258_400
 
-# Reserve mirrors claude_session.py: enough headroom for a full answer plus the
-# incoming prompt, or the compact floor when the user asked for /compact.
-NORMAL_TURN_RESERVE_TOKENS = 24_000
+# Explicit /compact keeps a lower floor; normal turns use projected pressure.
 MANUAL_COMPACT_FLOOR_TOKENS = 12_000
 
 CONNECT_TIMEOUT_SECONDS = 120
@@ -961,17 +960,16 @@ class CodexSession:
         *,
         manual: bool = False,
     ) -> dict:
-        """Admit a turn only when the thread demonstrably has headroom.
+        """Measure projected pressure; manual mode retains the compact floor.
 
         Codex reports context only after a turn runs, so before the first turn
-        the size is unknown. Unknown is treated as `ok` here deliberately: a
-        fresh thread cannot be full, and failing closed on no evidence would
-        block Kesha's very first Codex message.
+        the size is unknown. Unknown remains open so the fresh thread—or the
+        exact original batch after a verified compact—can establish the gauge.
         """
         required = (
             MANUAL_COMPACT_FLOOR_TOKENS
             if manual
-            else NORMAL_TURN_RESERVE_TOKENS + _estimate_tokens(combined)
+            else 0
         )
         try:
             await self._connect()
@@ -983,9 +981,32 @@ class CodexSession:
 
         if self._context_tokens is None:
             # No turn has reported usage yet — nothing proves the thread is full.
-            return {"ok": True, "reason": None, "required": required, "remaining": None}
+            return {
+                "ok": True,
+                "reason": None,
+                "should_compact": False,
+                "projected_tokens": None,
+                "max_tokens": self._context_window,
+                "required": required,
+                "remaining": None,
+            }
 
         remaining = self._context_window - self._context_tokens
+        if not manual:
+            projected = self._context_tokens + _estimate_tokens(combined)
+            trigger_tokens = int(
+                self._context_window * CODEX_AUTO_COMPACT_TRIGGER_PCT / 100
+            )
+            return {
+                "ok": True,
+                "reason": None,
+                "should_compact": projected >= trigger_tokens,
+                "projected_tokens": projected,
+                "max_tokens": self._context_window,
+                "remaining": remaining,
+                "required": required,
+                "usage": self._last_ctx_usage,
+            }
         return {
             "ok": remaining >= required,
             "reason": None if remaining >= required else "reserve",

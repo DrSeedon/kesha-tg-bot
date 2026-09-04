@@ -1,0 +1,14 @@
+Command:
+/home/kesha/.local/bin/uv run --exclude-newer 2030-01-01 --isolated --no-project --with pytest --with pytest-asyncio --with aiogram --with aiogram-media-group --with 'claude-agent-sdk==0.2.152' --with python-dotenv --with python-dateutil --with telegramify-markdown python -m pytest -q tests/test_preventive_compact.py tests/test_compact_dispatch.py tests/test_compact_limit.py tests/test_claude_session_limit.py tests/test_codex_session.py tests/test_response_limit.py tests/test_runtime_limits.py tests/test_runtime_protocol.py
+
+Result:
+238 passed, 3 skipped in 16.74s
+
+Environment:
+claude-agent-sdk 0.2.152 (published 2026-09-02)
+bundled Claude Code 2.1.259
+codex-cli 0.150.1
+
+Initial failed resolution (no tests collected):
+global uv exclude-newer filtered packages after 2026-07-09; rerun used the explicit
+2030-01-01 override without changing the project or its lock state.

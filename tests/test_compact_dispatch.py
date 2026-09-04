@@ -251,50 +251,6 @@ def test_cancelled_native_compact_releases_the_chat(tmp_path):
     assert chat._compact_started is False
 
 
-# ---------- preventive timer (#14) ----------
-
-
-def test_preventive_timer_stays_on_for_claude(tmp_path):
-    session = make_session_class(native=False)()
-    chat, _ = make_chat(tmp_path, session)
-    armed = []
-    chat._activity_store.get_activity = lambda cid: {
-        "quiescent": 1,
-        "auto_attempted_for_utc": "a",
-        "last_activity_utc": "b",
-    }
-
-    async def run():
-        chat._arm_auto_compact()
-        armed.append(chat._auto_compact_task is not None)
-        chat._cancel_auto_compact()
-
-    asyncio.run(run())
-    assert armed == [True], "Claude lost its preventive compact timer"
-
-
-def test_preventive_timer_is_off_for_native_runtimes(tmp_path):
-    """Precompacting Codex destroys its cache key — measured, not assumed.
-
-    Claude's cache TTL is 60 min (the timer fires at 55). Codex's is ~30 min
-    with a 10x cold penalty, so the timer would pay the cost of a compact and
-    get none of the cache benefit.
-    """
-    session = make_session_class(native=True)()
-    chat, _ = make_chat(tmp_path, session, runtime_id="codex")
-    chat._activity_store.get_activity = lambda cid: {
-        "quiescent": 1,
-        "auto_attempted_for_utc": "a",
-        "last_activity_utc": "b",
-    }
-
-    async def run():
-        chat._arm_auto_compact()
-        return chat._auto_compact_task
-
-    assert asyncio.run(run()) is None, "preventive timer armed on a native runtime"
-
-
 def test_manual_compact_still_works_on_a_native_runtime(tmp_path):
     """Disabling the timer must not disable the user's own /compact."""
     session = make_session_class(native=True)()

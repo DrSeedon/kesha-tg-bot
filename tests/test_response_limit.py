@@ -17,7 +17,11 @@ class FakeSession:
 
 
 class FakeContextSession:
+    def __init__(self):
+        self.calls = 0
+
     async def send_message(self, prompt):
+        self.calls += 1
         yield {"type": "text_delta", "content": "Prompt is too long"}
         yield {
             "type": "error",
@@ -272,10 +276,11 @@ async def test_streamed_raw_limit_is_replaced_by_one_friendly_terminal_outcome(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reminder", [False, True])
-async def test_context_limit_is_one_manual_compact_outcome(monkeypatch, reminder):
+async def test_t3_context_limit_is_one_non_replayed_terminal(monkeypatch, reminder):
     bot = FakeBot()
     response_stream.set_bot(bot)
-    response_stream.set_registry(FakeRegistry(FakeContextSession()))
+    session = FakeContextSession()
+    response_stream.set_registry(FakeRegistry(session))
     message = None if reminder else FakeMessage()
     typer = asyncio.create_task(completed_typer())
     await typer
@@ -287,10 +292,13 @@ async def test_context_limit_is_one_manual_compact_outcome(monkeypatch, reminder
     assert initial_messages[0][1 if reminder else 0] == "Prompt is too long"
     assert len(bot.edits) == 1
     final_text = bot.edits[0][0]
-    assert "/compact" in final_text
+    assert "/compact" not in final_text
+    assert "повтор" not in final_text.casefold()
+    assert "resend" not in final_text.casefold()
     assert "Prompt is too long" not in final_text
     assert "📋" not in final_text
     assert "Пустой ответ" not in final_text
+    assert session.calls == 1, "an already-submitted context rejection was replayed"
 
 
 class StaleSession:
@@ -340,7 +348,7 @@ class RetryReserveSession:
 
 
 @pytest.mark.asyncio
-async def test_retry_rechecks_reserve_and_performs_zero_second_query(monkeypatch):
+async def test_t3_retry_pressure_refusal_has_zero_second_query_and_no_manual_ux(monkeypatch):
     bot = FakeBot()
     session = RetryReserveSession()
     registry = FakeRegistry(session)
@@ -354,6 +362,7 @@ async def test_retry_rechecks_reserve_and_performs_zero_second_query(monkeypatch
 
     assert session.send_calls == 1
     assert session.reserve_calls == 1
-    assert registry.state.reserve_blocked is True
+    assert registry.state.reserve_blocked is False
     assert len(message.answers) == 1
-    assert "/compact" in message.answers[0][0]
+    assert "/compact" not in message.answers[0][0]
+    assert "повтор" not in message.answers[0][0].casefold()

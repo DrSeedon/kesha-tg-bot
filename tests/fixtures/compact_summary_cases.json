@@ -70,17 +70,6 @@
     "expected_files": {}
   },
   {
-    "id": "reserve_manual_recovery",
-    "context": "Synthetic transcript facts:\n- Goal: preserve manual recovery headroom before a daytime turn can exhaust the 1M context.\n- Normal admission was rejected before query because the measured reserve was one token below the required threshold.\n- The exact user instruction is: preserve marker ALPHA-BEGIN and marker OMEGA-END, then use the custom transactional /compact flow.\n- After the compact commits a new session, verify that the candidate session resumes successfully.\n- Automatic recovery is forbidden outside the night window.\nLast user messages, oldest to newest:\n1. ALPHA-BEGIN: сохрани manual recovery headroom для 1M context; обычный turn отклонён.\n2. Выполни custom transactional /compact с сохранением старого SID до commit.\n3. OMEGA-END: проверь, что candidate session resumes; automatic recovery разрешён только в night window.",
-    "required_anchors": ["manual recovery headroom", "1M context", "ALPHA-BEGIN", "OMEGA-END", "custom transactional /compact", "candidate session resumes", "night window"],
-    "forbidden_claims": ["normal turn was admitted", "/clear is required", "automatic daytime compact is allowed"],
-    "recent_messages": ["ALPHA-BEGIN: сохрани manual recovery headroom для 1M context; обычный turn отклонён.", "Выполни custom transactional /compact с сохранением старого SID до commit.", "OMEGA-END: проверь, что candidate session resumes; automatic recovery разрешён только в night window."],
-    "allowed_exact_values": ["1M", "1,000,000", "/compact"],
-    "initial_files": {},
-    "expected_files": {},
-    "requires_reserve_recovery": true
-  },
-  {
     "id": "unresolved_conflict",
     "context": "Synthetic transcript facts:\n- Goal: choose the threshold, but evidence conflicts.\n- Measurement A reports 20 percent.\n- Measurement B reports 25 percent.\n- Neither source has been validated; no threshold decision is final.\n- Resolution step: rerun both measurements on the same dataset.\nLast user messages, oldest to newest:\n1. Первый замер дал 20 процентов.\n2. Второй дал 25 процентов.\n3. Не усредняй: сначала перепроверь на одном датасете.",
     "required_anchors": ["20 percent", "25 percent", "conflict", "same dataset", "not final"],
