@@ -634,7 +634,13 @@ async def test_reserve_runtime_invariant_mismatch_fails_closed(
 
 
 @pytest.mark.asyncio
-async def test_terminal_max_output_mismatch_blocks_next_admission(tmp_path):
+async def test_terminal_max_output_mismatch_latches_but_admits_anyway(tmp_path):
+    """#35: the latch is diagnostics, not a gate.
+
+    It describes a PAST terminal usage; the live probe below still answers,
+    so the measurement stands and the next message goes through. Refusing on
+    it is what wedged the chat on 01.08.
+    """
     session, client = make_session(tmp_path)
     task = asyncio.create_task(collect(session))
     await asyncio.sleep(0)
@@ -644,8 +650,8 @@ async def test_terminal_max_output_mismatch_blocks_next_admission(tmp_path):
 
     outcome = await session.check_context_reserve("hello")
 
-    assert session._max_output_tokens_valid is False
-    assert outcome["reason"] == "runtime_invariant"
+    assert session._max_output_tokens_valid is False, "latch must still record it"
+    assert outcome["ok"] is True, f"latch still gates admission: {outcome}"
     assert client.queries == ["hello"]
 
 

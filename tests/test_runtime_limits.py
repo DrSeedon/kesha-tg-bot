@@ -413,7 +413,7 @@ def test_no_user_facing_string_hardcodes_a_provider_on_a_shared_path():
     """
     shared_keys = (
         "session_limit", "context_usage_limit", "context_limit",
-        "context_auto_compact_failed", "context_unknown", "session_unavailable",
+        "context_auto_compact_failed", "session_unavailable",
         "compact_floor",
     )
     for lang in ("ru", "en"):
@@ -518,31 +518,102 @@ async def test_runtime_unhealthy_retries_once_and_succeeds_silently(monkeypatch)
     assert asked, "recovered batch never reached the model"
 
 
-@pytest.mark.asyncio
-async def test_runtime_unhealthy_twice_refuses_once_and_stops():
-    """A still-dead runtime: exactly two probes, exactly one notice."""
-    session = ProbeSession([{"ok": False, "reason": "runtime_unhealthy"}])
+def _sending_chat(session, monkeypatch):
+    """A chat that records what reached the model instead of calling one."""
     chat = _chat_with(session, runtime_id="claude")
     chat._activity_store.finish_activity = lambda *a, **kw: ""
+    asked = []
+
+    async def ask(msg, combined, cid):
+        asked.append(combined)
+
+    chat._ask_fn = ask
+    monkeypatch.setattr("message_log.get_db", lambda: type(
+        "D", (), {"log_user": lambda *a, **kw: 0}
+    )())
+    return chat, asked
+
+
+@pytest.mark.asyncio
+async def test_runtime_unhealthy_twice_still_sends_the_batch(monkeypatch):
+    """A still-dead probe is OUR failure to measure, not the provider's refusal.
+
+    #35: the user's message must reach the model anyway. The retry stays
+    bounded at two probes — what changed is the outcome, not the retry.
+    """
+    session = ProbeSession([{"ok": False, "reason": "runtime_unhealthy"}])
+    chat, asked = _sending_chat(session, monkeypatch)
 
     await chat._run_batch([_entry()])
 
     assert session.calls == 2, f"retry was not bounded: {session.calls} calls"
-    assert len(chat.bot.sent) == 1, f"expected one notice: {chat.bot.sent}"
+    assert chat.bot.sent == [], f"user was refused anyway: {chat.bot.sent}"
+    assert len(asked) == 1, f"batch reached the model {len(asked)} times"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "reason",
-    ["usage_limit", "runtime_invariant", "session_unavailable", "unknown"],
-)
-async def test_other_reasons_are_never_retried(reason):
-    """Quota, invariant, unavailable-session and unknown are never retried."""
+@pytest.mark.parametrize("reason", ["usage_limit", "session_unavailable"])
+async def test_provider_owned_reasons_still_terminal_and_never_retried(
+    reason, monkeypatch
+):
+    """Quota and an unresumable session are facts, not guesses — still refuse."""
     session = ProbeSession([{"ok": False, "reason": reason}])
-    chat = _chat_with(session, runtime_id="claude")
-    chat._activity_store.finish_activity = lambda *a, **kw: ""
+    chat, asked = _sending_chat(session, monkeypatch)
 
     await chat._run_batch([_entry()])
 
     assert session.calls == 1, f"{reason} must not be retried"
-    assert len(chat.bot.sent) == 1
+    assert len(chat.bot.sent) == 1, f"expected one notice: {chat.bot.sent}"
+    assert asked == [], f"{reason} must not reach the model: {asked}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["runtime_invariant", "unknown"])
+async def test_unmeasured_context_sends_without_retry(reason, monkeypatch):
+    """#35: an unmeasurable context is not a refusal. One probe, then send."""
+    session = ProbeSession([{"ok": False, "reason": reason}])
+    chat, asked = _sending_chat(session, monkeypatch)
+
+    await chat._run_batch([_entry()])
+
+    assert session.calls == 1, f"{reason} must not be retried"
+    assert chat.bot.sent == [], f"user was refused anyway: {chat.bot.sent}"
+    assert len(asked) == 1, f"batch reached the model {len(asked)} times"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["runtime_invariant", "runtime_unhealthy", "unknown"]
+)
+async def test_unmeasured_context_never_triggers_a_compact(reason, monkeypatch):
+    """No measurement, no compact decision — the trigger was never evaluated.
+
+    The positive control runs first and on the SAME harness: a measured
+    over-trigger context must reach `_compact_once`. Without it a green run
+    here would also be produced by a chat that can never compact at all.
+    """
+    control = ProbeSession([
+        {"ok": True, "reason": None, "should_compact": True},
+        {"ok": True, "reason": None, "should_compact": False},
+    ])
+    chat, asked = _sending_chat(control, monkeypatch)
+    fired = []
+    chat._compact_once = lambda *a, **kw: _record(fired)
+    await chat._run_batch([_entry()])
+    assert fired == [1], "positive control never compacted — harness is inert"
+    assert len(asked) == 1, "positive control never reached the model"
+
+    session = ProbeSession([{"ok": False, "reason": reason}])
+    chat, asked = _sending_chat(session, monkeypatch)
+    compacts = []
+    chat._compact_once = lambda *a, **kw: _record(compacts)
+
+    await chat._run_batch([_entry()])
+
+    assert compacts == [], "compacted on a context we never measured"
+    assert len(asked) == 1, f"batch reached the model {len(asked)} times"
+
+
+async def _record(sink):
+    sink.append(1)
+    return {"ok": True, "before_pct": 90.0, "after_pct": 4.0}

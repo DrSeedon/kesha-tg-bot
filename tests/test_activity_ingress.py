@@ -216,8 +216,8 @@ async def test_ingress_during_processing_defers_without_blocking_the_stream():
 
 
 @pytest.mark.asyncio
-async def test_runtime_invariant_message_renders_without_keyerror():
-    """Codex [blocking]: the localized string contains {expected}.
+async def test_placeholder_terminal_renders_without_keyerror():
+    """Codex [blocking]: a localized terminal string contains a placeholder.
 
     `config.t()` already calls .format(**kw), so passing the value through a
     second .format() raised KeyError on the normal Telegram path — the users
@@ -252,11 +252,11 @@ async def test_runtime_invariant_message_renders_without_keyerror():
     entry = PendingEntry(prompt="x", message_id=1, message=Msg())
 
     await state._send_batch_terminal(
-        [entry], "context_runtime_invariant", expected="claude-opus-5[1m]"
+        [entry], "context_usage_limit", runtime="claude", reset=" (сброс 08.08)"
     )
 
-    assert sent and "claude-opus-5[1m]" in sent[0], sent
-    assert "{expected}" not in sent[0]
+    assert sent and "08.08" in sent[0], sent
+    assert "{" not in sent[0]
 
 
 @pytest.mark.asyncio
@@ -291,29 +291,26 @@ async def test_t3_plain_terminal_keys_still_render():
 
     for key in (
         "context_auto_compact_failed",
-        "context_unknown",
-        "context_usage_limit",
-        "context_runtime_unhealthy",
+        "session_unavailable",
     ):
         await state._send_batch_terminal([entry], key)
 
-    assert len(sent) == 4
+    assert len(sent) == 2
 
 
 def test_t3_every_context_preflight_reason_has_strings_in_both_languages():
     """#14 shipped a KeyError by adding a reason and updating only one path.
 
-    Every reason `check_context_reserve` can return must map to a key that
-    exists in ru AND en, or the refusal itself crashes at send time.
+    Every reason we still refuse on must map to a key that exists in ru AND
+    en, or the refusal itself crashes at send time. Reasons we no longer
+    refuse on (#35) have no key by design — their guard is the send-anyway
+    oracles in tests/test_runtime_limits.py.
     """
     from config import STRINGS
 
     keys = {
         "context_auto_compact_failed",
-        "context_unknown",
         "context_usage_limit",
-        "context_runtime_invariant",
-        "context_runtime_unhealthy",
         "session_unavailable",
         "compact_floor",
     }

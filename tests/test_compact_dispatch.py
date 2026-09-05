@@ -198,6 +198,47 @@ def test_native_compact_does_not_repeat_an_unmeasured_percentage(tmp_path):
     assert "следующего сообщения" in text
 
 
+# ---------- #35: an unmeasurable context must not veto a manual /compact ----------
+
+
+def _refusing_session(reason):
+    session = make_session_class(native=True)()
+
+    async def refuse(combined="", *, manual=False):
+        return {"ok": False, "reason": reason}
+
+    session.check_context_reserve = refuse
+    return session
+
+
+@pytest.mark.parametrize(
+    "reason", ["unknown", "runtime_invariant", "runtime_unhealthy"]
+)
+def test_manual_compact_runs_when_the_context_cannot_be_measured(tmp_path, reason):
+    """/compact is the user's escape hatch; a failed probe must not close it.
+
+    Without a measurement the floor is unknown, so there is nothing to gate on.
+    Let the compact run and let the runtime refuse if it wants to.
+    """
+    session = _refusing_session(reason)
+    chat, _ = make_chat(tmp_path, session, runtime_id="codex")
+
+    asyncio.run(chat._do_compact(automatic=False))
+
+    assert session.native_compacted == 1, f"{reason} vetoed a manual compact"
+
+
+def test_manual_compact_still_stops_at_the_measured_floor(tmp_path):
+    """The floor is a MEASUREMENT, not a guess — it stays a refusal."""
+    session = _refusing_session("reserve")
+    chat, _ = make_chat(tmp_path, session, runtime_id="codex")
+
+    asyncio.run(chat._do_compact(automatic=False))
+
+    assert session.native_compacted == 0, "compacted below the floor"
+    assert chat.bot.sent, "the floor refusal reached nobody"
+
+
 def test_failed_native_compact_is_reported_not_swallowed(tmp_path):
     session = make_session_class(
         native=True, compact_raises=RuntimeError("app-server exited")

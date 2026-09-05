@@ -468,28 +468,28 @@ async def _ask_inner(message, prompt, cid, typer):
         logger.info(f"Chat {cid}: retry loop iteration retries={retries}/{MAX_RETRIES}")
         if retries:
             reserve = await _get_session(cid).check_context_reserve(prompt)
-            if not reserve.get("ok"):
-                reason = reserve.get("reason")
-                fmt = {}
-                if reason == "reserve":
-                    key = "context_auto_compact_failed"
-                elif reason == "session_unavailable":
-                    key = "session_unavailable"
-                elif reason == "runtime_invariant":
-                    key = "context_runtime_invariant"
-                    fmt = {"expected": reserve.get("expected_model", "?")}
-                elif reason == "runtime_unhealthy":
-                    key = "context_runtime_unhealthy"
-                else:
-                    key = "context_unknown"
+            reason = reserve.get("reason")
+            if not reserve.get("ok") and reason in ("reserve", "session_unavailable"):
+                key = (
+                    "context_auto_compact_failed" if reason == "reserve"
+                    else "session_unavailable"
+                )
                 logger.warning(
                     "Chat %s: retry rejected before query (%s)",
                     cid,
                     reason,
                 )
-                await _handle_context_limit(key, **fmt)
+                await _handle_context_limit(key)
                 break
-            if reserve.get("should_compact"):
+            if not reserve.get("ok"):
+                # Measurement failed, not the provider. Retry anyway — refusing
+                # here would strand a turn the user has already paid a stall for.
+                logger.warning(
+                    "Chat %s: retry context not measured (%s) — retrying anyway",
+                    cid,
+                    reason,
+                )
+            elif reserve.get("should_compact"):
                 logger.warning(
                     "Chat %s: retry stopped at automatic compact boundary",
                     cid,

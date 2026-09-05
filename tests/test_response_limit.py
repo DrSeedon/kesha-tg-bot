@@ -330,9 +330,10 @@ async def test_stale_session_is_one_clear_outcome(monkeypatch, reminder):
 
 
 class RetryReserveSession:
-    def __init__(self):
+    def __init__(self, reason="reserve"):
         self.send_calls = 0
         self.reserve_calls = 0
+        self._reason = reason
 
     async def send_message(self, prompt):
         self.send_calls += 1
@@ -341,10 +342,36 @@ class RetryReserveSession:
 
     async def check_context_reserve(self, prompt):
         self.reserve_calls += 1
-        return {"ok": False, "reason": "reserve"}
+        return {"ok": False, "reason": self._reason}
 
     def reconnect(self):
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["unknown", "runtime_invariant", "runtime_unhealthy"]
+)
+async def test_unmeasured_context_does_not_cancel_the_retry(reason, monkeypatch):
+    """#35: a probe we could not read must not strand a turn mid-retry.
+
+    The `reserve` twin below proves the same harness DOES stop on a real
+    measurement, so a passing run here is not the retry loop dying early.
+    """
+    bot = FakeBot()
+    session = RetryReserveSession(reason=reason)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    assert session.reserve_calls >= 1, "the retry never probed at all"
+    assert session.send_calls > 1, (
+        f"{reason} cancelled the retry: {session.send_calls} attempt(s)"
+    )
 
 
 @pytest.mark.asyncio

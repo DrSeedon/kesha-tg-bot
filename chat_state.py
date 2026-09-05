@@ -796,7 +796,15 @@ class ChatState:
         self,
         batch: list[PendingEntry],
         result: dict,
-    ) -> None:
+    ) -> bool:
+        """Terminal the batch when the refusal is ours; True when it was dropped.
+
+        Only three refusals are ours to make: the compact floor, a session that
+        cannot be resumed, and the provider's own limit verdict. Every other
+        outcome means we failed to MEASURE the context — and a failed
+        measurement is not a reason to keep the user's message out of the model.
+        The provider refuses; our guess does not.
+        """
         reason = result.get("reason")
         fmt = {}
         if reason == "reserve":
@@ -806,19 +814,20 @@ class ChatState:
         elif reason == "usage_limit":
             key = "context_usage_limit"
             fmt = await self._limit_fmt(batch[-1].message)
-        elif reason == "runtime_invariant":
-            key = "context_runtime_invariant"
-            fmt = {"expected": result.get("expected_model", "?")}
-        elif reason == "runtime_unhealthy":
-            key = "context_runtime_unhealthy"
         else:
-            key = "context_unknown"
+            logger.warning(
+                "Chat %s: context not measured (%s) — sending the batch anyway",
+                self.chat_id,
+                reason,
+            )
+            return False
         logger.warning(
             "Chat %s: batch rejected before query (%s)",
             self.chat_id,
             reason,
         )
         await self._send_batch_terminal(batch, key, **fmt)
+        return True
 
     async def _compact_admitted_batch(self, batch: list[PendingEntry]) -> dict:
         """Run one compact while the caller retains ownership of `batch`."""
@@ -884,17 +893,19 @@ class ChatState:
                 logger.error(f"Chat {self.chat_id}: lazy reminder injection failed: {e}")
 
             reserve = await self._check_batch_context(combined)
+            # An unmeasured context yields no compact decision — `elif` keeps us
+            # out of a branch whose trigger we could not evaluate.
             if not reserve.get("ok"):
-                await self._reject_batch_for_context(batch, reserve)
-                return
-            if reserve.get("should_compact"):
+                if await self._reject_batch_for_context(batch, reserve):
+                    return
+            elif reserve.get("should_compact"):
                 compact_result = await self._compact_admitted_batch(batch)
                 if compact_result.get("ok"):
                     reserve = await self._check_batch_context(combined)
                     if not reserve.get("ok"):
-                        await self._reject_batch_for_context(batch, reserve)
-                        return
-                    if reserve.get("should_compact"):
+                        if await self._reject_batch_for_context(batch, reserve):
+                            return
+                    elif reserve.get("should_compact"):
                         logger.warning(
                             "Chat %s: context still high after one compact",
                             self.chat_id,
@@ -1118,29 +1129,30 @@ class ChatState:
                 reserve = await self.session.check_context_reserve(manual=True)
                 if not reserve.get("ok"):
                     reason = reserve.get("reason")
-                    fmt = {}
-                    if reason == "reserve":
-                        key = "compact_floor"
-                    elif reason == "session_unavailable":
-                        key = "session_unavailable"
-                    elif reason == "runtime_invariant":
-                        key = "context_runtime_invariant"
-                        fmt = {"expected": reserve.get("expected_model", "?")}
-                    elif reason == "runtime_unhealthy":
-                        key = "context_runtime_unhealthy"
-                    else:
-                        key = "context_unknown"
+                    if reason in ("reserve", "session_unavailable"):
+                        key = (
+                            "compact_floor" if reason == "reserve"
+                            else "session_unavailable"
+                        )
+                        logger.warning(
+                            "Chat %s: manual compact rejected before query (%s)",
+                            self.chat_id,
+                            reason,
+                        )
+                        await self.bot.send_message(
+                            self.chat_id,
+                            _render(key),
+                            parse_mode=None,
+                        )
+                        return
+                    # We could not measure, so the floor is unknown. The user
+                    # asked for a compact — run it and let the runtime refuse.
                     logger.warning(
-                        "Chat %s: manual compact rejected before query (%s)",
+                        "Chat %s: manual compact context not measured (%s) "
+                        "— compacting anyway",
                         self.chat_id,
                         reason,
                     )
-                    await self.bot.send_message(
-                        self.chat_id,
-                        _render(key, **fmt),
-                        parse_mode=None,
-                    )
-                    return
             result = await self._compact_once(automatic=automatic)
             if result and result.get("ok"):
                 if result.get("after_pct") is None:

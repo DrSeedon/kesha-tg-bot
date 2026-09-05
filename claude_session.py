@@ -752,18 +752,16 @@ class ClaudeSession:
         # latch caused. The limit is reported authoritatively by the attempt
         # itself (#13 normalizes it into one terminal usage_limit outcome).
         if not self._max_output_tokens_valid:
+            # Diagnostic only. The latch says a PAST terminal usage contradicted
+            # the invariant; it says nothing about the context we are about to
+            # measure, and refusing on it wedged the chat once already (01.08).
             logger.error(
-                "Context reserve blocked: last terminal usage contradicted "
-                "the runtime invariant (expected model=%s maxOutputTokens=%d)",
+                "Runtime invariant latch is set: an earlier terminal usage "
+                "contradicted it (expected model=%s maxOutputTokens=%d); "
+                "measuring anyway",
                 self.expected_context_model,
                 EXPECTED_MAX_OUTPUT_TOKENS,
             )
-            return {
-                "ok": False,
-                "reason": "runtime_invariant",
-                "required": required,
-                "expected_model": self.expected_context_model,
-            }
 
         try:
             usage = await self._probe_context_usage()
