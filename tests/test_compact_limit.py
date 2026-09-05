@@ -76,7 +76,6 @@ def session_file(tmp_path):
             ],
             "usage_limit",
         ),
-        ([{"type": "text", "content": RAW_LIMIT}], "usage_limit"),
         ([], "empty_summary"),
     ],
 )
@@ -98,6 +97,30 @@ async def test_summary_failure_never_starts_replacement_or_sends_summary(
     assert notices.items[0][1] is True
     assert notices.items[-1][1] is True
     assert "контекст сохранён" in notices.items[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_summary_quoting_a_limit_is_not_mistaken_for_our_own_limit(tmp_path):
+    """A summary OF a conversation about limits must survive: only typed evidence counts."""
+    path = session_file(tmp_path)
+    quoting_summary = VALID_SUMMARY.replace(
+        "- Continue safely.",
+        f"- Discussed the outage: {RAW_LIMIT}",
+    )
+    async def healthy_candidate(session):
+        session.session_id = "sid-candidate"
+        yield {"type": "text", "content": "ok"}
+
+    session = ScriptedSession(
+        path,
+        [[{"type": "text", "content": quoting_summary}], healthy_candidate],
+    )
+    notices = Notices()
+
+    result = await compact_session(session, notify=notices)
+
+    assert result["ok"] is True, result.get("reason")
+    assert session.session_id == "sid-candidate"
 
 
 @pytest.mark.asyncio

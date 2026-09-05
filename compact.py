@@ -238,7 +238,15 @@ async def _collect_summary(claude) -> tuple[str, str | None]:
         async for chunk in claude.send_message(COMPACT_PROMPT):
             chunk_type = chunk.get("type")
             content = str(chunk.get("content") or "")
-            if chunk.get("kind") == "usage_limit" or usage_limit_reset(content) is not None:
+            # ONLY typed evidence. Both runtimes normalize a real limit into
+            # kind="usage_limit" (claude_session.py:600,655; codex_session.py:905,911),
+            # so grepping the text here only ever misfires: a summary OF a
+            # conversation about limits quotes "session limit ... resets" and was
+            # discarded as if the limit were ours. Measured 05.09.2026 — quota was
+            # 40% of the 5h window and 6% of the week while /compact reported it
+            # exhausted, wedging the chat at 96% with /clear as the only exit.
+            # Same fix as #33 made for responses.
+            if chunk.get("kind") == "usage_limit":
                 summary_parts.clear()
                 failure_reason = "usage_limit"
                 continue
