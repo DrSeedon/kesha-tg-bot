@@ -11,11 +11,13 @@ from claude_agent_sdk import (
 )
 
 from claude_session import (
+    AUTO_COMPACT_TRIGGER_PCT,
     CLAUDE_MAX_BUFFER_SIZE,
     ClaudeSession,
     EXPECTED_CONTEXT_MODEL,
     EXPECTED_CONTEXT_TOKENS,
     EXPECTED_MAX_OUTPUT_TOKENS,
+    MANUAL_COMPACT_FLOOR_TOKENS,
 )
 
 
@@ -545,11 +547,11 @@ def context_usage(total, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_context_pressure_exact_92_percent_boundary_and_one_below(tmp_path):
+async def test_context_pressure_exact_trigger_boundary_and_one_below(tmp_path):
     session, client = make_session(tmp_path)
     prompt = "Привет"
     prompt_tokens = len(prompt.encode("utf-8"))
-    trigger_tokens = 920_000
+    trigger_tokens = int(EXPECTED_CONTEXT_TOKENS * AUTO_COMPACT_TRIGGER_PCT / 100)
 
     client.context_usage = context_usage(trigger_tokens - prompt_tokens - 1)
     below = await session.check_context_reserve(prompt)
@@ -594,14 +596,14 @@ async def test_reserve_never_uses_previous_cache_when_fresh_usage_is_none(tmp_pa
 async def test_manual_floor_boundary_and_fresh_session_admission(tmp_path):
     session, client = make_session(tmp_path)
     session.session_id = None
-    client.context_usage = context_usage(920_000)
+    client.context_usage = context_usage(1_000_000 - MANUAL_COMPACT_FLOOR_TOKENS)
 
     admitted = await session.check_context_reserve(manual=True)
-    client.context_usage = context_usage(920_001)
+    client.context_usage = context_usage(1_000_000 - MANUAL_COMPACT_FLOOR_TOKENS + 1)
     rejected = await session.check_context_reserve(manual=True)
 
     assert admitted["ok"] is True
-    assert admitted["remaining"] == 80_000
+    assert admitted["remaining"] == MANUAL_COMPACT_FLOOR_TOKENS
     assert rejected["reason"] == "reserve"
     assert client.queries == []
 

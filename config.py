@@ -31,7 +31,7 @@ DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 # Фото без подписи почти всегда ждёт следом голосовое (в фото войс не вложить) —
 # держим батч дольше обычного дебаунса, чтобы подпись уехала тем же ходом.
 PHOTO_CAPTION_WAIT_SEC = int(os.getenv("PHOTO_CAPTION_WAIT_SEC", "10"))
-AUTO_COMPACT_TRIGGER_PCT = 92.0
+AUTO_COMPACT_TRIGGER_PCT = 95.0
 CODEX_AUTO_COMPACT_TRIGGER_PCT = 90.0
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()

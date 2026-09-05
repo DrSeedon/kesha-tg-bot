@@ -167,7 +167,7 @@ class CompactDriver:
         self.runtime = runtime
         self.outcome = outcome or {
             "ok": True,
-            "before_pct": 92.0,
+            "before_pct": 95.0,
             "after_pct": 4.0,
         }
         self.after_usage = after_usage
@@ -259,23 +259,24 @@ async def test_t1_79_percent_ordinary_prompt_is_sent_without_compact_or_rejectio
     assert not state.bot.sent, "an ordinary 79% batch produced a terminal notice"
 
 
-def test_t1_claude_trigger_is_the_latest_verified_safe_92_percent():
-    """95% leaves 50K, below the accepted 80K compact floor."""
+def test_t1_claude_trigger_leaves_room_for_the_compact_turn_itself():
+    """The trigger is bounded by the measured cost of one compact, not by habit."""
     trigger = getattr(config, "AUTO_COMPACT_TRIGGER_PCT", None)
     codex_trigger = getattr(config, "CODEX_AUTO_COMPACT_TRIGGER_PCT", None)
 
-    assert MANUAL_COMPACT_FLOOR_TOKENS == 80_000
-    assert trigger == 92.0
+    assert MANUAL_COMPACT_FLOOR_TOKENS == 16_000
+    assert trigger == 95.0
     assert codex_trigger == 90.0
-    assert int(1_000_000 * (100 - trigger) / 100) == 80_000
-    assert int(1_000_000 * (100 - (trigger + 0.1)) / 100) < 80_000
+    # The trigger must leave room for the compact turn itself, measured at
+    # 5-8K tokens per summary: 95% leaves 50_000, over 3x the floor.
+    assert int(1_000_000 * (100 - trigger) / 100) >= 3 * MANUAL_COMPACT_FLOOR_TOKENS
 
 
 @pytest.mark.asyncio
 async def test_t1_predicted_boundary_compacts_once_then_sends_original_once(
     monkeypatch,
 ):
-    runtime = Runtime(usage(918_500), legacy_reserve={"ok": True, "reason": None})
+    runtime = Runtime(usage(948_500), legacy_reserve={"ok": True, "reason": None})
     compact = CompactDriver(runtime, after_usage=usage(40_000))
     asked: list[str] = []
 
@@ -299,7 +300,7 @@ async def test_t1_predicted_boundary_compacts_once_then_sends_original_once(
 @pytest.mark.asyncio
 async def test_t1_unrunnable_compact_still_sends_the_admitted_batch(monkeypatch):
     """A compact we cannot run must not silently swallow the user's message."""
-    runtime = Runtime(usage(918_500), legacy_reserve={"ok": True, "reason": None})
+    runtime = Runtime(usage(948_500), legacy_reserve={"ok": True, "reason": None})
     runtime.usage_limit_active = True
     compact = CompactDriver(runtime, after_usage=usage(40_000))
     asked: list[str] = []
@@ -324,7 +325,7 @@ async def test_t1_unrunnable_compact_still_sends_the_admitted_batch(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_t1_arrival_during_compact_stays_behind_original(monkeypatch):
-    runtime = Runtime(usage(919_000), legacy_reserve={"ok": True, "reason": None})
+    runtime = Runtime(usage(949_000), legacy_reserve={"ok": True, "reason": None})
     compact = CompactDriver(
         runtime,
         after_usage=usage(40_000),
@@ -381,14 +382,14 @@ async def test_t1_failure_is_one_bounded_terminal_with_zero_send_or_loop(
     failure,
 ):
     prompt = "ORIGINAL-FAIL-" + ("x" * (930_000 if failure == "oversized" else 2_000))
-    runtime = Runtime(usage(919_000))
+    runtime = Runtime(usage(949_000))
     if failure == "compact":
         compact = CompactDriver(
             runtime,
             outcome={"ok": False, "reason": "summary_error"},
         )
     elif failure == "unchanged":
-        compact = CompactDriver(runtime, after_usage=usage(919_000))
+        compact = CompactDriver(runtime, after_usage=usage(949_000))
     else:
         compact = CompactDriver(runtime, after_usage=usage(40_000))
     asked: list[str] = []

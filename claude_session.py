@@ -77,7 +77,11 @@ def resolve_context_model(model: str, use_1m: bool = True) -> str:
 EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
 EXPECTED_MAX_OUTPUT_TOKENS = 64_000
-MANUAL_COMPACT_FLOOR_TOKENS = 80_000
+# Measured on 42 real compactions in production (journalctl, 30 days):
+# summaries are 11 743-20 327 chars, i.e. ~5-8K tokens. The old 80_000 was a
+# leftover of the #14 reserve philosophy (removed in #34), not a requirement —
+# the Codex path has shipped 12_000 all along. 16_000 is 2x the worst case.
+MANUAL_COMPACT_FLOOR_TOKENS = 16_000
 # Read can repeat an image's base64 twice in one NDJSON result. At Telegram's
 # 20 MiB download ceiling that is ~53.4 MiB before JSON overhead.
 CLAUDE_MAX_BUFFER_SIZE = 64 * 1024 * 1024
