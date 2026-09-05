@@ -1,0 +1,8 @@
+# Project: kesha-tg-bot
+schema_version = 1
+scale = "Solo project: one owner plus AI agents. Continuous deploy to a single VPS (Contabo, `/opt/kesha-bot`, systemd `kesha-bot-vps`). No CI, no staging, no failover, no Redis."
+users = "2 real humans (the owner and one other person), private chats only. Tens of messages a day, one turn per chat at a time. Peak load is never a concern; a single wrong turn is."
+stack = "Python 3.12, aiogram 3, claude-agent-sdk (Claude runtime) and Codex CLI (Codex runtime) behind one ChatRuntime protocol, SQLite (sessions/messages/reminders/RAG), FastMCP tool servers, sqlite-vec + FTS5 + bge-m3 for memory."
+philosophy = "Minimum code that solves the task; nothing speculative. One owner per idea — a copy is a defect. Fail loud: a crash beats a silent bug. The provider gets to refuse; our own guess does not."
+what_matters = "Correctness of message delivery above all: the owner's message must reach the model, exactly once, or he must be told why in plain language. No silent failures, no wedged or self-blocking sessions, no state machine left outside IDLE, no duplicated side effects (a resent prompt can re-fire tools, reminders and file writes). Session persistence across restarts. Honest accounting of subscription quota."
+what_does_not_matter = "Throughput, latency under load, horizontal scaling, multi-tenancy, connection pooling, and micro-optimisation — there are two users. Mobile UI polish (the owner works from Telegram and a desktop dashboard). Backwards compatibility: there are no external API consumers, so callers are updated in the same change rather than wrapped in deprecation shims."
