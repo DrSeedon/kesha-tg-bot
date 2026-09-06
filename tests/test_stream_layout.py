@@ -1,4 +1,9 @@
-"""#28 — раскладка стрима: текст одним куском, тулы одним пузырём, без болтовни субагентов."""
+"""#27 — раскладка стрима: хронология как в Claude Code, без болтовни субагентов.
+
+Текстовый пузырь закрывается до того, как откроется пузырь тулов, и наоборот.
+Отменяет раскладку #28 («один текст + один пузырь тулов сверху») по решению
+владельца: склейка соседних текстовых блоков была её прямым следствием.
+"""
 
 import asyncio
 from types import SimpleNamespace
@@ -82,16 +87,22 @@ async def completed_typer():
     return None
 
 
-def _bubbles(message):
-    return [a for a in message.answers if a[1].get("parse_mode") == "Markdown"]
-
-
-def _text_msgs(message):
-    return [a for a in message.answers if a[1].get("parse_mode") != "Markdown"]
+def _chat(message, bot):
+    """Итоговый вид чата: живые сообщения по порядку отправки с последним текстом."""
+    order, state = [], {}
+    for text, kwargs, mid in message.answers:
+        order.append(mid)
+        state[mid] = ["bubble" if kwargs.get("parse_mode") == "Markdown" else "text", text]
+    for text, kwargs in bot.edits:
+        mid = kwargs.get("message_id")
+        if mid in state:
+            state[mid][1] = text
+    deleted = {d[1] for d in bot.deleted}
+    return [(state[mid][0], state[mid][1]) for mid in order if mid not in deleted]
 
 
 @pytest.mark.asyncio
-async def test_interleaved_tools_do_not_split_the_answer(monkeypatch):
+async def test_text_blocks_never_glue_across_a_tool(monkeypatch):
     bot = FakeBot()
     clock = SimpleNamespace(now=0.0)
 
@@ -110,19 +121,20 @@ async def test_interleaved_tools_do_not_split_the_answer(monkeypatch):
 
     await response_stream._ask_inner(message, "prompt", 7, typer)
 
-    # Ровно один пузырь тулов, и он ВЫШЕ ответа: сначала работа, потом текст.
-    assert len(_bubbles(message)) == 1
-    alive = [a for a in message.answers if a[2] not in {d[1] for d in bot.deleted}]
-    text_alive = [a for a in alive if a[1].get("parse_mode") != "Markdown"]
-    bubble = _bubbles(message)[0]
-    assert len(text_alive) == 1
-    assert bubble[2] < text_alive[0][2], "пузырь тулов обязан быть выше ответа"
-    # Текст не потерян и не разорван.
-    final = [e[0] for e in bot.edits if "часть" in e[0]]
-    assert final and final[-1] == "часть один часть два часть три"
-    # Оба тула в одном пузыре.
-    bubble_texts = [e[0] for e in bot.edits if "Сделано" in e[0] or "Работаю" in e[0]]
-    assert bubble_texts and "WebSearch" in bubble_texts[-1] and "WebFetch" in bubble_texts[-1]
+    chat = _chat(message, bot)
+    kinds = [kind for kind, _ in chat]
+    assert kinds == ["text", "bubble", "text", "bubble", "text"], (
+        f"порядок как в Claude Code сломан: {chat}"
+    )
+
+    texts = [text for kind, text in chat if kind == "text"]
+    assert [t.strip() for t in texts] == ["часть один", "часть два", "часть три"]
+    # Главное: соседние блоки не слиплись в одно сообщение.
+    assert not any("часть два" in t and "часть один" in t for t in texts)
+
+    bubbles = [text for kind, text in chat if kind == "bubble"]
+    assert "WebSearch" in bubbles[0] and "WebFetch" not in bubbles[0]
+    assert "WebFetch" in bubbles[1] and "WebSearch" not in bubbles[1]
 
 
 class QueueClient:
