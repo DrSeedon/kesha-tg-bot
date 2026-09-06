@@ -44,6 +44,7 @@ _REQUIRED_METHODS = (
     "reconnect",
     "reset_async",
     "safe_disconnect",
+    "apply_mcp_servers",
 )
 
 

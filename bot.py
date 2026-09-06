@@ -1,7 +1,6 @@
 """Kesha Telegram Bot — bootstrap, bot/dp creation, main()."""
 
 import asyncio
-import json
 import os
 import sys
 import time
@@ -24,6 +23,7 @@ from config import (
     TOKEN,
     WORK_DIR,
     logger,
+    load_mcp_servers,
     load_system_prompt,
 )
 from chat_state import ChatRegistry
@@ -63,26 +63,14 @@ _handlers.set_bot(bot)
 
 
 def _load_global_mcp() -> dict:
+    """Current MCP set: the in-process `kesha` server plus whatever is on disk."""
     servers = {"kesha": kesha_server}
-    sources = [
-        Path.home() / ".claude.json",
-        Path.home() / ".claude" / "settings.json",
-        Path(WORK_DIR) / ".mcp.json",
-    ]
-    for path in sources:
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                for name, cfg in data.get("mcpServers", {}).items():
-                    if name not in servers:
-                        servers[name] = cfg
-            except Exception:
-                pass
+    for name, cfg in load_mcp_servers().items():
+        servers.setdefault(name, cfg)
     logger.info(f"MCP servers loaded: {list(servers.keys())}")
     return servers
 
 
-_mcp_config = _load_global_mcp()
 _system_prompt = load_system_prompt()
 
 # ChatRegistry — initialized in main(), used by all handlers
@@ -150,7 +138,7 @@ async def main():
 
     registry = ChatRegistry(
         bot=bot,
-        mcp_config=_mcp_config,
+        mcp_loader=_load_global_mcp,
         system_prompt=_system_prompt,
         model=MODEL,
         debounce_sec=DEBOUNCE_SEC,

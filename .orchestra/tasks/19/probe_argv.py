@@ -61,7 +61,7 @@ def secret_values() -> dict[str, str]:
     while leaking nothing. Only the values themselves settle it.
     """
     out = {}
-    for server, cfg in bot_module._mcp_config.items():
+    for server, cfg in bot_module._load_global_mcp().items():
         for name, value in ((cfg.get("env") or {}) if isinstance(cfg, dict) else {}).items():
             if isinstance(value, str) and len(value) >= 6:
                 out[f"{server}.{name}"] = value
@@ -90,11 +90,11 @@ def scan_argv(root: int, secrets: dict[str, str]) -> int:
 
 
 async def main() -> int:
-    print(f"MCP config keys: {list(bot_module._mcp_config.keys())}")
+    print(f"MCP config keys: {list(bot_module._load_global_mcp().keys())}")
 
     registry = ChatRegistry(
         bot=bot_module.bot,
-        mcp_config=bot_module._mcp_config,
+        mcp_loader=bot_module._load_global_mcp,
         system_prompt=bot_module._system_prompt,
         model=MODEL,
         debounce_sec=DEBOUNCE_SEC,

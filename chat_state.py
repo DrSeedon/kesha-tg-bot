@@ -82,6 +82,7 @@ class ChatState:
         runtime_id: str = "claude",
         build_runtime_fn=None,
         reset_runtimes_fn=None,
+        reload_mcp_fn=None,
     ):
         self.chat_id = chat_id
         self.session = session
@@ -115,6 +116,7 @@ class ChatState:
         self.runtime_id: str = runtime_id
         self._build_runtime = build_runtime_fn
         self._reset_runtimes = reset_runtimes_fn
+        self._reload_mcp = reload_mcp_fn
 
     @property
     def is_busy(self) -> bool:
@@ -297,6 +299,54 @@ class ChatState:
         except ActivityPersistenceError as exc:
             logger.error(f"Chat {self.chat_id}: clear completion persistence failed: {exc}")
         return True
+
+    async def reload_cli(self) -> dict:
+        """Respawn the CLI with a freshly read MCP config, keeping the chat.
+
+        Phase-gated exactly like `switch_runtime`: the CLI can only load a new
+        MCP set at spawn, and dropping the client inside a live turn would
+        strand a half-streamed answer. A busy chat is refused, never silently
+        queued — the caller says so out loud.
+        """
+        async with self._lock:
+            if self._shutdown:
+                return {"ok": False, "reason": "shutdown"}
+            if self.phase is not ChatPhase.IDLE:
+                return {"ok": False, "reason": "busy", "phase": str(self.phase)}
+            previous_phase = self.phase
+            self.phase = ChatPhase.PROCESSING  # hold the chat while the CLI restarts
+            self._runtime_switch_task = asyncio.current_task()
+            logger.info(
+                f"Chat {self.chat_id}: phase {previous_phase} → {self.phase} [reload_cli]"
+            )
+
+        before = sorted(self.session.mcp_servers)
+        session_id = self.session.session_id
+        try:
+            if not self._reload_mcp:
+                raise RuntimeError("MCP reload is not wired for this chat")
+            await self.session.apply_mcp_servers(self._reload_mcp())
+        except Exception as exc:
+            logger.error(f"Chat {self.chat_id}: CLI reload failed: {exc}")
+            return {"ok": False, "reason": "failed", "error": str(exc)}
+        finally:
+            await self._finish_cancel_safely(self._finish_reload())
+
+        after = sorted(self.session.mcp_servers)
+        return {
+            "ok": True,
+            "servers": after,
+            "added": [name for name in after if name not in before],
+            "removed": [name for name in before if name not in after],
+            "session": session_id,
+        }
+
+    async def _finish_reload(self) -> None:
+        """Release queued work exactly once, however the reload ended."""
+        try:
+            await self._drain_or_idle(record_activity=False)
+        finally:
+            self._runtime_switch_task = None
 
     async def switch_runtime(self, target: str) -> dict:
         """Swap the chat's backend, keeping the old one alive until the new one proves usable.
@@ -1224,7 +1274,7 @@ class ChatRegistry:
     def __init__(
         self,
         bot,
-        mcp_config: dict,
+        mcp_loader,
         system_prompt: str,
         model: str,
         debounce_sec: int,
@@ -1239,7 +1289,8 @@ class ChatRegistry:
         self._chats: dict[int, ChatState] = {}
         self._runtime = runtime
         self._bot = bot
-        self._mcp_config = mcp_config
+        self._mcp_loader = mcp_loader
+        self._mcp_config = mcp_loader()
         self._system_prompt = system_prompt
         self._model = model
         self._debounce_sec = debounce_sec
@@ -1268,6 +1319,11 @@ class ChatRegistry:
                 on_connecting=lambda: self._set_current_chat(chat_id),
             ),
         )
+
+    def reload_mcp_config(self) -> dict:
+        """Re-read the MCP config from disk so new backends get the current set."""
+        self._mcp_config = self._mcp_loader()
+        return self._mcp_config
 
     @staticmethod
     def _session_file(runtime_id: str, chat_id: int) -> Path:
@@ -1347,6 +1403,7 @@ class ChatRegistry:
                 runtime_id=runtime_id,
                 build_runtime_fn=self.build_session,
                 reset_runtimes_fn=self.reset_runtime_sessions,
+                reload_mcp_fn=self.reload_mcp_config,
             )
             logger.info(
                 "ChatRegistry: created ChatState for chat %s on %s",

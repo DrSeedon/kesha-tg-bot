@@ -426,12 +426,41 @@ async def h_debug(msg: types.Message):
 
 
 
+async def h_reload(msg: types.Message):
+    """Respawn the CLI so a freshly edited .mcp.json takes effect."""
+    if not allowed(msg.from_user.id):
+        return
+    result = await _registry.get(msg.chat.id).reload_cli()
+    if not result["ok"]:
+        if result["reason"] == "busy":
+            await _send_safe(msg, t(msg, "reload_busy"))
+        else:
+            await _send_safe(
+                msg,
+                t(msg, "reload_failed", error=str(result.get("error") or result["reason"])[:300]),
+            )
+        return
+
+    changes = []
+    if result["added"]:
+        changes.append(t(msg, "reload_added", added=", ".join(result["added"])))
+    if result["removed"]:
+        changes.append(t(msg, "reload_removed", removed=", ".join(result["removed"])))
+    await _send_safe(msg, t(
+        msg, "reload_done",
+        session=result["session"] or "none",
+        count=len(result["servers"]),
+        servers=", ".join(result["servers"]),
+        changes="\n".join(changes) or t(msg, "reload_unchanged"),
+    ))
+
+
 async def h_restart(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     await _send_safe(msg, t(msg, "restarting"))
     p = await asyncio.create_subprocess_exec(
-        "sudo", "systemctl", "restart", "kesha-bot",
+        "sudo", "systemctl", "restart", "kesha-bot-vps",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await p.communicate()
@@ -683,6 +712,7 @@ COMMANDS_RU = [
     BotCommand(command="ping", description="Проверить сессию"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
+    BotCommand(command="reload", description="Перезапустить CLI: новые MCP-тулы, переписка сохраняется"),
     BotCommand(command="restart", description="Перезапустить бота"),
 ]
 
@@ -699,6 +729,7 @@ COMMANDS_EN = [
     BotCommand(command="ping", description="Check session"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
+    BotCommand(command="reload", description="Restart CLI: new MCP tools, conversation kept"),
     BotCommand(command="restart", description="Restart bot"),
 ]
 
@@ -752,6 +783,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_ping, Command("ping"))
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
+    dp.message.register(h_reload, Command("reload"))
     dp.message.register(h_restart, Command("restart"))
     dp.message.register(h_stop, Command("stop"))
     # Media handlers — media_group BEFORE photo

@@ -41,6 +41,7 @@ class ChatRuntime(Protocol):
     """
 
     model: str
+    mcp_servers: dict
 
     @property
     def session_id(self) -> Optional[str]: ...
@@ -78,6 +79,16 @@ class ChatRuntime(Protocol):
     async def interrupt(self) -> None: ...
 
     def reconnect(self) -> None: ...
+
+    async def apply_mcp_servers(self, servers: dict) -> None:
+        """Restart the CLI process on a new MCP set, keeping this conversation.
+
+        Both runtimes read their MCP configuration once, when the process
+        starts, so only a restart can pick up a new server. Raise if the
+        conversation was not preserved — a silent new session looks identical
+        to a successful reload until the user notices the bot forgot him.
+        """
+        ...
 
     async def reset_async(self) -> None: ...
 

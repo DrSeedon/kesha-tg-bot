@@ -77,6 +77,38 @@ if not logger.handlers:
         _fh.setFormatter(_fmt)
         logger.addHandler(_fh)
 
+# --- MCP servers ---
+
+
+def load_mcp_servers(work_dir: str | None = None) -> dict:
+    """Read the external MCP servers from disk, first source wins.
+
+    Always re-reads: the CLI loads its MCP set once per process, so `/reload`
+    must see the file as it is now, not as it was when the bot started.
+    """
+    import json
+
+    servers: dict = {}
+    sources = [
+        Path.home() / ".claude.json",
+        Path.home() / ".claude" / "settings.json",
+        Path(work_dir if work_dir is not None else WORK_DIR) / ".mcp.json",
+    ]
+    for path in sources:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            # A typo in .mcp.json is the normal reason to run /reload — staying
+            # silent here would show an unchanged server list with no cause.
+            logger.warning(f"MCP config {path} is unreadable: {exc}")
+            continue
+        for name, cfg in data.get("mcpServers", {}).items():
+            servers.setdefault(name, cfg)
+    return servers
+
+
 # --- i18n ---
 
 STRINGS = {
@@ -117,6 +149,15 @@ STRINGS = {
         "runtime_unknown": "⚠️ Неизвестный рантайм `{runtime}`. Доступны: {available}",
         "runtime_busy": "⏳ Сейчас идёт обработка — переключение возможно только когда я свободен. Дождись ответа или отправь /stop.",
         "runtime_failed": "⚠️ Не удалось переключиться на *{runtime}*: {error}\nОстаюсь на *{fallback}* — продолжаю работать.",
+        "reload_done": (
+            "🔌 CLI перезапущен, переписка на месте (session `{session}`).\n"
+            "MCP-серверов: *{count}* — {servers}\n{changes}"
+        ),
+        "reload_unchanged": "Состав не изменился.",
+        "reload_added": "➕ Добавились: {added}",
+        "reload_removed": "➖ Исчезли: {removed}",
+        "reload_busy": "⏳ Сейчас идёт обработка — перезапуск CLI возможен только когда я свободен. Дождись ответа или отправь /stop.",
+        "reload_failed": "⚠️ Не удалось перезапустить CLI: {error}",
         "clear_failed": "⚠️ Не удалось полностью очистить сессии: {error}",
         "compact_floor": "⚠️ Для безопасного /compact уже не хватает свободного контекста. Сессия сохранена; доступен только /clear.",
         "activity_retry": "⚠️ Не удалось надёжно сохранить сообщение. Отправь его ещё раз.",
@@ -136,6 +177,7 @@ STRINGS = {
             "/runtime — посмотреть или сменить рантайм\n"
             "/debounce `<sec>` — задержка склейки сообщений\n"
             "/debug — вкл/выкл debug логирование\n"
+            "/reload — перезапустить CLI и подхватить новые MCP-тулы (переписка сохраняется)\n"
             "/restart — перезапустить бота\n\n"
             "📎 Поддерживаю: текст, фото, голосовые, видео, документы, аудио, видеокружки, стикеры, пересланные сообщения."
         ),
@@ -191,6 +233,15 @@ STRINGS = {
         "runtime_unknown": "⚠️ Unknown runtime `{runtime}`. Available: {available}",
         "runtime_busy": "⏳ A turn is in progress — switching is only possible when I am idle. Wait for the answer or send /stop.",
         "runtime_failed": "⚠️ Could not switch to *{runtime}*: {error}\nStaying on *{fallback}* — still working.",
+        "reload_done": (
+            "🔌 CLI restarted, the conversation is intact (session `{session}`).\n"
+            "MCP servers: *{count}* — {servers}\n{changes}"
+        ),
+        "reload_unchanged": "The set is unchanged.",
+        "reload_added": "➕ Added: {added}",
+        "reload_removed": "➖ Gone: {removed}",
+        "reload_busy": "⏳ A turn is in progress — the CLI can only be restarted when I am idle. Wait for the answer or send /stop.",
+        "reload_failed": "⚠️ Could not restart the CLI: {error}",
         "clear_failed": "⚠️ Could not fully clear the sessions: {error}",
         "compact_floor": "⚠️ There is not enough free context for safe /compact. The session is preserved; only /clear remains available.",
         "activity_retry": "⚠️ Could not safely save the message. Please send it again.",
@@ -210,6 +261,7 @@ STRINGS = {
             "/runtime — inspect or switch runtime\n"
             "/debounce `<sec>` — message batching delay\n"
             "/debug — toggle debug logs\n"
+            "/reload — restart the CLI and pick up new MCP tools (conversation kept)\n"
             "/restart — restart bot\n\n"
             "📎 Supports: text, photos, voice, video, documents, audio, video notes, stickers, forwarded messages."
         ),

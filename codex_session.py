@@ -1173,6 +1173,24 @@ class CodexSession:
         except Exception as exc:
             logger.warning(f"Codex interrupt failed: {exc}")
 
+    async def apply_mcp_servers(self, servers: dict) -> None:
+        """Restart the app-server on a new MCP set, resuming the same thread.
+
+        `config.toml` is read at spawn, so the running app-server keeps the old
+        servers no matter what we write. `_start_or_resume_thread` already
+        refuses a different thread; the check here also covers the case where
+        the id was dropped instead of swapped.
+        """
+        before = self.session_id
+        await self._teardown_process()
+        self.mcp_servers = servers
+        await self._connect()
+        if before and self.session_id != before:
+            raise RuntimeError(
+                f"MCP reload lost the thread: {before} → {self.session_id}"
+            )
+        logger.info(f"Codex: MCP reload reconnected with {list(servers)}")
+
     def reconnect(self) -> None:
         """Drop the process, keep the thread id (mirrors ClaudeSession)."""
         self._connected = False

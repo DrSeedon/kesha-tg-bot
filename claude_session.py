@@ -926,6 +926,24 @@ class ClaudeSession:
             return self._last_ctx_usage
         return None
 
+    async def apply_mcp_servers(self, servers: dict) -> None:
+        """Respawn the CLI on a new MCP set, resuming the same conversation.
+
+        Eager, not lazy: reconnecting here is what proves the new config
+        actually starts, and `resume` is what keeps the history. A session_id
+        that comes back different means we silently opened a NEW conversation
+        instead of reloading the old one — that is an error, not a reload.
+        """
+        before = self.session_id
+        await self.safe_disconnect()
+        self.mcp_servers = servers
+        await self._ensure_connected(preserve_session=True)
+        if before and self.session_id != before:
+            raise RuntimeError(
+                f"MCP reload lost the conversation: session {before} → {self.session_id}"
+            )
+        logger.info(f"MCP reload: reconnected with {list(servers)}")
+
     def reconnect(self):
         self._connected = False
         old_client = self._client
