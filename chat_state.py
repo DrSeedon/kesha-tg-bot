@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from config import (
+    PHOTO_CAPTION_REPLY_SEC,
     PHOTO_CAPTION_WAIT_SEC,
     RUNTIME_MODELS,
     STRINGS,
@@ -772,11 +773,14 @@ class ChatState:
         prev = self.phase
         self.phase = ChatPhase.COLLECTING
         # Пока в батче только фото без подписи — ждём дольше: подпись к нему
-        # приходит отдельным голосовым. Любая другая запись возвращает обычный
-        # дебаунс, поэтому дальше батчинг работает как раньше.
+        # приходит отдельным голосовым. Как только подпись пришла, ждать больше
+        # нечего — дожимаем батч почти сразу, не откатываясь на обычный дебаунс.
         delay = self.debounce_sec
-        if self.pending and all(entry.bare_photo for entry in self.pending):
-            delay = max(delay, PHOTO_CAPTION_WAIT_SEC)
+        if self.pending:
+            if all(entry.bare_photo for entry in self.pending):
+                delay = max(delay, PHOTO_CAPTION_WAIT_SEC)
+            elif any(entry.bare_photo for entry in self.pending):
+                delay = min(delay, PHOTO_CAPTION_REPLY_SEC)
         logger.info(
             f"Chat {self.chat_id}: phase {prev} → {self.phase} [arm_debounce {delay}s]"
         )

@@ -103,7 +103,8 @@ async def test_photo_with_caption_keeps_the_normal_debounce(armed_delays):
 
 
 @pytest.mark.asyncio
-async def test_text_after_photo_restores_the_normal_debounce(armed_delays):
+async def test_caption_after_photo_fires_almost_at_once(armed_delays):
+    """Подпись пришла — окно ожидания схлопывается, а не откатывается на 3с."""
     state = make_state(Harness())
 
     await state.accept_entry(entry("[photo: /a.jpg]", 1, bare_photo=True))
@@ -112,7 +113,25 @@ async def test_text_after_photo_restores_the_normal_debounce(armed_delays):
     await asyncio.sleep(0)
     disarm(state)
 
-    assert armed_delays == [chat_state_mod.PHOTO_CAPTION_WAIT_SEC, NORMAL]
+    assert armed_delays == [
+        chat_state_mod.PHOTO_CAPTION_WAIT_SEC,
+        chat_state_mod.PHOTO_CAPTION_REPLY_SEC,
+    ]
+    assert chat_state_mod.PHOTO_CAPTION_REPLY_SEC < NORMAL
+
+
+@pytest.mark.asyncio
+async def test_short_debounce_is_not_stretched_to_the_caption_delay(armed_delays):
+    """`/debounce 0` остаётся нулём: схлопывание не должно ЗАМЕДЛЯТЬ батч."""
+    state = make_state(Harness(), debounce_sec=0)
+
+    await state.accept_entry(entry("[photo: /a.jpg]", 1, bare_photo=True))
+    await asyncio.sleep(0)
+    await state.accept_entry(entry("а это что", 2))
+    await asyncio.sleep(0)
+    disarm(state)
+
+    assert armed_delays[-1] == 0
 
 
 @pytest.mark.asyncio

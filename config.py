@@ -33,6 +33,9 @@ DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 # Фото без подписи почти всегда ждёт следом голосовое (в фото войс не вложить) —
 # держим батч дольше обычного дебаунса, чтобы подпись уехала тем же ходом.
 PHOTO_CAPTION_WAIT_SEC = int(os.getenv("PHOTO_CAPTION_WAIT_SEC", "10"))
+# Подпись к фото пришла — ждать больше нечего. Не ноль: секунда оставляет
+# место дослать вторую фразу, но паузы уже не чувствуется.
+PHOTO_CAPTION_REPLY_SEC = float(os.getenv("PHOTO_CAPTION_REPLY_SEC", "1"))
 AUTO_COMPACT_TRIGGER_PCT = 95.0
 CODEX_AUTO_COMPACT_TRIGGER_PCT = 90.0
 TG_MSG_LIMIT = 4096
