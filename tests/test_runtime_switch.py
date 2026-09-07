@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config  # noqa: E402
 from chat_state import ChatPhase, ChatRegistry, ChatState, PendingEntry  # noqa: E402
 
 
@@ -705,7 +706,9 @@ def test_codex_can_be_the_configured_startup_runtime():
     registry._runtime = "codex"
     registry._model = "claude-opus-5"
 
-    assert registry._model_for("codex") == "gpt-5.6-sol"
+    codex_model = config.RUNTIME_MODELS["codex"]
+    assert codex_model != registry._model, "the fixture stopped testing anything"
+    assert registry._model_for("codex") == codex_model
     assert registry._model_for("claude") == "claude-opus-5"
 
 

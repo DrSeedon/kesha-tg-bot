@@ -34,7 +34,7 @@ from typing import Any, AsyncGenerator, Optional
 
 from runtime_protocol import RuntimeCapabilities
 from quota_gate import codex_windows, quota_exhausted
-from config import CODEX_AUTO_COMPACT_TRIGGER_PCT
+from config import CODEX_AUTO_COMPACT_TRIGGER_PCT, RUNTIME_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,8 @@ class CodexSession:
     def __init__(
         self,
         cwd: str,
-        model: str = "gpt-5.6-sol",
+        # One owner for the id: config decides, this is only its fallback.
+        model: str = RUNTIME_MODELS["codex"],
         system_prompt: str = "",
         mcp_servers: Optional[dict] = None,
         session_file: Optional[Path] = None,
