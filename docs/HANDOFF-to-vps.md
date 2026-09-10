@@ -44,11 +44,11 @@
 
 - **#14** ночной компакт (23:00–08:00 Красноярск) + fail-closed резерв контекста 208K.
   Он же вызвал прод-инцидент 01.08 и он же его фикс — см. ниже.
-- **#15** гайд клиенту Александру (`docs/tasks/15/guide-alexander.md`).
+- **#15** гайд клиенту Александру (`.orchestra/tasks/15/guide-alexander.md`).
 - **#16** два рантайма Claude↔Codex: `/runtime` (текущий + модель + остаток квоты с датой
   сброса), `/runtime codex|claude`. Дефолт claude, автопереключения НЕТ, боевого пробега нет.
   Файлы: `runtime_protocol.py`, `runtime_registry.py`, `tool_bridge.py`, `codex_session.py`,
-  `file_access.py`. Справка: `docs/tasks/16/deploy-notes.md`.
+  `file_access.py`. Справка: `.orchestra/tasks/16/deploy-notes.md`.
 - **#17** стриминг не замирает при флуд-контроле TG (общий edit-бюджет на чат, 3.1с).
 - **#20** таймаут контрол-запроса 60с→10с + ретрай + `runtime_unhealthy` + лечение клиента.
 - **#21** промпт сжатия: обе полярности свидетельств, выход на ноль для записи файлов,

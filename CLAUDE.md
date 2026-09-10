@@ -85,7 +85,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - **`ourPrice`** = оценка цены с Ozon-аккаунтом = `round(cardPrice × 0.8949)` (без логина). ПРИБЛИЖЕНИЕ (замер 5 SKU, ±0.1%), не точная цена. `price` = публичная «С банками». Точная аккаунт-цена требует логина (не делаем). Причина: аноним MCP vs залогиненный `premiumSubscribe` tier.
 - **Регион = КРАСНОЯРСК** форсится через `krsk-state.json` (куки, captured 1 раз кликом карты). `browser.js` грузит storageState (абс. путь) + **fail-closed** self-check: регион ≠ Красноярск → **авто-запуск `refresh-region.sh`** (re-capture, ретрай 1 раз) → если не помогло, tool возвращает `isError`, НЕ московские цены. Куки слетают ~6д (не 365d) → превентивный `ozon-region-refresh.timer` каждые 5 дней. Ручной refresh: `node capture-region.mjs headless`.
 - **RAM-защита прода** (там же seedon.ru + CryptoBot, 3GB): юзер `ozon` в `user-1002.slice` c `MemoryMax=800M, MemorySwapMax=0` (systemd drop-in). Пик реального запроса ~306MB. OOM бьёт ТОЛЬКО ozon-слайс (проверено kill-test'ом), прод не страдает. Idle-close браузера через 10 мин.
-- **Zombie-cleanup:** `kill-stale.sh` (**root** systemd timer каждые 20мин) убивает ozon `index.js` чей parent sshd БЕЗ ESTABLISHED сокета (или PPID=1) + age>2h — зомби от протухших SSH. MUST root (ss под ozon видит 0 pid'ов → убил бы живые). Патчи: docs/tasks/ozon-fix/.
+- **Zombie-cleanup:** `kill-stale.sh` (**root** systemd timer каждые 20мин) убивает ozon `index.js` чей parent sshd БЕЗ ESTABLISHED сокета (или PPID=1) + age>2h — зомби от протухших SSH. MUST root (ss под ozon видит 0 pid'ов → убил бы живые). Патчи: .orchestra/tasks/ozon-fix/.
 - **Доступ:** ключ kesha@Contabo в `/home/ozon/.ssh/authorized_keys` с forced-command (`no-pty`, без shell). `index.js` при EOF/обрыве SSH чистит Chromium (нет сирот).
 - **Ограничения:** нет истории цен; отзывы обрезаются (лимит 1–30); первый вызов ~13с (антибот), дальше 0.3–1с; данные из внутреннего composer-api (может смениться).
 
@@ -197,11 +197,11 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 - **CLAUDE.md теперь актуален для Contabo** (не Timeweb) — PROCESS RULES, VPS TROUBLESHOOTING, tunnel IP обновлены
 
 ### Файлы для контекста
-- `docs/tasks/6/` — миграция research/plan/report
-- `docs/tasks/7/` — Ozon MCP research/plan/report + deployed patches
-- `docs/tasks/8/` — RAG bge-m3 research/plan/report
-- `docs/tasks/9/` — ourPrice research + deployed patches
-- `docs/tasks/10/` — file RAG research/plan/report + codex reviews + prod-bugs
+- `.orchestra/tasks/6/` — миграция research/plan/report
+- `.orchestra/tasks/7/` — Ozon MCP research/plan/report + deployed patches
+- `.orchestra/tasks/8/` — RAG bge-m3 research/plan/report
+- `.orchestra/tasks/9/` — ourPrice research + deployed patches
+- `.orchestra/tasks/10/` — file RAG research/plan/report + codex reviews + prod-bugs
 - `artifacts/rag-files-report.html` — интерактивный HTML-отчёт по file RAG (40KB)
 
 ### Открытые вопросы
@@ -214,13 +214,13 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 ### Что сделано (v2.6.0)
 1. **File RAG (#10)** — индексация `.md`/`.txt` из cog-second-brain (1318 файлов, 3498 чанков) в тот же
    RAG что диалоги. Heading-aware чанкинг, watchfiles watcher, sha256 дедуп, source attribution. SCHEMA 7→8,
-   отдельные файловые таблицы. RO/RW executor split (search не ждёт backfill: 37ms vs 300000ms). docs/tasks/10/.
+   отдельные файловые таблицы. RO/RW executor split (search не ждёт backfill: 37ms vs 300000ms). .orchestra/tasks/10/.
 2. **Preventive compact-таймер** — chat_state.py: idle 55мин + ctx>20% → compact пока кеш тёплый (перед
-   неизбежным cold-start). Экономит ~18% burn лимитов (cold-start доля 30%→12%). docs/tasks/cache-compact/.
+   неизбежным cold-start). Экономит ~18% burn лимитов (cold-start доля 30%→12%). .orchestra/tasks/cache-compact/.
 3. **Session-limit fix** — «hit your session limit» не ретраить (был loop 2-3× reconnect). response_stream.py.
 4. **File-search role bug** — role="user" выкидывал ВСЕ файлы. Fix: файлы ищутся всегда, role → только диалоги.
 5. **Ozon fixes** (москва) — kill-stale.sh (root timer, зомби node по socket-state) + region auto-refresh
-   (browser.js → refresh-region.sh при провале self-check + weekly timer). docs/tasks/ozon-fix/.
+   (browser.js → refresh-region.sh при провале self-check + weekly timer). .orchestra/tasks/ozon-fix/.
 6. **ourPrice 0.893→0.8949** (5 SKU).
 
 ### Ключевые решения (замерено, не догадки)
@@ -233,7 +233,7 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 
 ### Process rule (усвоено)
 - **Не выдумывать кривые для допущений.** Первый timing-sweep использовал выдуманную «рампу остывания
-  кеша с 30мин» — первоисточник (docs/tasks/cache-optimization) опровергает: TTL=60, плоско до 30мин.
+  кеша с 30мин» — первоисточник (.orchestra/tasks/cache-compact) опровергает: TTL=60, плоско до 30мин.
   Оркестратор поймал. Число из замера, НЕ «правдоподобная» интерполяция.
 
 ### Открытые вопросы
@@ -241,7 +241,7 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 
 ## Session notes (2026-07-31) — клиент Александр: баны Claude + феасибилити Codex
 
-### #15 — гайд «от почты до оплаты» (docs/tasks/15/guide-alexander.md)
+### #15 — гайд «от почты до оплаты» (.orchestra/tasks/15/guide-alexander.md)
 Клиент словил 5 банов подряд. **Первичная причина — НЕ датацентровый IP** (это была рабочая гипотеза, опровергнута):
 РФ отсутствует в [Supported Regions](https://www.anthropic.com/supported-countries), ToS привязывает доступ к этой
 политике → VPN маскирует локацию, но не делает использование легитимным. Гарантий не существует в принципе.
@@ -256,7 +256,7 @@ DC-IP = усилитель, не приговор: наш Кеша месяца�
   будит модель без юзера → лимит горит в тишине. Pro реалистичен только на Sonnet, база для Opus — Max 5x.
 - Codex-ревью НЕ проводилось (квота до 2026-08-05). Документ cross-LLM не проверялся.
 
-### #16 — Кеша на Codex/GPT (docs/tasks/16/research.md)
+### #16 — Кеша на Codex/GPT (.orchestra/tasks/16/research.md)
 **Технически РЕАЛЬНО: 9–14 чел-дней паритет / 4–6 дней «лайт».** Ранее клиенту сказали «у Кеши нет возможности
 работать через харнес Codex» — на сегодня это неверно, харнес есть.
 - Проверено живьём: `codex app-server --stdio` = JSON-RPC, **88 методов** (spikes/appserver_methods.txt).
@@ -357,7 +357,7 @@ None → `_max_output_tokens_valid` залатчился False НАВСЕГДА 
   `/runtime codex|claude`. Дефолт claude, автопереключения НЕТ (T8 не делался), боевого пробега нет.
   Файлы: `runtime_protocol.py`, `runtime_registry.py`, `tool_bridge.py`, `codex_session.py`,
   `file_access.py`. Env: `KESHA_RUNTIME`, `KESHA_CODEX_MODEL/BIN/HOME`, `KESHA_SENDABLE_ROOTS`.
-  Справка по деплою: `docs/tasks/16/deploy-notes.md`.
+  Справка по деплою: `.orchestra/tasks/16/deploy-notes.md`.
 - **#17** — стриминг не замирает при флуд-контроле TG (общий edit-бюджет на чат, 3.1с).
 - **#20** — таймаут контрол-запроса 60с→10с + ретрай + `runtime_unhealthy` + лечение клиента.
   Течь `pending_control_responses` закрыта через `shield` (внешний cancel убивал уборку SDK).
