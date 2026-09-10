@@ -8,6 +8,20 @@ Telegram-бот на `ClaudeSDKClient` (persistent connection) из официа
 Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_stream.py → claude_session.py → Claude CLI
 ```
 
+## KB и исторические материалы
+
+Переиспользуемые находки хранятся в `.orchestra/kb/`, а исследование, незавершённая
+работа и отрицательные результаты — в соответствующем `.orchestra/tasks/<id>/`.
+Личные заметки воркеров должны оставаться короткими указателями. Общая политика
+knowledge находится в `/mnt/data/Projects/Python/orchestra/.orchestra/pipelines/default/prompts/modules/knowledge.md`;
+не веди ежедневные хроники и не дублируй task-отчёты в инструкциях.
+
+Текущие темы: [telegram-ingress](.orchestra/kb/telegram-ingress.md) и
+[context-compaction](.orchestra/kb/context-compaction.md). Их исходные доказательства
+собраны в `.orchestra/tasks/32/` и `.orchestra/tasks/34/`. Исторические документы могут
+описывать план, отсутствие запуска или отозванную гипотезу — это нужно явно отличать от
+полученного результата.
+
 ### Модули
 
 | Файл | Строк | Что делает |

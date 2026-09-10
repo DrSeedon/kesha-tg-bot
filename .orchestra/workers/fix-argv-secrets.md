@@ -23,7 +23,7 @@ the constant above is verified to pass. Never borrow prod `.env` into a worktree
 `main()` polls Telegram with the prod token → fights `kesha-bot-vps` for `getUpdates`,
 and also binds the inbox port and kicks off a RAG backfill. To exercise real wiring,
 build a `ChatRegistry` by hand and use `registry.get(chat).session` — that is the
-production path minus polling. Pattern kept in `docs/tasks/19/probe_argv.py`.
+production path minus polling. Pattern kept in `.orchestra/tasks/19/probe_argv.py`.
 
 ## Secret checks: match VALUES, never name patterns
 
