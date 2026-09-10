@@ -8,7 +8,7 @@ routing) is exercised for real.
 Prints only variable NAMES and match COUNTS, never a secret value.
 
     ALLOWED_USERS=<id> TELEGRAM_BOT_TOKEN=<dummy> WORK_DIR=/opt/cog-second-brain \
-        .venv/bin/python .orchestra/tasks/19/probe_argv.py
+        .venv/bin/python docs/tasks/19/probe_argv.py
 """
 
 import asyncio
