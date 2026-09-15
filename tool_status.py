@@ -18,6 +18,7 @@ TOOL_ICONS = {
     "WebFetch": "🌐",
     "Agent": "🤖",
     "Task": "🤖",
+    "Skill": "🧩",
     "TodoWrite": "📝",
     "NotebookEdit": "📓",
 }
@@ -76,7 +77,9 @@ def _escape_md(s: str) -> str:
 def _format_hint(tool_input: Any) -> str:
     if not isinstance(tool_input, dict):
         return ""
-    for key in ("command", "file_path", "path", "pattern", "query", "prompt", "url", "description"):
+    # "skill" first: the Skill tool carries the skill name there, and its other
+    # keys ("args") would otherwise hide which skill is actually running.
+    for key in ("skill", "command", "file_path", "path", "pattern", "query", "prompt", "url", "description"):
         if key in tool_input and tool_input[key]:
             val = str(tool_input[key])
             val = val.replace("\n", " ")
