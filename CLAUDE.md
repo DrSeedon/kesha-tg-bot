@@ -93,6 +93,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 
 - **Прод = Contabo DE** (158.220.127.161, single-node, no failover). Деплой: `ssh root@158.220.127.161 "sudo -u kesha git -C /opt/kesha-bot pull && systemctl restart kesha-bot-vps"`. Код `/opt/kesha-bot`, CWD `/opt/cog-second-brain`, юзер `kesha`
 - **Прокси НЕ нужен** — Contabo во Франции, достаёт Anthropic/Telegram/Deepgram напрямую. НЕТ HTTPS_PROXY/TG_PROXY/NO_PROXY
+- **`artifacts/` не версионируется, репозиторий `DrSeedon/kesha-tg-bot` ПУБЛИЧНЫЙ.** 15.09.2026 в локальном `main` на проде накопилось 13 коммитов с 370 фотографиями учеников клиента — один `git push` опубликовал бы их. Каталог в `.gitignore`, на проде стоит `pre-push` хук, который рубит пуш с путями под `artifacts/` (кроме шести старых `artifacts/*.html`). Файлы на диске живут как обычно, просто вне git
 - Xray на 443/8443 — это VPN Максима, НЕ трогать
 - Smoke test: `python -c "import bot"` перед рестартом
 - MCP тулы в Кеше: `mcp__kesha__*`

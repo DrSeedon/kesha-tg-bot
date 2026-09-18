@@ -14,3 +14,7 @@ token.pickle
 # Orchestra project state is canonical Git data.
 !.orchestra/
 !.orchestra/**
+
+# Рабочие артефакты (сборки обложек, фото учеников, черновики) не версионируются:
+# репозиторий публичный. Шесть старых HTML-отчётов остаются в истории как есть.
+artifacts/
