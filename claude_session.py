@@ -34,11 +34,10 @@ from runtime_protocol import RuntimeCapabilities
 # was swallowed by logging.lastResort (WARNING+) and never reached any log.
 logger = logging.getLogger("kesha.claude_session")
 
-# SDK usage key -> response_usage column, summed over the API calls of one answer.
-# Counted ONCE per message id: the stream repeats the same message — and with it
-# the same usage — for every content block, so a naive sum inflates the bill
-# (measured 19.09 on a production transcript: 454 entries, 260 real messages,
-# 173 ids repeated with byte-identical usage).
+# Usage of the TERMINAL result — the only final figure the SDK reports.
+# `AssistantMessage.usage` is a message_start snapshot: measured 19.09 on a live
+# query whose answer was 242 output tokens, the assistant messages carried
+# output_tokens=6, while the result carried 242.
 _USAGE_COLUMNS = {
     "input_tokens": "input_tokens",
     "cache_creation_input_tokens": "cache_creation_tokens",
@@ -180,8 +179,8 @@ class ClaudeSession:
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
-        self.last_response_usage: dict[str, int] = {}
-        self._counted_message_ids: set[str] = set()
+        self.last_response_usage: dict[str, Any] = {}
+        self._session_cost_seen: float = 0.0
         self.rate_limit: Optional[dict[str, Any]] = None
         self.usage_limit_active = False
         self.last_duration_ms: int = 0
@@ -433,17 +432,31 @@ class ClaudeSession:
         real tokens twice, and both belong to that answer's price.
         """
         self.last_response_usage = {}
-        self._counted_message_ids = set()
 
-    def _absorb_assistant_usage(
-        self, usage: Optional[dict[str, Any]], message_id: Optional[str]
-    ) -> None:
+    def _absorb_result_cost(self, running: float) -> None:
+        """Price this answer from the session's RUNNING TOTAL.
+
+        The CLI reports the whole session's spend, not this answer's: measured
+        19.09, a 3-token reply "cost" more than the 165-token one before it
+        (0.0279 after 0.0155). A value below the previous one means the counter
+        restarted with a new session, so it IS the answer's price.
+        """
+        delta = (
+            running - self._session_cost_seen
+            if running >= self._session_cost_seen
+            else running
+        )
+        self._session_cost_seen = running
+        self.last_cost_usd = delta
+        self.total_cost_usd += delta
+        self.last_response_usage["cost_usd"] = (
+            self.last_response_usage.get("cost_usd", 0.0) + delta
+        )
+
+    def _absorb_result_usage(self, usage: Optional[dict[str, Any]]) -> None:
+        """Fold one terminal result into the answer's bill (retries add up)."""
         if not isinstance(usage, dict):
             return
-        if message_id is not None:
-            if message_id in self._counted_message_ids:
-                return
-            self._counted_message_ids.add(message_id)
         for key, column in _USAGE_COLUMNS.items():
             value = usage.get(key)
             if isinstance(value, int):
@@ -495,11 +508,6 @@ class ClaudeSession:
 
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
-                    # Before any branch: tokens of a call that ended in a limit
-                    # or a context error were still spent and still cost money.
-                    self._absorb_assistant_usage(
-                        getattr(msg, "usage", None), getattr(msg, "message_id", None)
-                    )
                     assistant_error = getattr(msg, "error", None)
                     if assistant_error in {"rate_limit", "billing_error"}:
                         raw = "\n".join(
@@ -549,10 +557,10 @@ class ClaudeSession:
                         self._save_session()
                         logger.info(f"Session ID saved: {self.session_id[:8]}...")
                     if getattr(msg, "total_cost_usd", None) is not None:
-                        self.last_cost_usd = msg.total_cost_usd
-                        self.total_cost_usd += msg.total_cost_usd
+                        self._absorb_result_cost(float(msg.total_cost_usd))
                     if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
+                        self._absorb_result_usage(msg.usage)
 
                     # Classify a quota/short-circuit terminal BEFORE touching the
                     # runtime invariant. Such a result may still carry a partial

@@ -80,7 +80,7 @@ def _log_response_usage(chat_id: int) -> None:
             cache_read_tokens=usage.get("cache_read_tokens"),
             output_tokens=usage.get("output_tokens"),
             context_tokens=usage.get("context_tokens"),
-            total_cost_usd=getattr(session, "last_cost_usd", None),
+            total_cost_usd=usage.get("cost_usd"),
         )
     except Exception as exc:
         logger.error(f"Chat {chat_id}: response usage not recorded: {exc}")
