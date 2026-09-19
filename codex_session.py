@@ -36,7 +36,18 @@ from runtime_protocol import RuntimeCapabilities
 from quota_gate import codex_windows, quota_exhausted
 from config import CODEX_AUTO_COMPACT_TRIGGER_PCT, RUNTIME_MODELS
 
-logger = logging.getLogger(__name__)
+# Child of "kesha": handlers live on that logger only (config.py), so under
+# __name__ every INFO of this runtime was dropped by logging.lastResort — which
+# is why `grep "Codex: starting app-server"` in the journal returned nothing.
+logger = logging.getLogger("kesha.codex_session")
+
+# Codex app-server usage key (camelCase over JSON-RPC) -> response_usage column.
+# It reports no cost and no cache-write split; those columns stay NULL.
+_USAGE_COLUMNS = {
+    "inputTokens": "input_tokens",
+    "cachedInputTokens": "cache_read_tokens",
+    "outputTokens": "output_tokens",
+}
 
 # ChatGPT-auth effective window. Authoritative value arrives per turn in
 # `thread/tokenUsage/updated.modelContextWindow`; this is only the bootstrap
@@ -163,6 +174,8 @@ class CodexSession:
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
+        self.last_response_usage: dict[str, int] = {}
+        self._turn_usage: dict[str, Any] = {}
         self.rate_limit: Optional[dict[str, Any]] = None
         self.usage_limit_active = False
         self.last_duration_ms: int = 0
@@ -741,6 +754,7 @@ class CodexSession:
 
         self.last_duration_ms = int((time.monotonic() - started) * 1000)
         self.last_num_turns += 1
+        self._fold_turn_usage()
 
     async def inject_context(self, text: str) -> None:
         """Append passive context without starting an agentic turn."""
@@ -934,6 +948,10 @@ class CodexSession:
         last = usage.get("last") or {}
         total = usage.get("total") or {}
         self.last_usage = last or None
+        # Snapshot, not a sum: this notification repeats within one turn, and
+        # `last` already holds that turn's running total.
+        if last:
+            self._turn_usage = dict(last)
         # `last.inputTokens` is what the model actually carried into this call —
         # that IS the live context size. `total` accumulates across the thread
         # and must never be read as current context (Orchestra shipped that bug).
@@ -948,6 +966,28 @@ class CodexSession:
             }
         if isinstance(total.get("totalTokens"), int):
             self.last_usage = {**(self.last_usage or {}), "threadTotalTokens": total["totalTokens"]}
+
+    def reset_response_usage(self) -> None:
+        """Open a fresh accounting window for one answer (retries add up)."""
+        self.last_response_usage = {}
+        self._turn_usage = {}
+
+    def _fold_turn_usage(self) -> None:
+        """Add the finished turn to the answer's bill."""
+        for key, column in _USAGE_COLUMNS.items():
+            value = self._turn_usage.get(key)
+            if isinstance(value, int):
+                self.last_response_usage[column] = (
+                    self.last_response_usage.get(column, 0) + value
+                )
+        carried = self._turn_usage.get("inputTokens")
+        if isinstance(carried, int) and carried > 0:
+            self.last_response_usage["context_tokens"] = carried
+        # `last_num_turns` counts the whole thread here, not this answer.
+        self.last_response_usage["num_turns"] = (
+            self.last_response_usage.get("num_turns", 0) + 1
+        )
+        self._turn_usage = {}
 
     def _absorb_rate_limits(self, limits: dict) -> None:
         self.rate_limit = limits or None

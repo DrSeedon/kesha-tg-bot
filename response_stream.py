@@ -61,6 +61,31 @@ def _runtime_limit_suffix(chat_id: int) -> Optional[str]:
     return f" (сброс {when})" if when else None
 
 
+def _log_response_usage(chat_id: int) -> None:
+    """Write what this answer cost. Bookkeeping never breaks a delivered reply."""
+    try:
+        session = _get_session(chat_id)
+        usage = getattr(session, "last_response_usage", None) or {}
+        from message_log import get_db as _get_msg_db
+        _get_msg_db().log_response_usage(
+            chat_id,
+            _runtime_label(chat_id) or "unknown",
+            model=getattr(session, "model", None),
+            num_turns=usage.get("num_turns"),
+            duration_ms=getattr(session, "last_duration_ms", None),
+            input_tokens=usage.get("input_tokens"),
+            cache_creation_tokens=usage.get("cache_creation_tokens"),
+            cache_creation_5m_tokens=usage.get("cache_creation_5m_tokens"),
+            cache_creation_1h_tokens=usage.get("cache_creation_1h_tokens"),
+            cache_read_tokens=usage.get("cache_read_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            context_tokens=usage.get("context_tokens"),
+            total_cost_usd=getattr(session, "last_cost_usd", None),
+        )
+    except Exception as exc:
+        logger.error(f"Chat {chat_id}: response usage not recorded: {exc}")
+
+
 def _runtime_label(chat_id: int) -> str:
     """Which provider is out of quota — the user has more than one subscription."""
     try:
@@ -164,6 +189,11 @@ async def _stop_typer(typer: asyncio.Task) -> None:
 async def _ask_inner(message, prompt, cid, typer):
     retries = 0
     edit_bot = _ChatEditBudgetBot(_bot)
+    # Fail-loud on a real runtime lives in runtime_registry (_REQUIRED_METHODS);
+    # here bookkeeping must never stand between the user and his answer.
+    _reset = getattr(_get_session(cid), "reset_response_usage", None)
+    if callable(_reset):
+        _reset()
 
     parts: list[str] = []
     has_deltas = False
@@ -655,6 +685,7 @@ async def _ask_inner(message, prompt, cid, typer):
             _get_msg_db().log_assistant(cid, text)
         except Exception:
             pass
+    _log_response_usage(cid)
     if _config.DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 

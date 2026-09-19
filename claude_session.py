@@ -29,7 +29,28 @@ from config import AUTO_COMPACT_TRIGGER_PCT, MODEL
 from quota_gate import claude_windows, fetch_claude_usage, quota_exhausted
 from runtime_protocol import RuntimeCapabilities
 
-logger = logging.getLogger(__name__)
+# Child of "kesha": config.py attaches the journal/file handlers to that logger
+# only. Under __name__ every INFO here — including the per-response cost line —
+# was swallowed by logging.lastResort (WARNING+) and never reached any log.
+logger = logging.getLogger("kesha.claude_session")
+
+# SDK usage key -> response_usage column, summed over the API calls of one answer.
+# Counted ONCE per message id: the stream repeats the same message — and with it
+# the same usage — for every content block, so a naive sum inflates the bill
+# (measured 19.09 on a production transcript: 454 entries, 260 real messages,
+# 173 ids repeated with byte-identical usage).
+_USAGE_COLUMNS = {
+    "input_tokens": "input_tokens",
+    "cache_creation_input_tokens": "cache_creation_tokens",
+    "cache_read_input_tokens": "cache_read_tokens",
+    "output_tokens": "output_tokens",
+}
+
+# The 5m/1h split lives one level deeper, in usage["cache_creation"].
+_CACHE_CREATION_COLUMNS = {
+    "ephemeral_5m_input_tokens": "cache_creation_5m_tokens",
+    "ephemeral_1h_input_tokens": "cache_creation_1h_tokens",
+}
 
 SESSION_DIR = Path("./storage/sessions")
 EXTERNAL_MCP_CONFIG = Path(__file__).parent / "storage" / "mcp-external.json"
@@ -159,6 +180,8 @@ class ClaudeSession:
         self.last_cost_usd: Optional[float] = None
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
+        self.last_response_usage: dict[str, int] = {}
+        self._counted_message_ids: set[str] = set()
         self.rate_limit: Optional[dict[str, Any]] = None
         self.usage_limit_active = False
         self.last_duration_ms: int = 0
@@ -403,6 +426,52 @@ class ClaudeSession:
                 raise
         self._connected = True
 
+    def reset_response_usage(self) -> None:
+        """Open a fresh accounting window for one answer to the user.
+
+        Not reset per `send_message`: a reconnect retry inside one answer spends
+        real tokens twice, and both belong to that answer's price.
+        """
+        self.last_response_usage = {}
+        self._counted_message_ids = set()
+
+    def _absorb_assistant_usage(
+        self, usage: Optional[dict[str, Any]], message_id: Optional[str]
+    ) -> None:
+        if not isinstance(usage, dict):
+            return
+        if message_id is not None:
+            if message_id in self._counted_message_ids:
+                return
+            self._counted_message_ids.add(message_id)
+        for key, column in _USAGE_COLUMNS.items():
+            value = usage.get(key)
+            if isinstance(value, int):
+                self.last_response_usage[column] = (
+                    self.last_response_usage.get(column, 0) + value
+                )
+        split = usage.get("cache_creation")
+        if isinstance(split, dict):
+            for key, column in _CACHE_CREATION_COLUMNS.items():
+                value = split.get(key)
+                if isinstance(value, int):
+                    self.last_response_usage[column] = (
+                        self.last_response_usage.get(column, 0) + value
+                    )
+        # Context carried into THIS call — the last one wins, so the row shows how
+        # big the conversation had grown by the end of the answer.
+        carried = sum(
+            usage.get(key) or 0
+            for key in (
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            )
+            if isinstance(usage.get(key), int)
+        )
+        if carried:
+            self.last_response_usage["context_tokens"] = carried
+
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
         pending_limit: Optional[str] = None
@@ -426,6 +495,11 @@ class ClaudeSession:
 
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
+                    # Before any branch: tokens of a call that ended in a limit
+                    # or a context error were still spent and still cost money.
+                    self._absorb_assistant_usage(
+                        getattr(msg, "usage", None), getattr(msg, "message_id", None)
+                    )
                     assistant_error = getattr(msg, "error", None)
                     if assistant_error in {"rate_limit", "billing_error"}:
                         raw = "\n".join(
@@ -557,6 +631,10 @@ class ClaudeSession:
                             )
                     self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
                     self.last_num_turns = getattr(msg, "num_turns", 0) or 0
+                    self.last_response_usage["num_turns"] = (
+                        self.last_response_usage.get("num_turns", 0)
+                        + self.last_num_turns
+                    )
                     self.last_stop_reason = getattr(msg, "stop_reason", None)
                     dur_s = self.last_duration_ms / 1000
                     logger.info(

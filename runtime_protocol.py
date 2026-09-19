@@ -80,6 +80,15 @@ class ChatRuntime(Protocol):
 
     def reconnect(self) -> None: ...
 
+    def reset_response_usage(self) -> None:
+        """Start a new per-answer accounting window.
+
+        Required of every runtime: the durable cost record is written from
+        `last_response_usage` after each answer, and a runtime that silently
+        skipped the reset would bill the next user for the previous answer.
+        """
+        ...
+
     async def apply_mcp_servers(self, servers: dict) -> None:
         """Restart the CLI process on a new MCP set, keeping this conversation.
 

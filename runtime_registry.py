@@ -42,6 +42,7 @@ _REQUIRED_METHODS = (
     "get_context_usage",
     "interrupt",
     "reconnect",
+    "reset_response_usage",
     "reset_async",
     "safe_disconnect",
     "apply_mcp_servers",

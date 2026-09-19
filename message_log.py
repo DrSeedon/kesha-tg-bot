@@ -51,6 +51,28 @@ class MessageLog:
                 history_floor_message_id INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             );
+            -- One row per answered response. NULL means the runtime does not
+            -- report that number (Codex has no cost and no cache-write split);
+            -- zero would claim it spent nothing.
+            CREATE TABLE IF NOT EXISTS response_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                runtime TEXT NOT NULL,
+                model TEXT,
+                num_turns INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                cache_creation_tokens INTEGER,
+                cache_creation_5m_tokens INTEGER,
+                cache_creation_1h_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                output_tokens INTEGER,
+                context_tokens INTEGER,
+                total_cost_usd REAL,
+                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_response_usage_chat_ts
+                ON response_usage(chat_id, timestamp);
         """)
         columns = {
             row["name"]
@@ -219,6 +241,42 @@ class MessageLog:
         rid = int(cur.lastrowid or 0)
         self._notify(rid, chat_id, "assistant", content)
         return rid
+
+    def log_response_usage(
+        self,
+        chat_id: int,
+        runtime: str,
+        *,
+        model: Optional[str] = None,
+        num_turns: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        input_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+        cache_creation_5m_tokens: Optional[int] = None,
+        cache_creation_1h_tokens: Optional[int] = None,
+        cache_read_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        context_tokens: Optional[int] = None,
+        total_cost_usd: Optional[float] = None,
+    ) -> int:
+        """Persist what one response cost. Accounting must outlive the process."""
+        cur = self.conn.execute(
+            """
+            INSERT INTO response_usage(
+                chat_id, runtime, model, num_turns, duration_ms,
+                input_tokens, cache_creation_tokens, cache_creation_5m_tokens,
+                cache_creation_1h_tokens, cache_read_tokens, output_tokens,
+                context_tokens, total_cost_usd
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id, runtime, model, num_turns, duration_ms,
+                input_tokens, cache_creation_tokens, cache_creation_5m_tokens,
+                cache_creation_1h_tokens, cache_read_tokens, output_tokens,
+                context_tokens, total_cost_usd,
+            ),
+        )
+        return int(cur.lastrowid or 0)
 
     def log_system(self, chat_id: int, content: str) -> int:
         cur = self.conn.execute(
