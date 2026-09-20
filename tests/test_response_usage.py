@@ -23,9 +23,24 @@ def _session():
     session = ClaudeSession.__new__(ClaudeSession)
     session.last_response_usage = {}
     session._session_cost_seen = 0.0
+    session._session_model_usage_seen = {}
     session.last_cost_usd = None
     session.total_cost_usd = 0.0
     return session
+
+
+def model_usage(*, out, inp=2, cread=0, ccreate=0, helper_out=0):
+    """Shape the SDK reports: per-model, and a RUNNING TOTAL of the session."""
+    account = {"claude-opus-5": {
+        "inputTokens": inp, "outputTokens": out,
+        "cacheReadInputTokens": cread, "cacheCreationInputTokens": ccreate,
+    }}
+    if helper_out:
+        account["claude-haiku-4-5"] = {
+            "inputTokens": 0, "outputTokens": helper_out,
+            "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+        }
+    return account
 
 
 def test_row_survives_a_new_process(db, tmp_path):
@@ -55,34 +70,36 @@ def test_unknown_numbers_stay_null_not_zero(db):
     assert row["output_tokens"] is None
 
 
-def test_result_usage_is_summed_over_retries():
-    """One answer can cost two calls; both were really spent."""
+def test_tokens_come_from_the_complete_account_as_deltas():
+    """`model_usage` covers helper models and sub-agents, and accumulates."""
     session = _session()
-    session._absorb_result_usage({
-        "input_tokens": 2,
-        "output_tokens": 242,
-        "cache_read_input_tokens": 10447,
-        "cache_creation_input_tokens": 10305,
-        "cache_creation": {
-            "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 10305,
-        },
-    })
-    session._absorb_result_usage({
-        "input_tokens": 2,
-        "output_tokens": 58,
-        "cache_read_input_tokens": 20744,
-        "cache_creation_input_tokens": 200,
-        "cache_creation": {
-            "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 200,
-        },
-    })
+    # First answer of the session.
+    session._absorb_result_model_usage(
+        model_usage(out=242, cread=10447, ccreate=10305, helper_out=17)
+    )
+    session._absorb_result_usage(
+        {"cache_creation": {"ephemeral_5m_input_tokens": 0,
+                            "ephemeral_1h_input_tokens": 10305}},
+        tokens=False,
+    )
+    assert session.last_response_usage["output_tokens"] == 259
+
+    # Second answer: the SDK reports the session total, the answer is the delta.
+    session.reset_response_usage()
+    session._absorb_result_model_usage(
+        model_usage(out=300, inp=4, cread=31191, ccreate=10505, helper_out=17)
+    )
+    session._absorb_result_usage(
+        {"cache_creation": {"ephemeral_5m_input_tokens": 0,
+                            "ephemeral_1h_input_tokens": 200}},
+        tokens=False,
+    )
 
     usage = session.last_response_usage
-    assert usage["output_tokens"] == 300
-    assert usage["cache_read_tokens"] == 31191
-    assert usage["cache_creation_1h_tokens"] == 10505
+    assert usage["output_tokens"] == 58
+    assert usage["cache_read_tokens"] == 20744
+    assert usage["cache_creation_tokens"] == 200
+    assert usage["cache_creation_1h_tokens"] == 200
     # The result's input side is a SUM over calls, so it must not be read as a
     # context size — that column comes from the per-call snapshots instead.
     assert "context_tokens" not in usage
@@ -99,9 +116,8 @@ def test_context_is_the_last_call_not_the_sum():
         {"input_tokens": 2, "cache_read_input_tokens": 728411,
          "cache_creation_input_tokens": 2444}
     )
-    session._absorb_result_usage(
-        {"input_tokens": 4, "cache_read_input_tokens": 1446853,
-         "cache_creation_input_tokens": 4420, "output_tokens": 1910}
+    session._absorb_result_model_usage(
+        model_usage(out=1910, inp=4, cread=1446853, ccreate=4420)
     )
     assert session.last_response_usage["context_tokens"] == 730857
     assert session.last_response_usage["cache_read_tokens"] == 1446853
@@ -132,10 +148,18 @@ def test_cost_is_the_delta_of_a_running_session_total():
 
 def test_reset_opens_a_new_answer():
     session = _session()
-    session._absorb_result_usage({"output_tokens": 10})
+    session._absorb_result_model_usage(model_usage(out=10))
     session.reset_response_usage()
-    session._absorb_result_usage({"output_tokens": 7})
+    session._absorb_result_model_usage(model_usage(out=17))
     assert session.last_response_usage["output_tokens"] == 7
+
+
+def test_a_result_without_model_usage_still_records_tokens():
+    """Error terminals carry no per-model account; writing nothing loses the spend."""
+    session = _session()
+    session._absorb_result_model_usage(None)
+    session._absorb_result_usage({"output_tokens": 44, "input_tokens": 2})
+    assert session.last_response_usage["output_tokens"] == 44
 
 
 @pytest.mark.asyncio
@@ -148,6 +172,16 @@ async def test_a_real_stream_fills_the_row(tmp_path):
     session, client = make_session(tmp_path)
     terminal = result()
     terminal.total_cost_usd = 0.031
+    # The complete account: the answer plus the helper model behind it.
+    terminal.model_usage = dict(terminal.model_usage or {})
+    terminal.model_usage["claude-opus-5"] = {
+        "inputTokens": 4, "outputTokens": 1910,
+        "cacheReadInputTokens": 1446853, "cacheCreationInputTokens": 4420,
+    }
+    terminal.model_usage["claude-haiku-4-5"] = {
+        "inputTokens": 901, "outputTokens": 17,
+        "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+    }
     terminal.usage = {
         "input_tokens": 4,
         "output_tokens": 1910,
@@ -179,8 +213,9 @@ async def test_a_real_stream_fills_the_row(tmp_path):
     await collect(session)
 
     usage = session.last_response_usage
-    # 11 is what the snapshots claimed; 1910 is what the answer actually produced.
-    assert usage["output_tokens"] == 1910
+    # 11 is what the snapshots claimed; 1927 is the answer plus its helper model.
+    assert usage["output_tokens"] == 1927
+    assert usage["input_tokens"] == 905
     assert usage["cache_read_tokens"] == 1446853
     assert usage["cache_creation_1h_tokens"] == 4420
     assert usage["context_tokens"] == 730857

@@ -34,10 +34,20 @@ from runtime_protocol import RuntimeCapabilities
 # was swallowed by logging.lastResort (WARNING+) and never reached any log.
 logger = logging.getLogger("kesha.claude_session")
 
-# Usage of the TERMINAL result — the only final figure the SDK reports.
-# `AssistantMessage.usage` is a message_start snapshot: measured 19.09 on a live
-# query whose answer was 242 output tokens, the assistant messages carried
-# output_tokens=6, while the result carried 242.
+# `model_usage` is the only complete account: its per-model `costUSD` sums to
+# `total_cost_usd` exactly, and it carries the helper models and sub-agents that
+# `usage` omits (measured 20.09: usage out=912 / ccreate=11296 against
+# model_usage out=1443 / ccreate=28157 for the same answer). Like the cost, it is
+# the RUNNING TOTAL of the session, so each answer takes the delta.
+_MODEL_USAGE_COLUMNS = {
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "cacheReadInputTokens": "cache_read_tokens",
+    "cacheCreationInputTokens": "cache_creation_tokens",
+}
+
+# Fallback only, for a result that carries no model_usage (error terminals):
+# per-query and parent-only, but better than silently writing nothing.
 _USAGE_COLUMNS = {
     "input_tokens": "input_tokens",
     "cache_creation_input_tokens": "cache_creation_tokens",
@@ -181,6 +191,7 @@ class ClaudeSession:
         self.last_usage: Optional[dict[str, Any]] = None
         self.last_response_usage: dict[str, Any] = {}
         self._session_cost_seen: float = 0.0
+        self._session_model_usage_seen: dict[str, int] = {}
         self.rate_limit: Optional[dict[str, Any]] = None
         self.usage_limit_active = False
         self.last_duration_ms: int = 0
@@ -433,6 +444,37 @@ class ClaudeSession:
         """
         self.last_response_usage = {}
 
+    @staticmethod
+    def _delta(running: float, seen: float) -> float:
+        """A running total below the previous one means the counter restarted."""
+        return running - seen if running >= seen else running
+
+    def _absorb_result_model_usage(self, model_usage: Optional[dict]) -> bool:
+        """Fold the complete per-model account of this result. False if absent."""
+        if not isinstance(model_usage, dict) or not model_usage:
+            return False
+        totals = {
+            key: sum(
+                int(entry.get(key) or 0)
+                for entry in model_usage.values()
+                if isinstance(entry, dict)
+            )
+            for key in _MODEL_USAGE_COLUMNS
+        }
+        if not any(totals.values()):
+            # A result can carry model metadata without any token counts; that is
+            # not an account, and reading it as one records a free answer.
+            return False
+        for key, column in _MODEL_USAGE_COLUMNS.items():
+            running = totals[key]
+            delta = int(self._delta(running, self._session_model_usage_seen.get(key, 0)))
+            self._session_model_usage_seen[key] = running
+            if delta:
+                self.last_response_usage[column] = (
+                    self.last_response_usage.get(column, 0) + delta
+                )
+        return True
+
     def _absorb_result_cost(self, running: float) -> None:
         """Price this answer from the session's RUNNING TOTAL.
 
@@ -441,11 +483,7 @@ class ClaudeSession:
         (0.0279 after 0.0155). A value below the previous one means the counter
         restarted with a new session, so it IS the answer's price.
         """
-        delta = (
-            running - self._session_cost_seen
-            if running >= self._session_cost_seen
-            else running
-        )
+        delta = self._delta(running, self._session_cost_seen)
         self._session_cost_seen = running
         self.last_cost_usd = delta
         self.total_cost_usd += delta
@@ -453,16 +491,24 @@ class ClaudeSession:
             self.last_response_usage.get("cost_usd", 0.0) + delta
         )
 
-    def _absorb_result_usage(self, usage: Optional[dict[str, Any]]) -> None:
-        """Fold one terminal result into the answer's bill (retries add up)."""
+    def _absorb_result_usage(
+        self, usage: Optional[dict[str, Any]], *, tokens: bool = True
+    ) -> None:
+        """Fold a terminal result's own usage. `tokens=False` takes only the split.
+
+        The 5m/1h split exists nowhere else, so it is read here even when the
+        token columns come from `model_usage`; it then covers the main agent
+        only, while the totals cover everything.
+        """
         if not isinstance(usage, dict):
             return
-        for key, column in _USAGE_COLUMNS.items():
-            value = usage.get(key)
-            if isinstance(value, int):
-                self.last_response_usage[column] = (
-                    self.last_response_usage.get(column, 0) + value
-                )
+        if tokens:
+            for key, column in _USAGE_COLUMNS.items():
+                value = usage.get(key)
+                if isinstance(value, int):
+                    self.last_response_usage[column] = (
+                        self.last_response_usage.get(column, 0) + value
+                    )
         split = usage.get("cache_creation")
         if isinstance(split, dict):
             for key, column in _CACHE_CREATION_COLUMNS.items():
@@ -567,9 +613,12 @@ class ClaudeSession:
                         logger.info(f"Session ID saved: {self.session_id[:8]}...")
                     if getattr(msg, "total_cost_usd", None) is not None:
                         self._absorb_result_cost(float(msg.total_cost_usd))
+                    complete = self._absorb_result_model_usage(
+                        getattr(msg, "model_usage", None)
+                    )
                     if getattr(msg, "usage", None):
                         self.last_usage = msg.usage
-                        self._absorb_result_usage(msg.usage)
+                        self._absorb_result_usage(msg.usage, tokens=not complete)
 
                     # Classify a quota/short-circuit terminal BEFORE touching the
                     # runtime invariant. Such a result may still carry a partial
