@@ -83,8 +83,28 @@ def test_result_usage_is_summed_over_retries():
     assert usage["output_tokens"] == 300
     assert usage["cache_read_tokens"] == 31191
     assert usage["cache_creation_1h_tokens"] == 10505
-    # Context = what the LAST call carried, not the sum over calls.
-    assert usage["context_tokens"] == 20946
+    # The result's input side is a SUM over calls, so it must not be read as a
+    # context size — that column comes from the per-call snapshots instead.
+    assert "context_tokens" not in usage
+
+
+def test_context_is_the_last_call_not_the_sum():
+    """A 3-call answer once recorded 1 459 171 against a real context of 730 857."""
+    session = _session()
+    session._absorb_assistant_context(
+        {"input_tokens": 2, "cache_read_input_tokens": 718442,
+         "cache_creation_input_tokens": 1976}
+    )
+    session._absorb_assistant_context(
+        {"input_tokens": 2, "cache_read_input_tokens": 728411,
+         "cache_creation_input_tokens": 2444}
+    )
+    session._absorb_result_usage(
+        {"input_tokens": 4, "cache_read_input_tokens": 1446853,
+         "cache_creation_input_tokens": 4420, "output_tokens": 1910}
+    )
+    assert session.last_response_usage["context_tokens"] == 730857
+    assert session.last_response_usage["cache_read_tokens"] == 1446853
 
 
 def test_cost_is_the_delta_of_a_running_session_total():
@@ -116,6 +136,56 @@ def test_reset_opens_a_new_answer():
     session.reset_response_usage()
     session._absorb_result_usage({"output_tokens": 7})
     assert session.last_response_usage["output_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_a_real_stream_fills_the_row(tmp_path):
+    """The wiring, not the helpers: what one answer leaves behind end to end."""
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    from test_claude_session_limit import collect, make_session, result
+
+    session, client = make_session(tmp_path)
+    terminal = result()
+    terminal.total_cost_usd = 0.031
+    terminal.usage = {
+        "input_tokens": 4,
+        "output_tokens": 1910,
+        "cache_read_input_tokens": 1446853,
+        "cache_creation_input_tokens": 4420,
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 4420,
+        },
+    }
+    for event in (
+        AssistantMessage(
+            content=[TextBlock("первый вызов")], model="claude",
+            usage={"input_tokens": 2, "output_tokens": 6,
+                   "cache_read_input_tokens": 718442,
+                   "cache_creation_input_tokens": 1976},
+        ),
+        AssistantMessage(
+            content=[TextBlock("второй вызов")], model="claude",
+            usage={"input_tokens": 2, "output_tokens": 5,
+                   "cache_read_input_tokens": 728411,
+                   "cache_creation_input_tokens": 2444},
+        ),
+        terminal,
+    ):
+        client.events.put_nowait(event)
+
+    session.reset_response_usage()
+    await collect(session)
+
+    usage = session.last_response_usage
+    # 11 is what the snapshots claimed; 1910 is what the answer actually produced.
+    assert usage["output_tokens"] == 1910
+    assert usage["cache_read_tokens"] == 1446853
+    assert usage["cache_creation_1h_tokens"] == 4420
+    assert usage["context_tokens"] == 730857
+    assert usage["cost_usd"] == pytest.approx(0.031)
+    assert usage["num_turns"] == 1
 
 
 def test_codex_turn_usage_is_snapshot_not_sum():

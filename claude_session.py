@@ -471,8 +471,16 @@ class ClaudeSession:
                     self.last_response_usage[column] = (
                         self.last_response_usage.get(column, 0) + value
                     )
-        # Context carried into THIS call — the last one wins, so the row shows how
-        # big the conversation had grown by the end of the answer.
+    def _absorb_assistant_context(self, usage: Optional[dict[str, Any]]) -> None:
+        """How big the conversation was on the LAST call of this answer.
+
+        Not derivable from the result: its input side is the SUM over the
+        answer's calls, which for a three-call answer read 1 459 171 against a
+        real context of 730 857 (measured 20.09 against the CLI transcript).
+        The per-message snapshot is unusable for output tokens but exact here.
+        """
+        if not isinstance(usage, dict):
+            return
         carried = sum(
             usage.get(key) or 0
             for key in (
@@ -508,6 +516,7 @@ class ClaudeSession:
 
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
+                    self._absorb_assistant_context(getattr(msg, "usage", None))
                     assistant_error = getattr(msg, "error", None)
                     if assistant_error in {"rate_limit", "billing_error"}:
                         raw = "\n".join(
