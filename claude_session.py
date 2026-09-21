@@ -151,6 +151,18 @@ def is_context_limit(err: str) -> bool:
     return bool(_CONTEXT_LIMIT_RE.search(err))
 
 
+def is_tool_call_giveup(text: str) -> bool:
+    """Runtime failure wearing an answer's clothes.
+
+    When the model's tool call cannot be parsed, the CLI itself injects a retry
+    request into the conversation; if that retry fails too, it ANSWERS with this
+    sentence as ordinary assistant text. Nothing downstream sees an error, so the
+    user gets an English stack-phrase instead of a reply (production 21.09.2026,
+    one occurrence; both sentences live inside the Claude Code 2.1.278 binary).
+    """
+    return "tool call could not be parsed" in (text or "").lower()
+
+
 @dataclass
 class _SessionReplacement:
     session_id: Optional[str]

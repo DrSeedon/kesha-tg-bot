@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramRetryAfter
 import config as _config
 from claude_session import (
     is_context_limit as _is_context_limit,
+    is_tool_call_giveup as _is_tool_call_giveup,
     usage_limit_reset as _session_limit_reset,
 )
 from config import (
@@ -567,6 +568,38 @@ async def _ask_inner(message, prompt, cid, typer):
                     break
                 ct = chunk["type"]
                 _last_chunk_type = ct
+                if ct in ("text", "text_delta") and _is_tool_call_giveup(
+                    chunk.get("content", "")
+                ):
+                    # Not an answer: the runtime is reporting that it could not
+                    # parse its own tool call. Forwarding it gave Katya an English
+                    # error instead of a reply (21.09.2026). Retry the question.
+                    logger.warning(
+                        f"Chat {cid}: runtime gave up on parsing a tool call "
+                        f"(retries={retries}/{MAX_RETRIES})"
+                    )
+                    if retries < MAX_RETRIES and not finalized:
+                        retries += 1
+                        need_retry = True
+                        # Keep the live message: the retry's text overwrites the
+                        # runtime's sentence in place instead of leaving it above
+                        # the real answer.
+                        parts.clear()
+                        has_deltas = False
+                        last_edit_text = ""
+                        if status is not None:
+                            if status.tools:
+                                await status.fail()
+                            else:
+                                await status.cancel_empty()
+                            status = None
+                        break
+                    parts.append(
+                        STRINGS["ru"]["tool_call_failed"] if message is None
+                        else _t_cfg(message, "tool_call_failed")
+                    )
+                    await _edit_update()
+                    continue
                 if ct == "text_delta":
                     has_deltas = True
                     await _open_text_block()
