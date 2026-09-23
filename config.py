@@ -15,16 +15,15 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()}
 WORK_DIR = os.getenv("WORK_DIR", ".")
-MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5")
+MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 RUNTIME = os.getenv("KESHA_RUNTIME", "claude")
 
 # Model per runtime. Claude's id would be rejected by Codex and vice versa, so a
 # switch must carry its own. Verified live: gpt-5.1-codex-max is NOT available
 # on a ChatGPT subscription (HTTP 400); gpt-5.6-sol was. Owner's decision
-# 06.09.2026 — Astra replaces Sol. It runs on THIS subscription: 8 Orchestra
-# sessions on gpt-6-astra, three of them running at the moment of the switch.
+# 23.09.2026 — GPT-6 Sol (present in this account's Codex model catalog).
 RUNTIME_MODELS = {
-    "codex": os.getenv("KESHA_CODEX_MODEL", "gpt-6-astra"),
+    "codex": os.getenv("KESHA_CODEX_MODEL", "gpt-6-sol"),
 }
 DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
