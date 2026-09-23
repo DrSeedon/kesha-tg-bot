@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.4 — 2026-09-23
+
+### Changed — модели: Claude Opus 5.5 и GPT-6 Sol
+
+- 🔁 Claude-рантайм: `claude-opus-5` → `claude-opus-5-5` (`config.MODEL`, env `CLAUDE_MODEL`).
+  Codex-рантайм: `gpt-5.6-sol` → `gpt-6-sol` (`config.RUNTIME_MODELS["codex"]`, env
+  `KESHA_CODEX_MODEL`). Решение владельца 23.09 после выхода Opus 5.5.
+- 🔍 Opus 5.5 проверен живым вызовом на проде (`modelUsage` = `claude-opus-5-5`); `gpt-6-sol`
+  присутствует в каталоге моделей аккаунта, живой вызов не прошёл из-за исчерпанной квоты Codex.
+- ⚠️ Прайс в `.orchestra/kb/cost-accounting.md` восстановлен для opus-5; для opus-5-5 не сверялся.
+
 ## v2.9.3 — 2026-09-21
 
 ### Fixed — капитуляция рантайма больше не уходит пользователю как ответ
