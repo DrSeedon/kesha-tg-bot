@@ -1,0 +1,9 @@
+version: 1
+projects:
+- tag: kesha-tg-bot
+  name: Telegram-бот Кеши
+  scope: /home/kesha/projects/kesha-tg-bot
+  write_namespace: vps-kesha-tg-bot
+  namespaces:
+    vps-kesha-tg-bot: ''
+    kesha-tg-bot: ноутбук
