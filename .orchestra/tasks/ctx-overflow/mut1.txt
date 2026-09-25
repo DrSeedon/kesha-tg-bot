@@ -1,0 +1,84 @@
+FF........                                                               [100%]
+=================================== FAILURES ===================================
+_________ test_window_overflow_is_context_limit_not_subscription_limit _________
+
+tmp_path = PosixPath('/tmp/pytest-of-kesha/pytest-10284/test_window_overflow_is_contex0')
+
+    @pytest.mark.asyncio
+    async def test_window_overflow_is_context_limit_not_subscription_limit(tmp_path):
+        session, client = make_session(tmp_path)
+        task = asyncio.create_task(collect(session))
+        await asyncio.sleep(0)
+        await client.events.put(
+            AssistantMessage(
+                content=[TextBlock("Prompt is too long")],
+                model="<synthetic>",
+                error="invalid_request",
+            )
+        )
+        await client.events.put(overflow_result())
+    
+        chunks = await task
+    
+>       assert chunks == [
+            {"type": "error", "kind": "context_limit", "content": "Prompt is too long"}
+        ]
+E       AssertionError: assert [{'type': 'er...is too long'}] == [{'type': 'er...is too long'}]
+E         
+E         At index 0 diff: {'type': 'error', 'kind': 'usage_limit', 'content': 'Prompt is too long'} != {'type': 'error', 'kind': 'context_limit', 'content': 'Prompt is too long'}
+E         Use -v to get more diff
+
+tests/test_context_overflow_recovery.py:44: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-25 16:52:06,055 [kesha.claude_session] INFO Prompt: hello...
+2026-09-25 16:52:06,056 [kesha.claude_session] INFO send_message: ensuring connected...
+2026-09-25 16:52:06,056 [kesha.claude_session] INFO send_message: connected, sending query...
+2026-09-25 16:52:06,056 [kesha.claude_session] INFO send_message: query sent, receiving messages...
+2026-09-25 16:52:06,061 [kesha.claude_session] INFO Session ID saved: sid-1...
+2026-09-25 16:52:06,062 [kesha.claude_session] INFO Result: 0.0s, 1 turns, stop=None, cost=$0.0000
+------------------------------ Captured log call -------------------------------
+INFO     kesha.claude_session:claude_session.py:572 Prompt: hello...
+INFO     kesha.claude_session:claude_session.py:583 send_message: ensuring connected...
+INFO     kesha.claude_session:claude_session.py:585 send_message: connected, sending query...
+INFO     kesha.claude_session:claude_session.py:590 send_message: query sent, receiving messages...
+INFO     kesha.claude_session:claude_session.py:642 Session ID saved: sid-1...
+INFO     kesha.claude_session:claude_session.py:747 Result: 0.0s, 1 turns, stop=None, cost=$0.0000
+_________________ test_overflow_result_alone_is_context_limit __________________
+
+tmp_path = PosixPath('/tmp/pytest-of-kesha/pytest-10284/test_overflow_result_alone_is_0')
+
+    @pytest.mark.asyncio
+    async def test_overflow_result_alone_is_context_limit(tmp_path):
+        session, client = make_session(tmp_path)
+        task = asyncio.create_task(collect(session))
+        await asyncio.sleep(0)
+        await client.events.put(overflow_result())
+    
+        chunks = await task
+    
+>       assert [c.get("kind") for c in chunks] == ["context_limit"]
+E       AssertionError: assert ['usage_limit'] == ['context_limit']
+E         
+E         At index 0 diff: 'usage_limit' != 'context_limit'
+E         Use -v to get more diff
+
+tests/test_context_overflow_recovery.py:59: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-25 16:52:06,147 [kesha.claude_session] INFO Prompt: hello...
+2026-09-25 16:52:06,147 [kesha.claude_session] INFO send_message: ensuring connected...
+2026-09-25 16:52:06,147 [kesha.claude_session] INFO send_message: connected, sending query...
+2026-09-25 16:52:06,147 [kesha.claude_session] INFO send_message: query sent, receiving messages...
+2026-09-25 16:52:06,150 [kesha.claude_session] INFO Session ID saved: sid-1...
+2026-09-25 16:52:06,151 [kesha.claude_session] INFO Result: 0.0s, 1 turns, stop=None, cost=$0.0000
+------------------------------ Captured log call -------------------------------
+INFO     kesha.claude_session:claude_session.py:572 Prompt: hello...
+INFO     kesha.claude_session:claude_session.py:583 send_message: ensuring connected...
+INFO     kesha.claude_session:claude_session.py:585 send_message: connected, sending query...
+INFO     kesha.claude_session:claude_session.py:590 send_message: query sent, receiving messages...
+INFO     kesha.claude_session:claude_session.py:642 Session ID saved: sid-1...
+INFO     kesha.claude_session:claude_session.py:747 Result: 0.0s, 1 turns, stop=None, cost=$0.0000
+=========================== short test summary info ============================
+FAILED tests/test_context_overflow_recovery.py::test_window_overflow_is_context_limit_not_subscription_limit
+FAILED tests/test_context_overflow_recovery.py::test_overflow_result_alone_is_context_limit
+2 failed, 8 passed in 4.37s
+MUT1_RC=1

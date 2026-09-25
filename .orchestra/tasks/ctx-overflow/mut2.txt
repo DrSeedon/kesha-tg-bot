@@ -1,0 +1,89 @@
+.....FF...                                                               [100%]
+=================================== FAILURES ===================================
+___ test_overflowed_session_is_compacted_natively_and_original_batch_is_sent ___
+
+tmp_path = PosixPath('/tmp/pytest-of-kesha/pytest-10285/test_overflowed_session_is_com0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79d7063a43e0>
+
+    @pytest.mark.asyncio
+    async def test_overflowed_session_is_compacted_natively_and_original_batch_is_sent(
+        tmp_path, monkeypatch
+    ):
+        session = OverflowedSession(tmp_path)
+        asked = []
+    
+        async def ask(_message, text, _chat_id):
+            asked.append(text)
+    
+        state = make_state(session, compact_session, ask)
+        state.phase = ChatPhase.PROCESSING
+        monkeypatch.setattr(
+            "message_log.get_db",
+            lambda: SimpleNamespace(log_user=lambda *_a, **_k: None),
+        )
+    
+        await state._run_batch([entry("ORIGINAL", 1)])
+    
+>       assert session.native_calls == 1
+E       assert 0 == 1
+E        +  where 0 = <test_context_overflow_recovery.OverflowedSession object at 0x79d7063a4230>.native_calls
+
+tests/test_context_overflow_recovery.py:185: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-25 16:52:12,009 [kesha] WARNING Chat 7: verbatim tail unavailable: 'types.SimpleNamespace' object has no attribute 'get_history'
+2026-09-25 16:52:12,009 [kesha.compact] INFO Compact: requesting summary, before=97.9%
+2026-09-25 16:52:12,009 [kesha.compact] ERROR Compact failed safely (context_limit): context_limit
+2026-09-25 16:52:12,009 [kesha] INFO Chat 7: _finish_processing start
+2026-09-25 16:52:12,009 [kesha] INFO Chat 7: phase processing → idle [idle]
+------------------------------ Captured log call -------------------------------
+WARNING  kesha:chat_state.py:189 Chat 7: verbatim tail unavailable: 'types.SimpleNamespace' object has no attribute 'get_history'
+INFO     kesha.compact:compact.py:360 Compact: requesting summary, before=97.9%
+ERROR    kesha.compact:compact.py:452 Compact failed safely (context_limit): context_limit
+INFO     kesha:chat_state.py:1047 Chat 7: _finish_processing start
+INFO     kesha:chat_state.py:1299 Chat 7: phase processing → idle [idle]
+_____ test_failed_native_compact_ends_in_clear_prompt_not_a_limit_message ______
+
+tmp_path = PosixPath('/tmp/pytest-of-kesha/pytest-10285/test_failed_native_compact_end0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79d7063cf110>
+
+    @pytest.mark.asyncio
+    async def test_failed_native_compact_ends_in_clear_prompt_not_a_limit_message(
+        tmp_path, monkeypatch
+    ):
+        session = OverflowedSession(tmp_path, native_ok=False)
+        asked = []
+    
+        async def ask(_message, text, _chat_id):
+            asked.append(text)
+    
+        state = make_state(session, compact_session, ask)
+        state.phase = ChatPhase.PROCESSING
+        monkeypatch.setattr(
+            "message_log.get_db",
+            lambda: SimpleNamespace(log_user=lambda *_a, **_k: None),
+        )
+    
+        await state._run_batch([entry("ORIGINAL", 1)])
+    
+>       assert session.native_calls == 1
+E       assert 0 == 1
+E        +  where 0 = <test_context_overflow_recovery.OverflowedSession object at 0x79d7063cebd0>.native_calls
+
+tests/test_context_overflow_recovery.py:211: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-25 16:52:12,121 [kesha] WARNING Chat 7: verbatim tail unavailable: 'types.SimpleNamespace' object has no attribute 'get_history'
+2026-09-25 16:52:12,121 [kesha.compact] INFO Compact: requesting summary, before=97.9%
+2026-09-25 16:52:12,122 [kesha.compact] ERROR Compact failed safely (context_limit): context_limit
+2026-09-25 16:52:12,122 [kesha] INFO Chat 7: _finish_processing start
+2026-09-25 16:52:12,122 [kesha] INFO Chat 7: phase processing → idle [idle]
+------------------------------ Captured log call -------------------------------
+WARNING  kesha:chat_state.py:189 Chat 7: verbatim tail unavailable: 'types.SimpleNamespace' object has no attribute 'get_history'
+INFO     kesha.compact:compact.py:360 Compact: requesting summary, before=97.9%
+ERROR    kesha.compact:compact.py:452 Compact failed safely (context_limit): context_limit
+INFO     kesha:chat_state.py:1047 Chat 7: _finish_processing start
+INFO     kesha:chat_state.py:1299 Chat 7: phase processing → idle [idle]
+=========================== short test summary info ============================
+FAILED tests/test_context_overflow_recovery.py::test_overflowed_session_is_compacted_natively_and_original_batch_is_sent
+FAILED tests/test_context_overflow_recovery.py::test_failed_native_compact_ends_in_clear_prompt_not_a_limit_message
+2 failed, 8 passed in 4.47s
+MUT2_RC=1
