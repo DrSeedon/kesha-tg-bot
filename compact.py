@@ -290,6 +290,47 @@ async def _collect_summary(claude) -> tuple[str, str | None]:
     return summary, None
 
 
+async def _native_compact_fallback(claude, before_pct: float, report) -> dict | None:
+    """Our summary request cannot fit into an overflowed context; the CLI's own
+    compactor can. Runs ONLY after `context_limit` from our compact; the result
+    counts only if the CLI reports an actual compact boundary."""
+    native_compact = getattr(claude, "native_compact", None)
+    if native_compact is None:
+        return None
+    logger.warning("Compact: context overflow, falling back to the native /compact")
+    await report("🗜 Контекст переполнен — сжимаю встроенным компактом...", replace=True)
+    try:
+        native = await native_compact()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(f"Compact: native fallback raised: {exc}")
+        return None
+    if not native.get("ok"):
+        logger.error(f"Compact: native fallback did not compact: {native.get('error')}")
+        return None
+    try:
+        after = await claude.get_context_usage()
+    except Exception:
+        after = None
+    after_pct = after.get("percentage", 0) if after else 0
+    logger.info(
+        f"Compact: native fallback done, {before_pct:.1f}% → {after_pct:.1f}% "
+        f"(tokens {native.get('pre_tokens')} → {native.get('post_tokens')})"
+    )
+    await report(
+        f"✅ Контекст сжат встроенным компактом: {before_pct:.0f}% → {after_pct:.0f}%",
+        replace=True,
+    )
+    return {
+        "ok": True,
+        "native": True,
+        "before_pct": before_pct,
+        "after_pct": after_pct,
+        "summary_chars": 0,
+    }
+
+
 async def compact_session(
     claude,
     notify=None,
@@ -409,6 +450,10 @@ async def compact_session(
         if not isinstance(exc, Exception):
             raise
         logger.error(f"Compact failed safely ({failure_reason}): {exc}")
+        if failure_reason == "context_limit" and not transaction.committed:
+            native = await _native_compact_fallback(claude, before_pct, report)
+            if native is not None:
+                return native
         if transaction.committed:
             terminal = "✅ Контекст сжат."
         elif failure_reason == "usage_limit":
@@ -416,7 +461,10 @@ async def compact_session(
         elif failure_reason == "empty_summary":
             terminal = "⚠️ Пустое саммари — сжатие пропущено, контекст сохранён."
         elif failure_reason == "context_limit":
-            terminal = "⚠️ Контекст заполнен — сжатие пропущено, сессия сохранена."
+            terminal = (
+                "🧠 Контекст заполнен, сжать его не удалось. "
+                "Сессия сохранена, но дальше нужен /clear."
+            )
         else:
             terminal = "⚠️ Сжатие не удалось — контекст сохранён."
         await report(terminal, replace=True)

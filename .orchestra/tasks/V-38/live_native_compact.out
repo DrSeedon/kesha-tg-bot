@@ -1,0 +1,55 @@
+2026-09-25 16:49:14,916 [kesha.claude_session] INFO Prompt: Remember the number 42. Reply just: ok...
+2026-09-25 16:49:14,916 [kesha.claude_session] INFO send_message: ensuring connected...
+2026-09-25 16:49:14,917 [kesha.claude_session] INFO Connecting new session...
+/home/kesha/.cache/uv/archive-v0/BnI86s024qfhvBfY/lib/python3.12/site-packages/claude_agent_sdk/types.py:1939: CanUseToolShadowedWarning: can_use_tool will not be invoked: permission_mode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
+  _warn_if_can_use_tool_shadowed(options)
+2026-09-25 16:49:15,762 [kesha.claude_session] INFO send_message: connected, sending query...
+2026-09-25 16:49:15,763 [kesha.claude_session] INFO send_message: query sent, receiving messages...
+2026-09-25 16:49:15,928 [kesha.claude_session] INFO System: init
+2026-09-25 16:49:15,936 [kesha.claude_session] INFO System: status
+2026-09-25 16:49:16,680 [kesha.claude_session] INFO Rate limit: allowed (five_hour) util=None
+2026-09-25 16:49:17,270 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:18,608 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:19,820 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:19,893 [kesha.claude_session] INFO Session ID saved: 6da80014...
+2026-09-25 16:49:19,894 [kesha.claude_session] ERROR Unexpected terminal model usage: model=claude-haiku-4-5-20251001 maxOutputTokens=32000
+2026-09-25 16:49:19,894 [kesha.claude_session] INFO Result: 4.1s, 1 turns, stop=end_turn, cost=$0.0372
+2026-09-25 16:49:19,894 [kesha.claude_session] INFO Prompt: What number? one word...
+2026-09-25 16:49:19,894 [kesha.claude_session] INFO send_message: ensuring connected...
+2026-09-25 16:49:19,894 [kesha.claude_session] INFO send_message: connected, sending query...
+2026-09-25 16:49:19,894 [kesha.claude_session] INFO send_message: query sent, receiving messages...
+2026-09-25 16:49:19,910 [kesha.claude_session] INFO System: init
+2026-09-25 16:49:19,911 [kesha.claude_session] INFO System: status
+2026-09-25 16:49:21,275 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:22,282 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:22,599 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:22,612 [kesha.claude_session] INFO Rate limit: allowed (five_hour) util=None
+2026-09-25 16:49:22,619 [kesha.claude_session] INFO Session ID saved: 6da80014...
+2026-09-25 16:49:22,619 [kesha.claude_session] ERROR Unexpected terminal model usage: model=claude-haiku-4-5-20251001 maxOutputTokens=32000
+2026-09-25 16:49:22,619 [kesha.claude_session] INFO Result: 2.7s, 1 turns, stop=end_turn, cost=$0.0050
+2026-09-25 16:49:32,331 [kesha.claude_session] INFO Prompt: What number? one word...
+2026-09-25 16:49:32,331 [kesha.claude_session] INFO send_message: ensuring connected...
+2026-09-25 16:49:32,331 [kesha.claude_session] INFO send_message: connected, sending query...
+2026-09-25 16:49:32,331 [kesha.claude_session] INFO send_message: query sent, receiving messages...
+2026-09-25 16:49:32,348 [kesha.claude_session] INFO System: init
+2026-09-25 16:49:32,349 [kesha.claude_session] INFO System: status
+2026-09-25 16:49:33,700 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:34,972 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:36,286 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:37,523 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:39,024 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:40,284 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:41,649 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:42,389 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:43,576 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:44,972 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:45,759 [kesha.claude_session] INFO System: thinking_tokens
+2026-09-25 16:49:45,975 [kesha.claude_session] INFO Session ID saved: 6da80014...
+2026-09-25 16:49:45,976 [kesha.claude_session] ERROR Unexpected terminal model usage: model=claude-haiku-4-5-20251001 maxOutputTokens=32000
+2026-09-25 16:49:45,976 [kesha.claude_session] INFO Result: 13.6s, 1 turns, stop=end_turn, cost=$0.0159
+[{'type': 'text_delta', 'content': 'ok'}, {'type': 'text', 'content': 'ok'}]
+[{'type': 'text_delta', 'content': '42'}, {'type': 'text', 'content': '42'}]
+BEFORE 18630
+NATIVE {'ok': True, 'pre_tokens': 18805, 'post_tokens': 1924}
+AFTER 15922
+[{'type': 'text_delta', 'content': "I've"}, {'type': 'text_delta', 'content': ' already responded'}, {'type': 'text_delta', 'content': ' "'}]

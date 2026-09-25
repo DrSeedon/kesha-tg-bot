@@ -35,7 +35,10 @@ PHOTO_CAPTION_WAIT_SEC = int(os.getenv("PHOTO_CAPTION_WAIT_SEC", "10"))
 # Подпись к фото пришла — ждать больше нечего. Не ноль: секунда оставляет
 # место дослать вторую фразу, но паузы уже не чувствуется.
 PHOTO_CAPTION_REPLY_SEC = float(os.getenv("PHOTO_CAPTION_REPLY_SEC", "1"))
-AUTO_COMPACT_TRIGGER_PCT = 95.0
+# The CLI hard-blocks a request at window-3000 tokens (~97.7%) and our own summary
+# request needs room too. 95% left ~27K for one turn's tool output; on 25.09.2026
+# a single turn jumped past it and the chat died. 88% leaves ~89K.
+AUTO_COMPACT_TRIGGER_PCT = 88.0
 CODEX_AUTO_COMPACT_TRIGGER_PCT = 90.0
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()

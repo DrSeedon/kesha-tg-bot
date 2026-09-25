@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from config import (
+    AUTO_COMPACT_TRIGGER_PCT,
     PHOTO_CAPTION_REPLY_SEC,
     PHOTO_CAPTION_WAIT_SEC,
     RUNTIME_MODELS,
@@ -916,6 +917,7 @@ class ChatState:
                 e.message_id for e in batch if e.message_id
             ]
 
+        turn_ran = False
         try:
             krsk = timezone(timedelta(hours=7))
             # Use first entry's message for timestamp; reminder entries may have None message
@@ -1022,6 +1024,7 @@ class ChatState:
                 logger.error(f"Chat {self.chat_id}: message_log user failed: {e}")
 
             await self._ask_fn(reply_msg, combined, self.chat_id)
+            turn_ran = True
 
             if lazy_ids:
                 try:
@@ -1037,9 +1040,9 @@ class ChatState:
             except Exception:
                 pass
         finally:
-            await self._finish_processing()
+            await self._finish_processing(check_context=turn_ran)
 
-    async def _finish_processing(self) -> None:
+    async def _finish_processing(self, *, check_context: bool = False) -> None:
         """Finalize: run deferred compact, transition to IDLE, drain deferred."""
         logger.info(f"Chat {self.chat_id}: _finish_processing start")
         needs_compact = False
@@ -1054,12 +1057,39 @@ class ChatState:
             self.cancel_requested = False
             self.batch_message_ids.clear()
 
+        # Only after a turn that ran: a failed admission compact must not be retried here.
+        if check_context and not needs_compact and await self._context_needs_compact_after_turn():
+            needs_compact = automatic = True
+
         if needs_compact:
             async with self._lock:
                 self.phase = ChatPhase.COMPACTING
             await self._do_compact(automatic=automatic)
         else:
             await self._drain_or_idle()
+
+    async def _context_needs_compact_after_turn(self) -> bool:
+        """Admission only measures BEFORE a batch; one heavy turn can jump past
+        the trigger and straight into the CLI's hard wall (25.09.2026, 88%→98%),
+        after which even our summary request no longer fits. Measure again now.
+        """
+        if self._shutdown or self._native_compact:
+            return False
+        if getattr(self.session, "usage_limit_active", False):
+            return False
+        try:
+            usage = await self.session.get_context_usage()
+            pct = float((usage or {}).get("percentage") or 0)
+        except Exception as exc:
+            logger.warning("Chat %s: post-turn context check failed: %s", self.chat_id, exc)
+            return False
+        if pct >= AUTO_COMPACT_TRIGGER_PCT:
+            logger.info(
+                "Chat %s: context %.1f%% after the turn — compacting now",
+                self.chat_id, pct,
+            )
+            return True
+        return False
 
     def _make_compact_notifier(self):
         progress_message_id = None

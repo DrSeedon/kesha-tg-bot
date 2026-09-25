@@ -106,7 +106,20 @@ def resolve_context_model(model: str, use_1m: bool = True) -> str:
 
 EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
-EXPECTED_MAX_OUTPUT_TOKENS = 64_000
+# Output ceiling the runtime reports per model (`maxOutputTokens` in the terminal
+# usage). Opus 5.5 reports 128000 (prod 25.09.2026); everything older 64000.
+# A hardcoded 64000 latched a false "runtime contradiction" on every Opus 5.5 reply.
+_MAX_OUTPUT_TOKENS_BY_MODEL = {"claude-opus-5-5": 128_000}
+_DEFAULT_MAX_OUTPUT_TOKENS = 64_000
+
+
+def expected_max_output_tokens(model: str) -> int:
+    return _MAX_OUTPUT_TOKENS_BY_MODEL.get(
+        model.removesuffix("[1m]"), _DEFAULT_MAX_OUTPUT_TOKENS
+    )
+
+
+EXPECTED_MAX_OUTPUT_TOKENS = expected_max_output_tokens(MODEL)
 # Measured on 42 real compactions in production (journalctl, 30 days):
 # summaries are 11 743-20 327 chars, i.e. ~5-8K tokens. The old 80_000 was a
 # leftover of the #14 reserve philosophy (removed in #34), not a requirement —
@@ -375,6 +388,10 @@ class ClaudeSession:
         """
         return resolve_context_model(self.model, self.use_1m)
 
+    @property
+    def expected_max_output_tokens(self) -> int:
+        return expected_max_output_tokens(self.model)
+
     def _make_options(self) -> ClaudeAgentOptions:
         model = resolve_context_model(self.model, self.use_1m)
         options = ClaudeAgentOptions(
@@ -638,11 +655,23 @@ class ClaudeSession:
                     # production), and reading that as "the expected model is
                     # missing" would weld admission shut again.
                     raw_result = str(msg.result or "")
+                    result_overflow = (
+                        context_limit_seen
+                        or getattr(msg, "terminal_reason", None) == "context_limit"
+                        or is_context_limit(raw_result)
+                    )
+                    # The CLI's local window guard ("Prompt is too long", $0) also
+                    # ends with terminal_reason="blocking_limit"; it is context
+                    # overflow, not quota (prod 25.09.2026: reported as a
+                    # subscription limit and the recovery never ran).
                     typed_result_limit = (
                         pending_limit is not None
                         or limit_seen
                         or getattr(msg, "api_error_status", None) == 429
-                        or getattr(msg, "terminal_reason", None) == "blocking_limit"
+                        or (
+                            getattr(msg, "terminal_reason", None) == "blocking_limit"
+                            and not result_overflow
+                        )
                     )
                     raw_result_limit = (
                         usage_limit_reset(raw_result) is not None
@@ -668,7 +697,7 @@ class ClaudeSession:
                             if isinstance(expected_usage, dict)
                             else None
                         )
-                        if observed_max_output == EXPECTED_MAX_OUTPUT_TOKENS:
+                        if observed_max_output == self.expected_max_output_tokens:
                             # A proven-good payload also clears an earlier latch.
                             # NOTE: this is reachable from an in-flight turn, a
                             # compact, or after /clear — NOT from a fresh user
@@ -878,6 +907,50 @@ class ClaudeSession:
                 )
         raise _ProbeTimeout
 
+    async def native_compact(self) -> dict:
+        """The CLI's own `/compact`, for a session our summary request cannot enter.
+
+        Emergency hatch only (V-38): when the context is past the CLI's request
+        guard our own compact is rejected locally ("Prompt is too long", $0), yet
+        the CLI's compactor still runs on that very session (prod 25.09.2026:
+        979153 -> 2719 tokens). Success is the `compact_boundary` system message,
+        never the mere return of the call.
+        """
+        boundary: Optional[dict] = None
+        error: Optional[str] = None
+        try:
+            await self._ensure_connected(preserve_session=True)
+            async with self._query_lock:
+                await self._client.query("/compact")
+                self._expected_results = 1
+                self._is_processing = True
+            async for msg in self._client.receive_messages():
+                if isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
+                    boundary = msg.data.get("compact_metadata") or {}
+                elif isinstance(msg, ResultMessage):
+                    if getattr(msg, "session_id", None):
+                        self.session_id = msg.session_id
+                        self._save_session()
+                    if getattr(msg, "total_cost_usd", None) is not None:
+                        self._absorb_result_cost(float(msg.total_cost_usd))
+                    if msg.is_error:
+                        error = str(msg.result or msg.subtype or "error")
+                    break
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            async with self._query_lock:
+                self._expected_results = 0
+                self._is_processing = False
+        if boundary is None:
+            return {"ok": False, "error": error or "no compact_boundary"}
+        self._last_ctx_usage = None
+        return {
+            "ok": True,
+            "pre_tokens": boundary.get("pre_tokens"),
+            "post_tokens": boundary.get("post_tokens"),
+        }
+
     async def check_context_reserve(
         self,
         combined: str = "",
@@ -916,7 +989,7 @@ class ClaudeSession:
                 "contradicted it (expected model=%s maxOutputTokens=%d); "
                 "measuring anyway",
                 self.expected_context_model,
-                EXPECTED_MAX_OUTPUT_TOKENS,
+                self.expected_max_output_tokens,
             )
 
         try:

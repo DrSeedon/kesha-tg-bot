@@ -265,11 +265,10 @@ def test_t1_claude_trigger_leaves_room_for_the_compact_turn_itself():
     codex_trigger = getattr(config, "CODEX_AUTO_COMPACT_TRIGGER_PCT", None)
 
     assert MANUAL_COMPACT_FLOOR_TOKENS == 16_000
-    assert trigger == 95.0
     assert codex_trigger == 90.0
-    # The trigger must leave room for the compact turn itself, measured at
-    # 5-8K tokens per summary: 95% leaves 50_000, over 3x the floor.
-    assert int(1_000_000 * (100 - trigger) / 100) >= 3 * MANUAL_COMPACT_FLOOR_TOKENS
+    # The CLI hard-blocks a request at window-3000 (~97.7%); prod 25.09.2026 died
+    # because one heavy turn jumped from under 95% past that wall. Leave >=80K.
+    assert int(1_000_000 * (100 - trigger) / 100) >= 80_000
 
 
 @pytest.mark.asyncio

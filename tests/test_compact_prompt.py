@@ -189,6 +189,10 @@ async def test_context_limit_preserves_original_session_without_retry(tmp_path):
         [[{"type": "error", "kind": "context_limit", "content": "Prompt is too long"}]],
     )
 
+    async def no_native():
+        return {"ok": False, "error": "stub"}
+
+    session.native_compact = no_native
     result = await compact_session(session)
 
     assert result["reason"] == "context_limit"
