@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
+    ResultError,
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
@@ -180,6 +181,37 @@ async def test_typed_limit_without_late_result_error_is_still_terminal(tmp_path)
     assert [chunk["type"] for chunk in chunks] == ["error"]
     assert chunks[0]["kind"] == "usage_limit"
     assert session._expected_results == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_result_max_turns_is_reported_without_disconnect(tmp_path):
+    session, client = make_session(tmp_path)
+    terminal = ResultMessage(
+        subtype="error_max_turns",
+        duration_ms=282_900,
+        duration_api_ms=280_000,
+        is_error=True,
+        num_turns=150,
+        session_id="sid-max-turns",
+        stop_reason="tool_use",
+        errors=["Reached maximum number of turns (150)"],
+    )
+    task = asyncio.create_task(collect(session, "long task"))
+    await asyncio.sleep(0)
+    await client.events.put(terminal)
+
+    chunks = await task
+
+    assert chunks == [{
+        "type": "error",
+        "kind": "max_turns",
+        "content": "Reached maximum number of turns (150)",
+    }]
+    assert session._client is client
+    assert session._connected is True
+    assert session.session_id == "sid-max-turns"
+    assert session._expected_results == 0
+    assert session._is_processing is False
 
 
 @pytest.mark.asyncio
@@ -461,6 +493,49 @@ def test_options_disable_native_auto_compact(tmp_path):
     assert options.env["DISABLE_AUTO_COMPACT"] == "1"
     assert "DISABLE_COMPACT" not in options.env
     assert options.permission_mode == "bypassPermissions"
+    assert options.max_turns == 150
+
+
+@pytest.mark.asyncio
+async def test_sdk_error_max_turns_is_a_distinct_stream_event(tmp_path, monkeypatch):
+    from claude_session import ClaudeSession
+
+    class Client:
+        async def query(self, _text):
+            pass
+
+        async def receive_messages(self):
+            raise ResultError(
+                "max turns reached",
+                data={
+                    "subtype": "error_max_turns",
+                    "is_error": True,
+                    "terminal_reason": "max_turns",
+                    "session_id": "resumable",
+                },
+                exit_code=1,
+            )
+            yield  # Make this an async generator.
+
+    session = ClaudeSession(cwd=str(tmp_path), session_file=tmp_path / "sid")
+    session._client = Client()
+    session._connected = True
+
+    async def connected(**_kwargs):
+        return None
+
+    async def disconnect(_client):
+        return None
+
+    monkeypatch.setattr(session, "_ensure_connected", connected)
+    monkeypatch.setattr(session, "_safe_disconnect", disconnect)
+
+    chunks = await collect(session, "long task")
+
+    assert chunks == [{"type": "error", "kind": "max_turns", "content":
+                       "max turns reached (exit code: 1)"}]
+    assert session.session_id == "resumable"
+    assert (tmp_path / "sid").read_text() == "resumable"
 
 
 def test_options_allow_bounded_telegram_image_tool_results(tmp_path):

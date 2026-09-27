@@ -28,6 +28,9 @@ RUNTIME_MODELS = {
 DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
+# GPB and similar tool-heavy tasks can require dozens of Claude tool cycles;
+# 25 stopped valid work mid-run. Keep a high hard ceiling, with explicit recovery.
+CLAUDE_MAX_TURNS = 150
 DEBOUNCE_SEC = int(os.getenv("DEBOUNCE_SEC", "3"))
 # Фото без подписи почти всегда ждёт следом голосовое (в фото войс не вложить) —
 # держим батч дольше обычного дебаунса, чтобы подпись уехала тем же ходом.
@@ -139,6 +142,7 @@ STRINGS = {
         "reconnecting": "⚠️ Переподключаюсь... (попытка {n})",
         "error_retry": "⚠️ Ошибка, перезапуск сессии (попытка {n})...",
         "tool_call_failed": "⚠️ Рантайм не смог разобрать вызов инструмента даже после повторов. Ответа нет — повтори вопрос.",
+        "max_turns_reached": "⚠️ Работа прервана по лимиту шагов. Напиши «продолжай», чтобы продолжить.",
         "session_limit": "⏳ Достигнут лимит подписки {runtime}{reset}. Жду сброса — напиши позже.\n📊 Все окна: /limits",
         "context_limit": "🧠 Провайдер отклонил уже отправленный запрос из-за заполненного контекста. Кеша не запускает его снова, чтобы не дублировать действия.",
         "context_auto_compact_failed": "⚠️ Автоматически освободить контекст не удалось. Сообщение не отправлено.",
@@ -224,6 +228,7 @@ STRINGS = {
         "reconnecting": "⚠️ Reconnecting... (attempt {n})",
         "error_retry": "⚠️ Error, restarting session (attempt {n})...",
         "tool_call_failed": "⚠️ The runtime could not parse its tool call even after retries. No answer — please ask again.",
+        "max_turns_reached": "⚠️ The work stopped at the step limit. Send “continue” to resume.",
         "session_limit": "⏳ {runtime} subscription limit reached{reset}. Waiting for reset — message me later.\n📊 All windows: /limits",
         "context_limit": "🧠 The provider rejected the submitted request because its context was full. Automatic replay is disabled to avoid duplicate actions.",
         "context_auto_compact_failed": "⚠️ Automatic context compaction could not safely free enough space. The message was not sent.",

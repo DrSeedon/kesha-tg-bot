@@ -35,6 +35,11 @@ from tool_status import ToolStatusTracker
 
 CHAT_EDIT_INTERVAL = 3.1  # keep all live bubbles below Telegram's ~20 edits/min ceiling
 STREAM_FLOOD_SEND_INTERVAL = 3.0
+MAX_TURN_CONTINUATIONS = 1
+_MAX_TURN_CONTINUATION_PROMPT = (
+    "Continue the task from where you stopped. Do not repeat completed work; "
+    "continue with the next unfinished step."
+)
 
 _bot = None
 _registry = None
@@ -189,6 +194,8 @@ async def _stop_typer(typer: asyncio.Task) -> None:
 
 async def _ask_inner(message, prompt, cid, typer):
     retries = 0
+    max_turn_continuations = 0
+    current_prompt = prompt
     edit_bot = _ChatEditBudgetBot(_bot)
     # Fail-loud on a real runtime lives in runtime_registry (_REQUIRED_METHODS);
     # here bookkeeping must never stand between the user and his answer.
@@ -476,6 +483,43 @@ async def _ask_inner(message, prompt, cid, typer):
         last_edit_text = ""
         terminal_handled = True
 
+    async def _handle_max_turns() -> None:
+        nonlocal parts, has_deltas, current_msg_id, last_edit_time
+        nonlocal last_edit_text, terminal_handled
+
+        notice = STRINGS["ru"]["max_turns_reached"]
+        await _finalize_status()
+        parts.clear()
+        has_deltas = False
+
+        delivered = False
+        if current_msg_id is not None:
+            try:
+                await edit_bot.edit_message_text(
+                    notice, chat_id=cid, message_id=current_msg_id, parse_mode=None
+                )
+                finalized.append(current_msg_id)
+                delivered = True
+            except Exception as edit_error:
+                logger.warning(f"Chat {cid}: max-turn terminal edit failed: {edit_error}")
+                try:
+                    await _bot.delete_message(cid, current_msg_id)
+                except Exception:
+                    pass
+
+        if not delivered:
+            if message is not None:
+                sent = await _send_safe(message, notice)
+            else:
+                sent = await _bot.send_message(cid, notice, parse_mode=None)
+            if sent:
+                finalized.append(sent.message_id)
+
+        current_msg_id = None
+        last_edit_time = 0.0
+        last_edit_text = ""
+        terminal_handled = True
+
     CHUNK_TIMEOUT_TEXT = 120
     CHUNK_TIMEOUT_TOOL = 300
 
@@ -484,7 +528,7 @@ async def _ask_inner(message, prompt, cid, typer):
         _last_chunk_type = None
         logger.info(f"Chat {cid}: retry loop iteration retries={retries}/{MAX_RETRIES}")
         if retries:
-            reserve = await _get_session(cid).check_context_reserve(prompt)
+            reserve = await _get_session(cid).check_context_reserve(current_prompt)
             reason = reserve.get("reason")
             if not reserve.get("ok") and reason in ("reserve", "session_unavailable"):
                 key = (
@@ -519,7 +563,7 @@ async def _ask_inner(message, prompt, cid, typer):
                     _t_cfg(message, "reconnecting", n=retries),
                 )
         try:
-            stream = _get_session(cid).send_message(prompt).__aiter__()
+            stream = _get_session(cid).send_message(current_prompt).__aiter__()
             while True:
                 try:
                     _in_tool_phase = _last_chunk_type in ("tool", "result")
@@ -634,6 +678,26 @@ async def _ask_inner(message, prompt, cid, typer):
                     await _finalize_status()
                 elif ct == "error":
                     err = chunk["content"]
+                    if chunk.get("kind") == "max_turns":
+                        if max_turn_continuations < MAX_TURN_CONTINUATIONS:
+                            max_turn_continuations += 1
+                            current_prompt = _MAX_TURN_CONTINUATION_PROMPT
+                            logger.warning(
+                                "Chat %s: max-turn limit reached; continuing once (%d/%d)",
+                                cid,
+                                max_turn_continuations,
+                                MAX_TURN_CONTINUATIONS,
+                            )
+                            if status is not None:
+                                await _finalize_status()
+                            need_retry = True
+                        else:
+                            logger.warning(
+                                "Chat %s: max-turn limit reached again; ending response",
+                                cid,
+                            )
+                            await _handle_max_turns()
+                        break
                     reset = _session_limit_reset(err)
                     if chunk.get("kind") == "usage_limit" or reset is not None:
                         # лимит сессии — НЕ ретраить (reconnect бесполезен), сообщить и выйти

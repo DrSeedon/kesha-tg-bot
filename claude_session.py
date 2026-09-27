@@ -13,6 +13,7 @@ from typing import Any, AsyncGenerator, Optional
 from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeAgentOptions,
+    ResultError,
     AssistantMessage,
     ResultMessage,
     RateLimitEvent,
@@ -25,7 +26,7 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 
-from config import AUTO_COMPACT_TRIGGER_PCT, MODEL
+from config import AUTO_COMPACT_TRIGGER_PCT, CLAUDE_MAX_TURNS, MODEL
 from quota_gate import claude_windows, fetch_claude_usage, quota_exhausted
 from runtime_protocol import RuntimeCapabilities
 
@@ -397,7 +398,7 @@ class ClaudeSession:
         options = ClaudeAgentOptions(
             model=model,
             cwd=self.cwd,
-            max_turns=25,
+            max_turns=CLAUDE_MAX_TURNS,
             permission_mode="bypassPermissions",
             can_use_tool=self._auto_approve_tool,
             include_partial_messages=True,
@@ -575,6 +576,8 @@ class ClaudeSession:
         limit_content = ""
         context_limit_seen = False
         context_limit_content = ""
+        max_turns_seen = False
+        max_turns_content = ""
         batch_had_error = False
         generic_errors: list[str] = []
         result_has_visible_main_output = False
@@ -655,6 +658,10 @@ class ClaudeSession:
                     # production), and reading that as "the expected model is
                     # missing" would weld admission shut again.
                     raw_result = str(msg.result or "")
+                    result_is_max_turns = (
+                        getattr(msg, "subtype", None) == "error_max_turns"
+                        or getattr(msg, "terminal_reason", None) == "max_turns"
+                    )
                     result_overflow = (
                         context_limit_seen
                         or getattr(msg, "terminal_reason", None) == "context_limit"
@@ -765,6 +772,15 @@ class ClaudeSession:
                         context_limit_content = (
                             context_limit_content or raw_result or "context limit"
                         )
+                    elif result_is_max_turns:
+                        max_turns_seen = True
+                        errors = getattr(msg, "errors", None) or []
+                        max_turns_content = (
+                            max_turns_content
+                            or raw_result
+                            or "; ".join(str(error) for error in errors)
+                            or "maximum number of turns reached"
+                        )
                     elif msg.is_error:
                         batch_had_error = True
                         if raw_result:
@@ -790,6 +806,17 @@ class ClaudeSession:
                                 "type": "error",
                                 "kind": "context_limit",
                                 "content": context_limit_content or "context limit",
+                            }
+                        elif max_turns_seen:
+                            logger.warning(
+                                "Claude stream result reached max turns: subtype=%s terminal_reason=%s",
+                                getattr(msg, "subtype", None),
+                                getattr(msg, "terminal_reason", None),
+                            )
+                            yield {
+                                "type": "error",
+                                "kind": "max_turns",
+                                "content": max_turns_content,
                             }
                         else:
                             if not batch_had_error:
@@ -832,6 +859,18 @@ class ClaudeSession:
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
         except Exception as e:
             err = str(e)
+            if isinstance(e, ResultError) and e.subtype == "error_max_turns":
+                if e.session_id:
+                    self.session_id = e.session_id
+                    self._save_session()
+                failed_client = self._client
+                self._connected = False
+                self._client = None
+                self._expected_results = 0
+                await self._safe_disconnect(failed_client)
+                logger.warning("Claude query reached max_turns=%s", CLAUDE_MAX_TURNS)
+                yield {"type": "error", "kind": "max_turns", "content": err}
+                return
             if usage_limit_reset(err) is not None:
                 self.usage_limit_active = True
                 self._connected = False

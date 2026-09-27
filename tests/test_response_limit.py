@@ -30,6 +30,27 @@ class FakeContextSession:
         }
 
 
+class MaxTurnsSession:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.prompts = []
+
+    async def send_message(self, prompt):
+        self.prompts.append(prompt)
+        outcome = self.outcomes.pop(0)
+        if outcome == "max_turns":
+            yield {"type": "error", "kind": "max_turns", "content": "limit"}
+        elif outcome == "quota":
+            yield {"type": "error", "kind": "usage_limit", "content": RAW_LIMIT}
+        elif outcome == "context":
+            yield {"type": "error", "kind": "context_limit", "content": "Prompt is too long"}
+        elif outcome == "error":
+            yield {"type": "error", "content": "ordinary failure"}
+        else:
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "turn_done"}
+
+
 class FakeState:
     def __init__(self):
         self.session = FakeSession()
@@ -207,6 +228,59 @@ async def test_finalization_skips_unchanged_plain_live_text(monkeypatch):
 
     assert len(bot.edits) == 1
     assert bot.edits[0][0] == "one two"
+
+
+@pytest.mark.asyncio
+async def test_max_turns_continues_once_and_reports_second_stop(monkeypatch):
+    bot = FakeBot()
+    # An accidental third query raises from pop(), making the hard cap observable.
+    session = MaxTurnsSession(["max_turns", "max_turns"])
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "original task", 7, typer)
+
+    assert session.prompts == ["original task", response_stream._MAX_TURN_CONTINUATION_PROMPT]
+    assert len(session.prompts) == response_stream.MAX_TURN_CONTINUATIONS + 1
+    assert any("лимиту шагов" in text and "продолжай" in text.lower()
+               for text, _kwargs, _mid in message.answers) or any(
+                   "лимиту шагов" in text for text, _kwargs in bot.edits
+               )
+
+
+@pytest.mark.asyncio
+async def test_max_turns_continuation_can_complete(monkeypatch):
+    bot = FakeBot()
+    session = MaxTurnsSession(["max_turns", "success"])
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "original task", 7, typer)
+
+    assert session.prompts == ["original task", response_stream._MAX_TURN_CONTINUATION_PROMPT]
+    assert any("finished" in item[0] for item in message.answers + bot.edits)
+
+
+@pytest.mark.parametrize("outcome", ["quota", "context", "error"])
+@pytest.mark.asyncio
+async def test_other_terminal_conditions_do_not_trigger_max_turn_continuation(monkeypatch, outcome):
+    bot = FakeBot()
+    session = MaxTurnsSession([outcome])
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "original task", 7, typer)
+
+    assert session.prompts == ["original task"]
 
 
 @pytest.mark.asyncio
