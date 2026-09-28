@@ -6,6 +6,7 @@ deploy and were caught only by comparing a row with the CLI transcript.
 """
 
 import sqlite3
+import json
 
 import pytest
 
@@ -144,6 +145,109 @@ def test_cost_is_the_delta_of_a_running_session_total():
     result(0.004)
     assert session.last_response_usage["cost_usd"] == pytest.approx(0.004)
     assert session.total_cost_usd == pytest.approx(0.0319)
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_cost_and_tokens_start_at_transcript_baseline(tmp_path, monkeypatch):
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    from claude_session import ClaudeSession
+
+    session_id = "resumed-session"
+    cwd = tmp_path / "runtime"
+    cwd.mkdir()
+    session_file = tmp_path / "session-id"
+    session_file.write_text(session_id)
+    transcript = (
+        tmp_path
+        / "claude-config"
+        / "projects"
+        / str(cwd).replace("/", "-")
+        / f"{session_id}.jsonl"
+    )
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({
+        "type": "cost-state",
+        "sessionId": session_id,
+        "totalCostUSD": 52.91,
+        "modelUsage": {
+            "claude-opus-5-5[1m]": {
+                "inputTokens": 300,
+                "outputTokens": 1000,
+                "cacheReadInputTokens": 10_000,
+                "cacheCreationInputTokens": 500,
+            }
+        },
+    }) + "\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    session = ClaudeSession(cwd=str(cwd), session_file=session_file)
+
+    class ResumedClient:
+        async def connect(self):
+            return None
+
+        async def query(self, _text):
+            return None
+
+        async def receive_messages(self):
+            yield AssistantMessage(
+                content=[TextBlock("resumed answer")],
+                model="claude-opus-5-5",
+            )
+            yield ResultMessage(
+                subtype="success",
+                duration_ms=10,
+                duration_api_ms=10,
+                is_error=False,
+                num_turns=1,
+                session_id=session_id,
+                result="resumed answer",
+                total_cost_usd=53.01,
+                model_usage={
+                    session.expected_context_model: {
+                        "inputTokens": 320,
+                        "outputTokens": 1020,
+                        "cacheReadInputTokens": 10_200,
+                        "cacheCreationInputTokens": 550,
+                        "maxOutputTokens": session.expected_max_output_tokens,
+                    }
+                },
+            )
+
+    monkeypatch.setattr("claude_session.ClaudeSDKClient", lambda **_kwargs: ResumedClient())
+
+    await session._ensure_connected()
+    session.reset_response_usage()
+    chunks = [chunk async for chunk in session.send_message("next")]
+
+    assert chunks[0] == {"type": "text", "content": "resumed answer"}
+    assert session.last_response_usage["cost_usd"] == pytest.approx(0.10)
+    assert session.last_response_usage["output_tokens"] == 20
+    assert session.last_response_usage["input_tokens"] == 20
+    assert session.last_response_usage["cache_read_tokens"] == 200
+    assert session.last_response_usage["cache_creation_tokens"] == 50
+
+
+def test_response_usage_uses_the_model_that_answered(db, monkeypatch):
+    from types import SimpleNamespace
+
+    import message_log
+    import response_stream
+
+    session = SimpleNamespace(
+        model="claude-opus-5-5",
+        last_response_model="claude-opus-4-8",
+        last_response_usage={"cost_usd": 0.42, "num_turns": 1},
+        last_duration_ms=100,
+    )
+    monkeypatch.setattr(response_stream, "_get_session", lambda _chat_id: session)
+    monkeypatch.setattr(response_stream, "_runtime_label", lambda _chat_id: "claude")
+    monkeypatch.setattr(message_log, "get_db", lambda: db)
+
+    response_stream._log_response_usage(720740564)
+
+    row = db.conn.execute("SELECT model FROM response_usage").fetchone()
+    assert row["model"] == "claude-opus-4-8"
 
 
 def test_reset_opens_a_new_answer():

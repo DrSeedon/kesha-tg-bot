@@ -76,7 +76,8 @@ def _log_response_usage(chat_id: int) -> None:
         _get_msg_db().log_response_usage(
             chat_id,
             _runtime_label(chat_id) or "unknown",
-            model=getattr(session, "model", None),
+            model=getattr(session, "last_response_model", None)
+            or getattr(session, "model", None),
             num_turns=usage.get("num_turns"),
             duration_ms=getattr(session, "last_duration_ms", None),
             input_tokens=usage.get("input_tokens"),
@@ -653,6 +654,9 @@ async def _ask_inner(message, prompt, cid, typer):
                     await _open_text_block()
                     parts.append(chunk["content"])
                     await _edit_update()
+                elif ct == "warning":
+                    await _answer(chunk["content"])
+                    terminal_handled = True
                 elif ct == "tool":
                     tool_name = chunk.get("name", "?")
                     tool_input = chunk.get("input", {})

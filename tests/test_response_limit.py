@@ -16,6 +16,22 @@ class FakeSession:
         yield {"type": "error", "kind": "usage_limit", "content": RAW_LIMIT}
 
 
+class FallbackWarningSession:
+    model = "claude-opus-5-5"
+    last_response_model = "claude-opus-4-8"
+    last_response_usage = {}
+    last_duration_ms = 1
+
+    def reset_response_usage(self):
+        return None
+
+    async def send_message(self, _prompt):
+        yield {
+            "type": "warning",
+            "content": "⚠️ Модель claude-opus-5-5 отказала; этот ответ дала claude-opus-4-8.",
+        }
+
+
 class FakeContextSession:
     def __init__(self):
         self.calls = 0
@@ -211,6 +227,23 @@ async def test_active_edit_flood_deadline_keeps_stream_visible(monkeypatch):
     ]
     assert bot.deleted == [(7, 40), (7, 41)]
     assert bot.edit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_model_fallback_warning_is_sent_to_the_chat(monkeypatch):
+    bot = FakeBot()
+    message = FakeMessage()
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(FallbackWarningSession()))
+    monkeypatch.setattr(response_stream, "_log_response_usage", lambda _cid: None)
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "prompt", 7, typer)
+
+    assert len(message.answers) == 1
+    assert "claude-opus-5-5 отказала" in message.answers[0][0]
+    assert "claude-opus-4-8" in message.answers[0][0]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from claude_agent_sdk import (
     RateLimitInfo,
     ResultMessage,
     StreamEvent,
+    SystemMessage,
     TextBlock,
 )
 
@@ -102,6 +103,7 @@ class QueueClient:
         self.events = asyncio.Queue()
         self.queries = []
         self.context_usage = None
+        self.models = []
 
     async def query(self, text):
         self.queries.append(text)
@@ -112,6 +114,9 @@ class QueueClient:
 
     async def get_context_usage(self):
         return self.context_usage
+
+    async def set_model(self, model):
+        self.models.append(model)
 
 
 def make_session(tmp_path):
@@ -868,6 +873,77 @@ async def test_empty_model_usage_on_plain_result_does_not_latch(tmp_path):
     await task
 
     assert session._max_output_tokens_valid is True
+
+
+def test_refusal_fallback_is_disabled_in_the_stream_cli_environment(tmp_path):
+    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
+
+    assert session._make_options().env["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_warns_and_restores_primary_model(tmp_path):
+    session, client = make_session(tmp_path)
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        SystemMessage(subtype="model_refusal_fallback", data={})
+    )
+    await client.events.put(
+        AssistantMessage(
+            content=[TextBlock("Ответ резервной модели")],
+            model="claude-opus-4-8",
+        )
+    )
+    terminal = result(text="Ответ резервной модели")
+    terminal.model_usage = {
+        "claude-opus-4-8": {"maxOutputTokens": EXPECTED_MAX_OUTPUT_TOKENS}
+    }
+    await client.events.put(terminal)
+
+    chunks = await task
+
+    warning = next(chunk["content"] for chunk in chunks if chunk["type"] == "warning")
+    assert "claude-opus-5-5" in warning
+    assert "claude-opus-4-8" in warning
+    assert client.models == [session.expected_context_model]
+    assert session._model_restore_required is False
+    assert session.last_response_model == "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_stream_refusal_without_fallback_reaches_the_user(tmp_path):
+    session, client = make_session(tmp_path)
+    refusal = "I can't help with that request."
+    task = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)
+    await client.events.put(
+        AssistantMessage(content=[TextBlock(refusal)], model=session.expected_context_model)
+    )
+    await client.events.put(result(error=True, text=refusal))
+
+    chunks = await task
+
+    assert any(chunk["type"] == "text" and chunk["content"] for chunk in chunks)
+    assert not any(chunk["type"] == "warning" for chunk in chunks)
+    assert session.session_id == "sid-new"
+
+
+@pytest.mark.asyncio
+async def test_context_reserve_measures_reported_fallback_model(tmp_path):
+    session, client = make_session(tmp_path)
+    client.context_usage = {
+        "totalTokens": 784_587,
+        "maxTokens": EXPECTED_CONTEXT_TOKENS,
+        "rawMaxTokens": EXPECTED_CONTEXT_TOKENS,
+        "model": "claude-opus-4-8",
+        "isAutoCompactEnabled": False,
+    }
+
+    outcome = await session.check_context_reserve("следующий вопрос")
+
+    assert outcome["ok"] is True
+    assert outcome["usage"]["model"] == "claude-opus-4-8"
 
 
 @pytest.mark.asyncio

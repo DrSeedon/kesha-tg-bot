@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.9.7 — 2026-09-28
+
+### Fixed — refusal fallback не меняет модель молча и не ломает защиту контекста
+
+- 🚫 `ClaudeSession._make_options()` отключает CLI-переключение после safety-refusal через
+  `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`. Если поток всё же приносит
+  `SystemMessage(subtype="model_refusal_fallback")`, бот предупреждает пользователя о фактической
+  модели ответа и возвращает CLI на основную через `ClaudeSDKClient.set_model()`.
+- 📏 Проверка admission-контекста принимает известную резервную `claude-opus-4-8`, если CLI
+  подтверждает окно 1M и отключённый auto-compact; несовпадение модели больше не отключает
+  admission-компакт.
+- 💸 `response_usage.model` теперь берётся из `AssistantMessage.model`. При resume baseline цены
+  и накопительных токенов загружается из последнего `cost-state` transcript, поэтому первый ответ
+  после переподключения не записывает накопитель всей сессии.
+
 ## v2.9.6 — 2026-09-27
 
 ### Fixed — длинные задачи не обрываются на 26-м шаге

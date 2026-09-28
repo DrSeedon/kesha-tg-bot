@@ -62,6 +62,8 @@ _CACHE_CREATION_COLUMNS = {
     "ephemeral_1h_input_tokens": "cache_creation_1h_tokens",
 }
 
+_CONTEXT_MODEL_FALLBACKS = {"claude-opus-4-8"}
+
 SESSION_DIR = Path("./storage/sessions")
 EXTERNAL_MCP_CONFIG = Path(__file__).parent / "storage" / "mcp-external.json"
 
@@ -216,8 +218,12 @@ class ClaudeSession:
         self.total_cost_usd: float = 0.0
         self.last_usage: Optional[dict[str, Any]] = None
         self.last_response_usage: dict[str, Any] = {}
+        self.last_response_model: Optional[str] = None
         self._session_cost_seen: float = 0.0
         self._session_model_usage_seen: dict[str, int] = {}
+        self._session_accounting_baseline_loaded = not bool(self.session_id)
+        self._model_refusal_fallback_seen = False
+        self._model_restore_required = False
         self.rate_limit: Optional[dict[str, Any]] = None
         self.usage_limit_active = False
         self.last_duration_ms: int = 0
@@ -307,6 +313,9 @@ class ClaudeSession:
         self._connected = False
         self.session_id = None
         self._session_resumed = False
+        self._session_accounting_baseline_loaded = True
+        self._session_cost_seen = 0.0
+        self._session_model_usage_seen = {}
         self._last_ctx_usage = None
         self._max_output_tokens_valid = True
         self.last_max_output_tokens = None
@@ -367,6 +376,9 @@ class ClaudeSession:
     def _invalidate_session(self):
         self.session_id = None
         self._session_resumed = False
+        self._session_accounting_baseline_loaded = True
+        self._session_cost_seen = 0.0
+        self._session_model_usage_seen = {}
         self._save_session()
 
     @staticmethod
@@ -404,7 +416,10 @@ class ClaudeSession:
             include_partial_messages=True,
             thinking={"type": "adaptive"},
             effort="high",
-            env={"DISABLE_AUTO_COMPACT": "1"},
+            env={
+                "DISABLE_AUTO_COMPACT": "1",
+                "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
+            },
             max_buffer_size=CLAUDE_MAX_BUFFER_SIZE,
         )
         if self.system_prompt:
@@ -443,6 +458,8 @@ class ClaudeSession:
                 pass
         if self._on_connecting is not None:
             self._on_connecting()
+        if self.session_id and not self._session_accounting_baseline_loaded:
+            self._load_session_accounting_baseline()
         options = self._make_options()
         self._client = ClaudeSDKClient(options=options)
         if self.session_id:
@@ -466,6 +483,51 @@ class ClaudeSession:
                 raise
         self._connected = True
 
+    def _load_session_accounting_baseline(self) -> bool:
+        """Seed running counters from the resumed CLI transcript after a restart."""
+        if not self.session_id:
+            self._session_accounting_baseline_loaded = True
+            return False
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+        project = str(Path(self.cwd).resolve()).replace(os.sep, "-")
+        transcript = config_dir / "projects" / project / f"{self.session_id}.jsonl"
+        latest = None
+        try:
+            with transcript.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if (
+                        event.get("type") == "cost-state"
+                        and event.get("sessionId") == self.session_id
+                    ):
+                        latest = event
+        except OSError as exc:
+            logger.warning("Could not load resumed session accounting baseline: %s", exc)
+            return False
+        if latest is None:
+            logger.warning("No cost-state found for resumed session %s", self.session_id[:8])
+            return False
+        self._session_cost_seen = float(latest.get("totalCostUSD") or 0.0)
+        model_usage = latest.get("modelUsage")
+        if isinstance(model_usage, dict):
+            self._session_model_usage_seen = {
+                key: sum(
+                    int(entry.get(key) or 0)
+                    for entry in model_usage.values()
+                    if isinstance(entry, dict)
+                )
+                for key in _MODEL_USAGE_COLUMNS
+            }
+        self._session_accounting_baseline_loaded = True
+        logger.info(
+            "Loaded resumed session accounting baseline: cost=$%.4f",
+            self._session_cost_seen,
+        )
+        return True
+
     def reset_response_usage(self) -> None:
         """Open a fresh accounting window for one answer to the user.
 
@@ -473,6 +535,22 @@ class ClaudeSession:
         real tokens twice, and both belong to that answer's price.
         """
         self.last_response_usage = {}
+        self.last_response_model = None
+        self._model_refusal_fallback_seen = False
+
+    async def _restore_primary_model(self) -> bool:
+        if not self._client or not self._connected:
+            self._model_restore_required = True
+            return False
+        try:
+            await self._client.set_model(self.expected_context_model)
+        except Exception:
+            self._model_restore_required = True
+            logger.exception("Could not restore configured model %s", self.expected_context_model)
+            return False
+        self._model_restore_required = False
+        logger.warning("Restored configured model %s after refusal fallback", self.expected_context_model)
+        return True
 
     @staticmethod
     def _delta(running: float, seen: float) -> float:
@@ -585,6 +663,12 @@ class ClaudeSession:
         try:
             logger.info("send_message: ensuring connected...")
             await self._ensure_connected(preserve_session=True)
+            if self._model_restore_required and not await self._restore_primary_model():
+                yield {
+                    "type": "error",
+                    "content": "Не удалось вернуть основную модель. Запрос не отправлен; попробуйте позже.",
+                }
+                return
             logger.info("send_message: connected, sending query...")
             async with self._query_lock:
                 await self._client.query(text)
@@ -595,6 +679,10 @@ class ClaudeSession:
             async for msg in self._client.receive_messages():
                 if isinstance(msg, AssistantMessage):
                     self._absorb_assistant_context(getattr(msg, "usage", None))
+                    if getattr(msg, "parent_tool_use_id", None) is None:
+                        actual_model = getattr(msg, "model", None)
+                        if isinstance(actual_model, str) and actual_model.startswith("claude-"):
+                            self.last_response_model = actual_model.removesuffix("[1m]")
                     assistant_error = getattr(msg, "error", None)
                     if assistant_error in {"rate_limit", "billing_error"}:
                         raw = "\n".join(
@@ -785,6 +873,22 @@ class ClaudeSession:
                         batch_had_error = True
                         if raw_result:
                             generic_errors.append(raw_result)
+                    if self._model_refusal_fallback_seen:
+                        restored = await self._restore_primary_model()
+                        answered_by = self.last_response_model or "резервная модель"
+                        configured = self.model.removesuffix("[1m]")
+                        suffix = (
+                            " Основная модель восстановлена для следующего сообщения."
+                            if restored
+                            else " Следующий запрос будет остановлен, пока основная модель не восстановится."
+                        )
+                        yield {
+                            "type": "warning",
+                            "content": (
+                                f"⚠️ Модель {configured} отказала; этот ответ дала "
+                                f"{answered_by}.{suffix}"
+                            ),
+                        }
                     pending_limit = None
                     result_has_visible_main_output = False
 
@@ -845,6 +949,12 @@ class ClaudeSession:
                         if isinstance(commands, list):
                             self.slash_commands = [str(command) for command in commands]
                     logger.info(f"System: {msg.subtype}")
+                    if msg.subtype == "model_refusal_fallback":
+                        self._model_refusal_fallback_seen = True
+                        logger.warning(
+                            "Claude CLI emitted model_refusal_fallback for configured model %s",
+                            self.model,
+                        )
                 elif isinstance(msg, RateLimitEvent):
                     rl = msg.rate_limit_info
                     self.rate_limit = {
@@ -1073,7 +1183,11 @@ class ClaudeSession:
             and total > 0
             and maximum == EXPECTED_CONTEXT_TOKENS
             and raw_maximum == EXPECTED_CONTEXT_TOKENS
-            and usage.get("model") == self.expected_context_model
+            and usage.get("model") in (
+                self.expected_context_model,
+                self.expected_context_model.removesuffix("[1m]"),
+                *_CONTEXT_MODEL_FALLBACKS,
+            )
             and usage.get("isAutoCompactEnabled") is False
         )
         if not valid:
@@ -1092,6 +1206,12 @@ class ClaudeSession:
                 "required": required,
                 "expected_model": self.expected_context_model,
             }
+        if usage["model"] != self.expected_context_model:
+            logger.warning(
+                "Context measured on active model %s while configured model is %s",
+                usage["model"],
+                self.expected_context_model,
+            )
 
         remaining = maximum - total
         if not manual:
