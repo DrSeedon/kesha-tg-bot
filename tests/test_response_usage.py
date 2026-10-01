@@ -7,6 +7,7 @@ deploy and were caught only by comparing a row with the CLI transcript.
 
 import sqlite3
 import json
+import re
 
 import pytest
 
@@ -162,7 +163,7 @@ async def test_resumed_session_cost_and_tokens_start_at_transcript_baseline(tmp_
         tmp_path
         / "claude-config"
         / "projects"
-        / str(cwd).replace("/", "-")
+        / re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
         / f"{session_id}.jsonl"
     )
     transcript.parent.mkdir(parents=True)

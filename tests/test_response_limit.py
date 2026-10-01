@@ -500,3 +500,44 @@ async def test_t3_retry_pressure_refusal_has_zero_second_query_and_no_manual_ux(
     assert len(message.answers) == 1
     assert "/compact" not in message.answers[0][0]
     assert "повтор" not in message.answers[0][0].casefold()
+
+
+class SafetyRefusalSession:
+    def __init__(self, rolled_back):
+        self.rolled_back = rolled_back
+        self.prompts = []
+        self.reconnects = 0
+
+    def reconnect(self):
+        self.reconnects += 1
+
+    async def send_message(self, prompt):
+        # One query only: a retry would raise from the empty list.
+        self.prompts.append(prompt)
+        yield {
+            "type": "error",
+            "kind": "safety_refusal",
+            "content": "cyber",
+            "rolled_back": self.rolled_back,
+        }
+
+
+@pytest.mark.parametrize("rolled_back", [True, False])
+@pytest.mark.asyncio
+async def test_safety_refusal_is_one_notice_without_reconnect(monkeypatch, rolled_back):
+    bot = FakeBot()
+    session = SafetyRefusalSession(rolled_back)
+    response_stream.set_bot(bot)
+    response_stream.set_registry(FakeRegistry(session))
+    message = FakeMessage()
+    typer = asyncio.create_task(completed_typer())
+    await typer
+
+    await response_stream._ask_inner(message, "refused question", 7, typer)
+
+    assert session.prompts == ["refused question"]
+    assert session.reconnects == 0
+    visible = [text for text, *_ in message.answers] + [text for text, *_ in bot.edits]
+    assert len(visible) == 1
+    assert "(cyber)" in visible[0]
+    assert ("/clear" in visible[0]) is (not rolled_back)

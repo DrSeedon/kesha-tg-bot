@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
     McpSdkServerConfig,
     PermissionResultAllow,
+    fork_session,
 )
 
 from config import AUTO_COMPACT_TRIGGER_PCT, CLAUDE_MAX_TURNS, MODEL
@@ -483,14 +484,75 @@ class ClaudeSession:
                 raise
         self._connected = True
 
+    def _transcript_path(self, session_id: str) -> Path:
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+        # The CLI's own project-dir rule: every non-alphanumeric becomes "-".
+        project = re.sub(r"[^a-zA-Z0-9]", "-", str(Path(self.cwd).resolve()))
+        return config_dir / "projects" / project / f"{session_id}.jsonl"
+
+    async def _rollback_refused_turn(self, refused_user_uuid: Optional[str]) -> bool:
+        """Move the chat to a fork that ends just before the refused message.
+
+        The CLI keeps a refused turn in the transcript, and the flagged text
+        then trips the classifier again on every later request — the next
+        benign question and our own compaction included (prod 01.10.2026).
+        The source transcript is left untouched.
+        """
+        failed_client = self._client
+        self._client = None
+        self._connected = False
+        self._expected_results = 0
+        await self._safe_disconnect(failed_client)
+        source = self.session_id
+        if not source or not refused_user_uuid or self._session_replacement is not None:
+            return False
+        parent: Optional[str] = None
+        found = False
+        try:
+            with self._transcript_path(source).open(encoding="utf-8") as stream:
+                for line in stream:
+                    if refused_user_uuid not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if event.get("uuid") == refused_user_uuid:
+                        parent = event.get("parentUuid")
+                        found = True
+                        break
+            if not found:
+                logger.warning("Refused message %s not in transcript %s", refused_user_uuid, source[:8])
+                return False
+            # The refused message opened the session: nothing before it to keep.
+            new_id = (
+                fork_session(source, directory=self.cwd, up_to_message_id=parent).session_id
+                if parent
+                else None
+            )
+        except Exception as exc:
+            logger.error("Rollback of refused turn failed: %s", exc)
+            return False
+        self.session_id = new_id
+        self._session_resumed = bool(new_id)
+        # A fork carries no cost-state: its CLI counters start from zero.
+        self._session_accounting_baseline_loaded = True
+        self._session_cost_seen = 0.0
+        self._session_model_usage_seen = {}
+        self._last_ctx_usage = None
+        self._save_session()
+        logger.warning(
+            "Refused turn rolled back: session %s → %s (cut after %s)",
+            source[:8], (new_id or "new")[:8], parent,
+        )
+        return True
+
     def _load_session_accounting_baseline(self) -> bool:
         """Seed running counters from the resumed CLI transcript after a restart."""
         if not self.session_id:
             self._session_accounting_baseline_loaded = True
             return False
-        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-        project = str(Path(self.cwd).resolve()).replace(os.sep, "-")
-        transcript = config_dir / "projects" / project / f"{self.session_id}.jsonl"
+        transcript = self._transcript_path(self.session_id)
         latest = None
         try:
             with transcript.open(encoding="utf-8") as stream:
@@ -659,6 +721,8 @@ class ClaudeSession:
         batch_had_error = False
         generic_errors: list[str] = []
         result_has_visible_main_output = False
+        refusal: Optional[dict] = None
+        refusal_terminal = False
 
         try:
             logger.info("send_message: ensuring connected...")
@@ -692,6 +756,10 @@ class ClaudeSession:
                         pending_limit = raw or assistant_error
                         limit_content = limit_content or pending_limit
                         limit_seen = True
+                        continue
+                    if refusal is not None and assistant_error:
+                        # The CLI's synthetic "API Error: ... safeguards flagged"
+                        # text is not an answer; it reached the chat verbatim.
                         continue
                     raw_assistant = "\n".join(
                         block.text for block in msg.content
@@ -776,10 +844,20 @@ class ClaudeSession:
                         )
                     )
                     result_is_limit = typed_result_limit or raw_result_limit
+                    # A refusal mid-turn may still end in a normal answer
+                    # (stop=end_turn); only a turn that ENDED refused is dropped.
+                    result_is_refusal = (
+                        refusal is not None
+                        and not result_is_limit
+                        and (
+                            getattr(msg, "stop_reason", None) == "refusal"
+                            or msg.is_error
+                        )
+                    )
                     # A context-limit short circuit is equally not evidence about
                     # the runtime, and latching here would block the very
                     # /compact the message tells the user to run.
-                    short_circuited = result_is_limit or (
+                    short_circuited = result_is_limit or result_is_refusal or (
                         getattr(msg, "terminal_reason", None) == "context_limit"
                         or is_context_limit(raw_result)
                     )
@@ -855,6 +933,8 @@ class ClaudeSession:
                         limit_seen = True
                         limit_content = limit_content or pending_limit or raw_result or "usage limit"
                         self.usage_limit_active = True
+                    elif result_is_refusal:
+                        refusal_terminal = True
                     elif result_is_context_limit:
                         context_limit_seen = True
                         context_limit_content = (
@@ -905,6 +985,8 @@ class ClaudeSession:
                                 "kind": "usage_limit",
                                 "content": limit_content or "usage limit",
                             }
+                        elif refusal_terminal:
+                            pass  # rolled back below, once this client is released
                         elif context_limit_seen:
                             yield {
                                 "type": "error",
@@ -949,6 +1031,13 @@ class ClaudeSession:
                         if isinstance(commands, list):
                             self.slash_commands = [str(command) for command in commands]
                     logger.info(f"System: {msg.subtype}")
+                    if msg.subtype == "model_refusal_no_fallback":
+                        refusal = msg.data if isinstance(msg.data, dict) else {}
+                        logger.warning(
+                            "Claude refused the turn: category=%s refused_message=%s",
+                            refusal.get("apiRefusalCategory"),
+                            refusal.get("refusedUserMessageUuid"),
+                        )
                     if msg.subtype == "model_refusal_fallback":
                         self._model_refusal_fallback_seen = True
                         logger.warning(
@@ -967,6 +1056,16 @@ class ClaudeSession:
                         limit_content = limit_content or pending_limit
                         limit_seen = True
                     logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
+            if refusal_terminal:
+                rolled_back = await self._rollback_refused_turn(
+                    refusal.get("refusedUserMessageUuid")
+                )
+                yield {
+                    "type": "error",
+                    "kind": "safety_refusal",
+                    "content": str(refusal.get("apiRefusalCategory") or ""),
+                    "rolled_back": rolled_back,
+                }
         except Exception as e:
             err = str(e)
             if isinstance(e, ResultError) and e.subtype == "error_max_turns":

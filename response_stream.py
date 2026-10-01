@@ -702,6 +702,19 @@ async def _ask_inner(message, prompt, cid, typer):
                             )
                             await _handle_max_turns()
                         break
+                    if chunk.get("kind") == "safety_refusal":
+                        # Its text says "flagged this session": the generic
+                        # "session" branch below reconnected into the same
+                        # refused turn twice (prod 01.10.2026).
+                        logger.warning(
+                            f"Chat {cid}: safety refusal ({err or 'no category'}), "
+                            f"rolled_back={chunk.get('rolled_back')}, NOT retrying"
+                        )
+                        await _handle_context_limit(
+                            "safety_refusal" if chunk.get("rolled_back") else "safety_refusal_kept",
+                            category=f" ({err})" if err else "",
+                        )
+                        break
                     reset = _session_limit_reset(err)
                     if chunk.get("kind") == "usage_limit" or reset is not None:
                         # лимит сессии — НЕ ретраить (reconnect бесполезен), сообщить и выйти
