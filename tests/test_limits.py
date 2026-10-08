@@ -1,10 +1,13 @@
 """`/limits`: Orchestra is the source of truth, Kesha owns Telegram delivery."""
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from limits import LimitsUnavailable
 
 
 NOW = dt.datetime(2026, 8, 14, 8, 0, 0, tzinfo=dt.timezone.utc)
@@ -142,10 +145,11 @@ async def test_limits_handler_sends_the_png_with_the_full_caption(monkeypatch):
     assert "Claude 5h" in call.kwargs["caption"]
     assert "израсходовано" in call.kwargs["caption"]
     assert call.kwargs["photo"].filename == "limits.png"
+    msg.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_limits_handler_reports_fetch_or_render_failure(monkeypatch):
+async def test_limits_handler_reports_usage_failure(monkeypatch):
     import handlers
 
     msg = SimpleNamespace(
@@ -169,7 +173,26 @@ async def test_limits_handler_reports_fetch_or_render_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_limits_handler_keeps_text_when_the_card_fails(monkeypatch):
+@pytest.mark.parametrize(
+    ("card_result", "logged_class"),
+    [
+        pytest.param(
+            LimitsUnavailable("Orchestra /api/usage/card: HTTP 404"),
+            "LimitsUnavailable",
+            id="endpoint-404",
+        ),
+        pytest.param(TimeoutError(), "TimeoutError", id="timeout"),
+        pytest.param(b"", "LimitsUnavailable", id="empty-bytes"),
+        pytest.param(
+            ModuleNotFoundError("No module named 'playwright'"),
+            "ModuleNotFoundError",
+            id="missing-optional-dependency",
+        ),
+    ],
+)
+async def test_limits_handler_keeps_clean_text_when_the_card_fails(
+    monkeypatch, caplog, card_result, logged_class
+):
     import handlers
 
     msg = SimpleNamespace(
@@ -181,17 +204,22 @@ async def test_limits_handler_keeps_text_when_the_card_fails(monkeypatch):
     )
     monkeypatch.setattr(handlers, "ALLOWED", {1})
     monkeypatch.setattr(handlers, "fetch_limits_usage", AsyncMock(return_value=usage()))
-    monkeypatch.setattr(
-        handlers,
-        "fetch_limits_card",
-        AsyncMock(side_effect=TimeoutError()),
-    )
+    fetch_card = AsyncMock()
+    if isinstance(card_result, BaseException):
+        fetch_card.side_effect = card_result
+    else:
+        fetch_card.return_value = card_result
+    monkeypatch.setattr(handlers, "fetch_limits_card", fetch_card)
+    caplog.set_level(logging.WARNING)
 
     await handlers.h_limits(msg)
 
-    fallback = msg.answer.await_args.args[0]
-    assert fallback.startswith("❌ /limits: TimeoutError: (без сообщения)\n*Лимиты*")
-    assert "Claude 5h" in fallback
+    expected = handlers.format_limits_message(usage())
+    msg.answer.assert_awaited_once_with(expected)
+    msg.answer_photo.assert_not_awaited()
+    assert "❌" not in msg.answer.await_args.args[0]
+    assert logged_class not in msg.answer.await_args.args[0]
+    assert f"/limits card unavailable: {logged_class}:" in caplog.text
 
 
 def test_limits_command_is_published():

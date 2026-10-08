@@ -35,7 +35,12 @@ from media import (
     transcribe,
 )
 from message_log import ActivityPersistenceError
-from limits import fetch_limits_card, fetch_limits_usage, format_limits_message
+from limits import (
+    LimitsUnavailable,
+    fetch_limits_card,
+    fetch_limits_usage,
+    format_limits_message,
+)
 from telegram_io import (
     _send_safe,
     extract_caption_with_urls,
@@ -180,25 +185,32 @@ async def h_status(msg: types.Message):
 
 
 async def h_limits(msg: types.Message):
-    """Send Orchestra's authoritative limits card unchanged."""
+    """Send Orchestra's limits, with its card as optional presentation."""
     if not allowed(msg.from_user.id):
         return await _deny_once(msg)
     if msg.chat.type != "private":
         return
-    response = None
     try:
         usage = await fetch_limits_usage()
         response = format_limits_message(usage)
+    except Exception as exc:
+        detail = str(exc).strip() or "(без сообщения)"
+        logger.error("/limits usage failed: %s: %s", type(exc).__name__, detail)
+        await _send_safe(msg, f"❌ /limits: {type(exc).__name__}: {detail}")
+        return
+
+    try:
         image = await fetch_limits_card()
+        if not image:
+            raise LimitsUnavailable("Orchestra вернула пустую карточку лимитов")
         await msg.answer_photo(
             photo=BufferedInputFile(image, filename="limits.png"),
             caption=response,
         )
     except Exception as exc:
         detail = str(exc).strip() or "(без сообщения)"
-        logger.error("/limits failed: %s: %s", type(exc).__name__, detail)
-        error = f"❌ /limits: {type(exc).__name__}: {detail}"
-        await _send_safe(msg, f"{error}\n{response}" if response else error)
+        logger.warning("/limits card unavailable: %s: %s", type(exc).__name__, detail)
+        await _send_safe(msg, response)
 
 
 async def h_clear(msg: types.Message):
