@@ -6,6 +6,8 @@
 """
 
 import asyncio
+
+from tests.sdk_echo import echo, prompt_frames
 from types import SimpleNamespace
 
 import pytest
@@ -140,9 +142,12 @@ async def test_text_blocks_never_glue_across_a_tool(monkeypatch):
 class QueueClient:
     def __init__(self):
         self.events = asyncio.Queue()
+        self.script = []  # what the CLI emits once it takes the prompt
 
-    async def query(self, text):
-        return None
+    async def query(self, prompt):
+        for message in echo(await prompt_frames(prompt)) + self.script:
+            self.events.put_nowait(message)
+        self.script = []
 
     async def receive_messages(self):
         while True:
@@ -220,7 +225,7 @@ async def test_subagent_narration_never_reaches_the_user(tmp_path):
         ),
         _result(),
     ):
-        client.events.put_nowait(msg)
+        client.script.append(msg)
 
     chunks = [c async for c in session.send_message("hi")]
 

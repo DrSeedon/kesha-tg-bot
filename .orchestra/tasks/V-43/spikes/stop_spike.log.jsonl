@@ -1,0 +1,67 @@
+{"t": 1.01, "kind": "sent", "tag": "A", "uuid": "89319650-f5b1-4045-bcdc-ae726e4adfba", "text": "Use the Agent tool with run_in_background=true to start exactly ONE general-purp"}
+{"t": 1.02, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "30407db4-9153-460c-8119-06863e783194"}
+{"t": 1.03, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "825f16e9-a815-4c5e-9db4-3dd4b41a8cb7"}
+{"t": 1.07, "kind": "msg", "type": "system", "subtype": "init", "uuid": "de8fc5f7-ac8f-431d-9146-0042566e08be"}
+{"t": 1.08, "kind": "msg", "type": "system", "subtype": "status", "uuid": "d4c3afbf-4706-4540-a395-bd6009f6ddc9", "status": "requesting"}
+{"t": 1.89, "kind": "msg", "type": "user", "subtype": null, "uuid": "89319650-f5b1-4045-bcdc-ae726e4adfba", "text": "Use the Agent tool with run_in_background=true to start exactly ONE general-purpose subagent whose only job is to run the bash command `sleep 45; echo bg-done` ", "parent_tool_use_id": null, "isReplay": true}
+{"t": 1.9, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "0e0c52b7-2012-411a-b09b-d8b1791025b0", "ev": "message_start"}
+{"t": 1.92, "kind": "msg", "type": "rate_limit_event", "subtype": null, "uuid": "fc205566-53ad-4b6f-aaba-78ee9264c532"}
+{"t": 2.1, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "4b9f2bd9-cae8-4677-b25f-503af34ce509"}
+{"t": 3.18, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "0eb3aa93-ce97-4422-88e6-413b6c2b2fde"}
+{"t": 3.46, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "5deb8b42-7e15-4c20-b781-c6bc6f71ca53"}
+{"t": 3.46, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "ab22aeb4-30a3-4e97-9921-f1f1cd805b0a", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 4.17, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "cbdd7b73-e0ff-49a1-8f7c-bcb9b81d2852", "blocks": [["tool_use", "Agent"]], "parent_tool_use_id": null}
+{"t": 4.19, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "d3b7a10f-2bf2-475f-afb6-1e39765e9f96"}
+{"t": 4.19, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "080b0e15-faff-4358-87f2-e7b6e13263cf", "task_id": "a7cb8ca69755cd6e8", "task_type": "local_agent"}
+{"t": 4.22, "kind": "msg", "type": "user", "subtype": null, "uuid": "a5c5ef34-2dca-44be-85d4-accc3dd8c6c4", "blocks": [["tool_result", "[{'type': 'text', 'text': \"Async agent launched successfully. (This tool result "]], "parent_tool_use_id": null}
+{"t": 4.22, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "660977e6-ee0d-4533-b674-b5601d79ec75", "ev": "message_stop"}
+{"t": 4.26, "kind": "msg", "type": "system", "subtype": "status", "uuid": "e61f7b5c-854b-4256-b497-1f447587550a", "status": "requesting"}
+{"t": 5.21, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "67640653-b16f-4a0e-a621-5f20ee85ed71", "ev": "message_start"}
+{"t": 5.81, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "a2b80e73-b9da-4d57-96ae-d569d1dd26ea"}
+{"t": 6.07, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "989e8f8d-3924-4b2e-97bd-2317873a1288"}
+{"t": 6.08, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "dc1e9664-318f-4344-baf9-7101784d2ded", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 6.12, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "f0801950-f13f-4f2e-9708-d82de3e99165", "blocks": [["text", "LAUNCHED"]], "parent_tool_use_id": null}
+{"t": 6.12, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "92b9b303-6c5b-46e2-aeb9-c9dc58787867", "ev": "message_stop"}
+{"t": 6.17, "kind": "msg", "type": "result", "subtype": "success", "uuid": "41636906-17af-4861-85a1-4b0b7a76b8fe", "num_turns": 2, "stop_reason": "end_turn", "terminal_reason": "completed", "is_error": false, "result": "LAUNCHED"}
+{"t": 6.17, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "4d2abfe9-0a3b-4cad-a97a-3788be7700e0"}
+{"t": 6.27, "kind": "sent", "tag": "F", "uuid": "ec600cd8-e649-47f3-951c-92a522b26e6e", "text": "Run the bash command `sleep 30; echo fg-done` (foreground), then reply OK."}
+{"t": 6.27, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "7bd317cd-2ca3-42c0-b196-caf17ea3058c"}
+{"t": 6.35, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "ce72d0d3-7a98-4a7b-96e7-0de7a43b6c62"}
+{"t": 6.38, "kind": "msg", "type": "system", "subtype": "init", "uuid": "cf7e3c28-4474-4f31-a6e4-494faf0d54bd"}
+{"t": 6.39, "kind": "msg", "type": "system", "subtype": "status", "uuid": "8794b21b-fcea-4371-b49c-4f4f798f1720", "status": "requesting"}
+{"t": 6.4, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "e076cde1-09c5-4613-a173-16a719991a25", "blocks": [["thinking", "None"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 6.76, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "30cd80c3-6469-470c-8a91-f8bb86a6f85e", "blocks": [["tool_use", "Bash"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 6.76, "kind": "msg", "type": "system", "subtype": "task_progress", "uuid": "117cc1d0-131d-4de6-8ea5-cefaf75b3304", "task_id": "a7cb8ca69755cd6e8"}
+{"t": 6.78, "kind": "msg", "type": "user", "subtype": null, "uuid": "78cb88ed-eeed-46f0-85f2-507687b64f7e", "blocks": [["tool_result", "<tool_use_error>Blocked: sleep 45 followed by: echo bg-done. To wait for a condi"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 8.35, "kind": "msg", "type": "user", "subtype": null, "uuid": "ec600cd8-e649-47f3-951c-92a522b26e6e", "text": "Run the bash command `sleep 30; echo fg-done` (foreground), then reply OK.", "parent_tool_use_id": null, "isReplay": true}
+{"t": 8.35, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "9817f190-87f9-448c-898b-d5b73d793c09", "ev": "message_start"}
+{"t": 8.65, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "ad4e5964-d351-45cc-8a0b-4c66ed1245c8"}
+{"t": 9.23, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "b955864c-ac8c-4164-a1ea-7fcf58454008"}
+{"t": 9.23, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "d4961dae-d222-44dd-b881-c1aa27ae3055", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 9.56, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "30ea689b-1f49-4fa7-9931-36c4bff9e254", "blocks": [["tool_use", "Bash"]], "parent_tool_use_id": null}
+{"t": 9.57, "kind": "msg", "type": "user", "subtype": null, "uuid": "123ccb30-4fa6-49fb-af5a-9c977e131bd6", "blocks": [["tool_result", "<tool_use_error>Blocked: sleep 30 followed by: echo fg-done. To wait for a condi"]], "parent_tool_use_id": null}
+{"t": 9.57, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "6b7a67f3-0d9b-402e-94f1-6611f31864ff", "ev": "message_stop"}
+{"t": 9.59, "kind": "msg", "type": "system", "subtype": "status", "uuid": "e0e76bf6-b74e-4dce-ad71-984533212244", "status": "requesting"}
+{"t": 10.53, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "77445aac-88c1-4cfa-a54a-6fc499278184", "ev": "message_start"}
+{"t": 10.88, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "0bbe3e7d-8da7-45b8-9193-085bbf8c4360"}
+{"t": 12.39, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "90cff169-8be9-46eb-a66a-95e8d4d208f1"}
+{"t": 12.6, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "2fe4ddfe-f52a-4739-81ff-f620a851807d", "blocks": [["thinking", "None"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 13.1, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "39c36e43-443c-484e-a969-7a53513f5980", "blocks": [["text", "I'll run that command in the background since the tool blocks long foreground sleeps. The system will notify me when it "]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 13.55, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "33425757-382e-4160-a574-1f072d87da6f", "blocks": [["tool_use", "Bash"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 13.55, "kind": "msg", "type": "system", "subtype": "task_progress", "uuid": "4f40331c-2bf0-4205-a7fa-9f406e1d37b1", "task_id": "a7cb8ca69755cd6e8"}
+{"t": 13.64, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "5e7b4fb7-7ccc-47d7-a73c-9b4a38cdbcf8"}
+{"t": 13.64, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "e60b13c2-49ea-45a5-93ce-5fc9452752e0", "task_id": "b8o02i2a3", "task_type": "local_bash"}
+{"t": 13.65, "kind": "msg", "type": "user", "subtype": null, "uuid": "d1dd6ff4-8e7e-4242-9289-6dd3b86b66dc", "blocks": [["tool_result", "Command running in background with ID: b8o02i2a3. Output is being written to: /t"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 13.68, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "04a399c8-ef7a-4be6-9bf6-afa5b0ea4658"}
+{"t": 14.27, "kind": "interrupt", "note": "mid foreground turn, bg agent alive"}
+{"t": 14.31, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "dcf4a2a5-32bc-4d12-b49f-fddafb8cfd37"}
+{"t": 14.31, "kind": "msg", "type": "system", "subtype": "task_updated", "uuid": "f638f02b-ac90-46ac-8be4-cd95aaa70a2d", "task_id": "a7cb8ca69755cd6e8"}
+{"t": 14.31, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "b6c1bd6b-ffef-4f21-a2da-8aae1a9375f2", "task_id": "a7cb8ca69755cd6e8", "status": "stopped", "summary": "Run sleep and echo command"}
+{"t": 14.31, "kind": "msg", "type": "user", "subtype": null, "uuid": "509ae367-6b0e-48dc-b512-0fe8dee65690", "blocks": [["text", "[Request interrupted by user]"]], "parent_tool_use_id": null}
+{"t": 14.32, "kind": "msg", "type": "user", "subtype": null, "uuid": "0b1c2ac7-ae45-452f-893f-79352732b583", "blocks": [["text", "[Request interrupted by user]"]], "parent_tool_use_id": "toolu_01NZvnGDPEPs5PWoSWxJYQis"}
+{"t": 14.34, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "31e5c8cc-1d80-4e79-a28f-0038397fe117"}
+{"t": 14.34, "kind": "msg", "type": "system", "subtype": "task_updated", "uuid": "ee2678e1-f9fc-4151-93dd-9755263b2283", "task_id": "b8o02i2a3"}
+{"t": 14.34, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "d66da30e-bbf7-4347-ae19-17eb2ed3c320", "task_id": "b8o02i2a3", "status": "stopped", "summary": "Sleep for 45 seconds and then echo completion message"}
+{"t": 14.35, "kind": "msg", "type": "result", "subtype": "error_during_execution", "uuid": "73c6f594-0c51-4440-9115-e9d10824d28b", "num_turns": 3, "stop_reason": "tool_use", "terminal_reason": "aborted_streaming", "is_error": true, "result": "None"}
+{"t": 14.36, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "8261b659-6ef3-49f9-ae84-4559de029d43"}
+{"t": 89.33, "kind": "timeout", "label": "settle (bg agent sleeps 45s)"}

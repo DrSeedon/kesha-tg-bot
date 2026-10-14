@@ -132,7 +132,7 @@ async def test_real_stall_stops_the_cli_before_the_notice(tmp_path, monkeypatch)
         "CLI must be interrupted and disconnected BEFORE the user is told"
     )
     assert session._client is None and session._pending_disconnect is None
-    assert session._is_processing is False and session._expected_results == 0
+    assert session._is_processing is False
     # the old client is gone: whatever it would still produce reaches no one
     sent_before = len(bot.sent) + len(bot.edits)
     for event in answer():

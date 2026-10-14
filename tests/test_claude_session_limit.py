@@ -12,6 +12,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from tests.sdk_echo import echo, prompt_frames, text_of
 from claude_session import (
     AUTO_COMPACT_TRIGGER_PCT,
     CLAUDE_MAX_BUFFER_SIZE,
@@ -105,8 +106,11 @@ class QueueClient:
         self.context_usage = None
         self.models = []
 
-    async def query(self, text):
-        self.queries.append(text)
+    async def query(self, prompt):
+        frames = await prompt_frames(prompt)
+        self.queries.append(text_of(frames))
+        for message in echo(frames):
+            self.events.put_nowait(message)
 
     async def receive_messages(self):
         while True:
@@ -162,7 +166,6 @@ async def test_observed_cli_2_1_220_limit_is_one_normalized_terminal_chunk(tmp_p
     assert chunks[0]["type"] == "error"
     assert chunks[0]["kind"] == "usage_limit"
     assert len(chunks) == 1
-    assert session._expected_results == 0
     assert session._is_processing is False
     assert session.usage_limit_active is True
 
@@ -185,7 +188,6 @@ async def test_typed_limit_without_late_result_error_is_still_terminal(tmp_path)
 
     assert [chunk["type"] for chunk in chunks] == ["error"]
     assert chunks[0]["kind"] == "usage_limit"
-    assert session._expected_results == 0
 
 
 @pytest.mark.asyncio
@@ -215,7 +217,6 @@ async def test_stream_result_max_turns_is_reported_without_disconnect(tmp_path):
     assert session._client is client
     assert session._connected is True
     assert session.session_id == "sid-max-turns"
-    assert session._expected_results == 0
     assert session._is_processing is False
 
 
@@ -262,26 +263,6 @@ async def test_successful_stream_delta_quoting_limit_is_not_self_censored(tmp_pa
         {"type": "text_delta", "content": answer},
     ]
     assert session.usage_limit_active is False
-
-
-@pytest.mark.asyncio
-async def test_visible_output_evidence_resets_before_injected_raw_limit(tmp_path):
-    session, client = make_session(tmp_path)
-    answer = "This successful answer quotes a session limit without being one."
-    task = asyncio.create_task(collect(session))
-    await asyncio.sleep(0)
-    assert await session.inject("injected") is True
-    await client.events.put(
-        AssistantMessage(content=[TextBlock(answer)], model="claude")
-    )
-    await client.events.put(result(text=answer, sid="sid-success"))
-    await client.events.put(limit_result_without_model_usage())
-
-    chunks = await task
-
-    assert chunks[-1]["type"] == "error"
-    assert chunks[-1]["kind"] == "usage_limit"
-    assert session.usage_limit_active is True
 
 
 @pytest.mark.asyncio
@@ -347,113 +328,6 @@ async def test_result_limit_variants_are_normalized(tmp_path, variant):
 
     assert chunks == [{"type": "error", "kind": "usage_limit", "content": "usage limit"}]
     assert session.usage_limit_active is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("limit_first", [True, False])
-async def test_mixed_injected_batch_drains_all_results_and_keeps_latch(tmp_path, limit_first):
-    session, client = make_session(tmp_path)
-    task = asyncio.create_task(collect(session))
-    await asyncio.sleep(0)
-    assert await session.inject("injected") is True
-
-    limit_messages = [
-        AssistantMessage(
-            content=[TextBlock(RAW_LIMIT)],
-            model="<synthetic>",
-            error="rate_limit",
-        ),
-        result(error=True, text=RAW_LIMIT, sid="sid-limit"),
-    ]
-    success_messages = [
-        AssistantMessage(content=[TextBlock("ok")], model="claude"),
-        result(sid="sid-success"),
-    ]
-    for message in (
-        limit_messages + success_messages
-        if limit_first
-        else success_messages + limit_messages
-    ):
-        await client.events.put(message)
-
-    chunks = await task
-
-    errors = [chunk for chunk in chunks if chunk["type"] == "error"]
-    assert len(errors) == 1
-    assert errors[0]["kind"] == "usage_limit"
-    assert session._expected_results == 0
-    assert session.usage_limit_active is True
-
-
-@pytest.mark.asyncio
-async def test_terminal_result_and_inject_race_cannot_leave_stale_result(tmp_path):
-    session, client = make_session(tmp_path)
-    first = asyncio.create_task(collect(session, "first"))
-    while not session._is_processing:
-        await asyncio.sleep(0)
-
-    await session._query_lock.acquire()
-    try:
-        await client.events.put(result(sid="sid-first"))
-        injected = asyncio.create_task(session.inject("racing"))
-        await asyncio.sleep(0)
-    finally:
-        session._query_lock.release()
-
-    accepted = await injected
-    if accepted:
-        await client.events.put(result(sid="sid-injected"))
-    await first
-
-    assert session._expected_results == 0
-    second = asyncio.create_task(collect(session, "second"))
-    await asyncio.sleep(0)
-    await client.events.put(result(sid="sid-second"))
-    assert await second == []
-    assert client.queries[-1] == "second"
-
-
-@pytest.mark.asyncio
-async def test_inflight_inject_is_rejected_if_stream_fails_during_query(tmp_path):
-    query_started = asyncio.Event()
-    release_query = asyncio.Event()
-
-    class FailingClient:
-        async def query(self, text):
-            if text == "racing":
-                query_started.set()
-                await release_query.wait()
-
-        async def receive_messages(self):
-            await query_started.wait()
-            raise RuntimeError("stream failed while inject was in flight")
-            yield
-
-    session = ClaudeSession(cwd=".", session_file=tmp_path / "session")
-    client = FailingClient()
-    session._client = client
-    session._connected = True
-
-    async def connected(**_kwargs):
-        return None
-
-    session._ensure_connected = connected
-    response = asyncio.create_task(collect(session, "first"))
-    while not session._is_processing:
-        await asyncio.sleep(0)
-    injected = asyncio.create_task(session.inject("racing"))
-    await query_started.wait()
-    await asyncio.sleep(0)
-    release_query.set()
-
-    chunks, accepted = await asyncio.gather(response, injected)
-
-    assert chunks == [
-        {"type": "error", "content": "stream failed while inject was in flight"}
-    ]
-    assert accepted is False
-    assert session._expected_results == 0
-    assert session._is_processing is False
 
 
 @pytest.mark.asyncio
@@ -609,7 +483,6 @@ async def test_context_limit_result_is_one_normalized_terminal_chunk(tmp_path, r
     chunks = await task
 
     assert chunks == [{"type": "error", "kind": "context_limit", "content": raw}]
-    assert session._expected_results == 0
     assert session._is_processing is False
     assert client.queries == ["hello"]
 
@@ -783,8 +656,8 @@ async def test_send_message_never_invalidates_or_recursively_retries_sid(
     session.session_id = "sid-old"
     session._write_session_id("sid-old")
 
-    async def fail_query(text):
-        client.queries.append(text)
+    async def fail_query(prompt):
+        client.queries.append(text_of(await prompt_frames(prompt)))
         raise RuntimeError(error)
 
     client.query = fail_query

@@ -1,0 +1,101 @@
+{"t": 2.67, "kind": "sent", "tag": "A", "uuid": "22a0a623-6192-4671-91fa-cff226a9e9bc", "text": "Use the Agent tool with run_in_background=true to start exactly ONE general-purp"}
+{"t": 2.73, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "7e709df8-cc4f-498b-b332-97cb2a1b08f8"}
+{"t": 2.75, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "92abb2f7-8633-4c58-9dec-c17987bd86d8"}
+{"t": 2.89, "kind": "msg", "type": "system", "subtype": "init", "uuid": "2eb184e5-3e78-4c8d-a72f-3da00f9b2323"}
+{"t": 2.9, "kind": "msg", "type": "system", "subtype": "status", "uuid": "6496ad0d-735f-42bd-988c-66734fa6a21e", "status": "requesting"}
+{"t": 3.81, "kind": "msg", "type": "user", "subtype": null, "uuid": "22a0a623-6192-4671-91fa-cff226a9e9bc", "text": "Use the Agent tool with run_in_background=true to start exactly ONE general-purpose subagent whose only job is to run the bash command `sleep 25; echo bg-done` ", "parent_tool_use_id": null, "isReplay": true}
+{"t": 3.81, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "cd973d34-358c-420a-bc39-4f7b75f14d7d", "ev": "message_start"}
+{"t": 3.83, "kind": "msg", "type": "rate_limit_event", "subtype": null, "uuid": "4734b716-e557-44bf-8331-fa36dfe76b88"}
+{"t": 4.11, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "2098e78a-50a7-4a81-9c14-2412329c8130"}
+{"t": 5.02, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "7005cfc3-ee55-42ed-822b-a42b37165fa1"}
+{"t": 5.03, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "931ea838-4f84-4eaa-a733-3f9d1aa7d3e7", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 5.54, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "c773917e-0c40-43e2-8480-85e830746e39", "blocks": [["tool_use", "Agent"]], "parent_tool_use_id": null}
+{"t": 5.56, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "15e94c74-ad6e-4d54-9789-9eae04d028c0"}
+{"t": 5.57, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "74742daf-b58a-43ca-a7dd-d6dccb6fcdab", "task_id": "a3c03c755ca160980", "task_type": "local_agent"}
+{"t": 5.62, "kind": "msg", "type": "user", "subtype": null, "uuid": "ea86c1c7-6b85-4f7d-a602-362429529169", "blocks": [["tool_result", "[{'type': 'text', 'text': \"Async agent launched successfully. (This tool result "]], "parent_tool_use_id": null}
+{"t": 5.64, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "e26c6fcf-5ded-4766-bce5-8550cb56eb2f", "ev": "message_stop"}
+{"t": 5.69, "kind": "msg", "type": "system", "subtype": "status", "uuid": "b29f9fde-1367-4b75-acb2-af7c1fe4117d", "status": "requesting"}
+{"t": 7.1, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "4c59b7c8-def6-4e11-bc3f-50812d24019b", "ev": "message_start"}
+{"t": 7.47, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "89ead166-a339-443d-b7d9-70223eff8b15", "blocks": [["thinking", "None"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 7.82, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "eff454cc-29da-4234-93e5-59120d9688f4", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 7.86, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "38020915-08af-4dea-a64f-333902be002a", "blocks": [["text", "LAUNCHED"]], "parent_tool_use_id": null}
+{"t": 7.86, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "0808b369-1a5e-4a1a-8720-a3e9c20a940f", "ev": "message_stop"}
+{"t": 7.9, "kind": "msg", "type": "result", "subtype": "success", "uuid": "702ca075-8c53-4941-8a22-7cf9d25b4aec", "num_turns": 2, "stop_reason": "end_turn", "terminal_reason": "completed", "is_error": false, "result": "LAUNCHED"}
+{"t": 7.92, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "bdcffaa6-5a2f-4f4b-b112-83b9f23de926"}
+{"t": 9.42, "kind": "probe", "tag": "idle_with_bg_agent", "ok": true, "secs": 0.5, "total": 16461}
+{"t": 12.94, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "38a596b4-0ac0-4d9e-86e8-9972bfbabbe9", "blocks": [["tool_use", "Bash"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 12.95, "kind": "msg", "type": "system", "subtype": "task_progress", "uuid": "6100b6cd-6b01-41d9-8f6b-0c79acd13b30", "task_id": "a3c03c755ca160980"}
+{"t": 13.01, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "df89510a-7e96-48c7-9700-620fb2b00b6c"}
+{"t": 13.02, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "a6ca7c94-0090-455b-ac86-a2ae93b98473", "task_id": "bbb1l3g37", "task_type": "local_bash"}
+{"t": 13.03, "kind": "msg", "type": "user", "subtype": null, "uuid": "8d61388c-3a1f-48bc-bca5-876516182a79", "blocks": [["tool_result", "Command running in background with ID: bbb1l3g37. Output is being written to: /t"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 16.19, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "1bed1e00-3d40-4260-aae2-b6c2b73787da", "blocks": [["thinking", "None"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 16.47, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "72895797-d60b-45b9-b091-22cf931408af", "blocks": [["text", "Command launched in background. It will sleep for 25 seconds and then echo \"bg-done\". You'll be notified when it complet"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 16.5, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "200bc190-5bb8-4a5c-b620-a9c7a52f7a36"}
+{"t": 16.5, "kind": "msg", "type": "system", "subtype": "task_updated", "uuid": "4ceedaee-6351-4eeb-8444-87c81c838a38", "task_id": "a3c03c755ca160980"}
+{"t": 16.5, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "89aa76dd-8342-42bc-8a8a-8cf08c5dd89a", "task_id": "a3c03c755ca160980", "status": "completed", "summary": "Command launched in background. It will sleep for 25 seconds and then echo \"bg-done\". You'll be notified when it complet"}
+{"t": 16.51, "kind": "msg", "type": "system", "subtype": "init", "uuid": "a552ebf0-0b60-44db-a327-a1d100e47681"}
+{"t": 16.51, "kind": "msg", "type": "system", "subtype": "status", "uuid": "41bb8b80-41d5-46a2-a2ff-94668689980d", "status": "requesting"}
+{"t": 16.65, "kind": "sent", "tag": "B", "uuid": "01a3fb78-dd04-443a-a146-0da8b6b2c30a", "text": "Question B: what is 2+2? Answer with just the number."}
+{"t": 16.66, "kind": "probe", "tag": "during_notification_turn", "ok": true, "secs": 0.01, "total": 16461}
+{"t": 16.66, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "56dc44fb-744c-4ade-8703-244dd38cbd5d"}
+{"t": 17.79, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "fb644d8b-322c-43d3-9f54-93ec94b7a3b3", "ev": "message_start"}
+{"t": 18.18, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "02ac1419-6518-4cc7-adb0-8c7c841f6996"}
+{"t": 18.95, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "50803173-e4d2-4b53-ae93-66f4bbe54199"}
+{"t": 18.95, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "7ef12a20-b763-4888-b616-ce7c9b3a0182", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 19.22, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "b58db518-e19e-4429-9979-87f678c4b34e", "blocks": [["text", "Background command is now running. It will report when the 25-second sleep and echo complete."]], "parent_tool_use_id": null}
+{"t": 19.25, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "08292a9e-64e8-4401-9746-f85b13d45221", "ev": "message_stop"}
+{"t": 19.26, "kind": "msg", "type": "result", "subtype": "success", "uuid": "91fa24a9-8516-4783-9144-23cf0d31e220", "origin": {"kind": "task-notification"}, "num_turns": 1, "stop_reason": "end_turn", "terminal_reason": "completed", "is_error": false, "result": "Background command is now running. It will report when the 25-second sleep and echo complete."}
+{"t": 19.26, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "caeda6d5-c6e6-4fcd-a73a-f824c16c74ee"}
+{"t": 19.29, "kind": "msg", "type": "system", "subtype": "init", "uuid": "00da5f37-f558-434f-ba30-7312e4d89104"}
+{"t": 19.29, "kind": "msg", "type": "system", "subtype": "status", "uuid": "c958364c-71cb-4c50-9340-80ba7a6d8144", "status": "requesting"}
+{"t": 20.06, "kind": "msg", "type": "user", "subtype": null, "uuid": "01a3fb78-dd04-443a-a146-0da8b6b2c30a", "text": "Question B: what is 2+2? Answer with just the number.", "parent_tool_use_id": null, "isReplay": true}
+{"t": 20.06, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "d4efcb83-c323-43d4-9d9b-6dfc81fad4c5", "ev": "message_start"}
+{"t": 20.39, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "bf533985-dcaf-4bba-9ecc-53db36d9e277", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 20.4, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "b5e2cff2-38b6-4f81-b719-d4d1b9fbe4b8", "blocks": [["text", "4"]], "parent_tool_use_id": null}
+{"t": 20.41, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "69166960-f103-423e-bcdf-f6c8a14c817b", "ev": "message_stop"}
+{"t": 20.44, "kind": "msg", "type": "result", "subtype": "success", "uuid": "fd2389b1-0d35-4ec9-bad0-43643f55b507", "num_turns": 1, "stop_reason": "end_turn", "terminal_reason": "completed", "is_error": false, "result": "4"}
+{"t": 20.44, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "ccf4ad34-18f0-44c1-8222-bec55ff869bb"}
+{"t": 36.8, "kind": "timeout", "label": "settle after B"}
+{"t": 36.8, "kind": "info", "results_after_B": 2}
+{"t": 36.8, "kind": "sent", "tag": "D", "uuid": "98c9fe84-9726-46f5-b1d1-f3cb59549224", "text": "Run the bash command `sleep 15; echo fg-done`, then reply OK-D."}
+{"t": 36.8, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "7bc21303-d84f-42ed-8892-a9e7340f450d"}
+{"t": 36.86, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "cc477cbc-536c-4943-93e1-3782e5e2aeb3"}
+{"t": 36.88, "kind": "msg", "type": "system", "subtype": "init", "uuid": "14e96f85-f1ed-4eac-a08e-83e04eb52dcc"}
+{"t": 36.88, "kind": "msg", "type": "system", "subtype": "status", "uuid": "227bcc32-011d-4798-8374-940e71633afe", "status": "requesting"}
+{"t": 37.76, "kind": "msg", "type": "user", "subtype": null, "uuid": "98c9fe84-9726-46f5-b1d1-f3cb59549224", "text": "Run the bash command `sleep 15; echo fg-done`, then reply OK-D.", "parent_tool_use_id": null, "isReplay": true}
+{"t": 37.76, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "419d0495-a8f1-4196-a002-8d3bfca46f66", "ev": "message_start"}
+{"t": 38.03, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "0b49fbd7-4c90-4405-80b7-7b947e7080c8"}
+{"t": 38.03, "kind": "msg", "type": "system", "subtype": "task_updated", "uuid": "8e191706-39e7-4cce-a01f-ee6393b12c94", "task_id": "bbb1l3g37"}
+{"t": 38.03, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "09e4d128-16ec-4d5f-9584-f3bc2699d573", "task_id": "bbb1l3g37", "status": "completed", "summary": "Background command \"Run sleep for 25 seconds then echo completion message\" completed (exit code 0)"}
+{"t": 38.04, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "d346f1e4-5bd4-4f98-957a-2c90943632bc"}
+{"t": 38.05, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "429181d6-aca1-46df-ab67-fd8bc971a148", "task_id": "a3c03c755ca160980", "task_type": "local_agent"}
+{"t": 38.07, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "96aa9cf9-e766-4fa7-bd98-bee216268a4b"}
+{"t": 38.35, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "66629ba8-f109-4d20-b919-7f96c0a8afb4"}
+{"t": 38.35, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "40ee10b0-51d7-40cd-aa8b-5cb1f5ec5196", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 38.69, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "74fae478-60af-4340-a31c-814c36f68103", "blocks": [["tool_use", "Bash"]], "parent_tool_use_id": null}
+{"t": 38.71, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "85357c65-d727-4507-b0ab-921187f66e98", "ev": "message_stop"}
+{"t": 39.83, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "5febc307-5e67-4c78-acf1-42bf08e39f76", "blocks": [["thinking", "None"]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 40.03, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "112db23f-7d66-4c89-869b-ffbb7e931e7d", "blocks": [["text", "Background command completed successfully. The sleep completed and the echo ran (exit code 0)."]], "parent_tool_use_id": "toolu_01XoQ1d9Dx9UES9DS7UECgXx"}
+{"t": 40.05, "kind": "msg", "type": "system", "subtype": "background_tasks_changed", "uuid": "35292877-e5ce-486c-9ad0-6bf0b285bf90"}
+{"t": 40.05, "kind": "msg", "type": "system", "subtype": "task_updated", "uuid": "9abfc1c4-5735-4841-b9c4-a41af37f23ff", "task_id": "a3c03c755ca160980"}
+{"t": 40.05, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "b68d558e-ecaa-48bc-8ea2-1aef1806cc84", "task_id": "a3c03c755ca160980", "status": "completed", "summary": "Background command completed successfully. The sleep completed and the echo ran (exit code 0)."}
+{"t": 41.76, "kind": "msg", "type": "system", "subtype": "task_started", "uuid": "e67ec7c9-a2dd-4242-a703-2e8dcb1a2ec8", "task_id": "ba50rvn3i", "task_type": "local_bash"}
+{"t": 42.8, "kind": "sent", "tag": "E", "uuid": "9b580974-e780-4d9a-a1f0-97282f93e42e", "text": "Question E: also tell me the word BANANA."}
+{"t": 42.82, "kind": "probe", "tag": "mid_foreground_tool", "ok": true, "secs": 0.02, "total": 17302}
+{"t": 42.82, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "2b7ebb7b-86e0-4e8a-8d0a-a5412db9e1da"}
+{"t": 53.74, "kind": "msg", "type": "system", "subtype": "task_notification", "uuid": "4f1afb86-f2dd-4a04-bf97-4d18e232f85b", "task_id": "ba50rvn3i", "status": "completed", "summary": "Sleep for 15 seconds then echo fg-done"}
+{"t": 53.8, "kind": "msg", "type": "user", "subtype": null, "uuid": "524d41dc-8561-460f-8459-751c34582de6", "blocks": [["tool_result", "fg-done"]], "parent_tool_use_id": null}
+{"t": 53.83, "kind": "msg", "type": "user", "subtype": null, "uuid": "9ed1f9d3-d09f-4567-9444-6e3e3b7e850e", "origin": {"kind": "task-notification"}, "text": "<task-notification>\n<task-id>a3c03c755ca160980</task-id>\n<output-file>/tmp/claude-1001/-home-kesha-orchestra-worktrees-home-kesha-projects-kesha-tg-bot-feat-bg-", "parent_tool_use_id": null, "isReplay": true}
+{"t": 53.84, "kind": "msg", "type": "user", "subtype": null, "uuid": "9b580974-e780-4d9a-a1f0-97282f93e42e", "text": "Question E: also tell me the word BANANA.", "parent_tool_use_id": null, "isReplay": true}
+{"t": 53.85, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "f9d22fcc-4dbd-49b3-a74b-dd31ee91f46e"}
+{"t": 53.85, "kind": "msg", "type": "system", "subtype": "status", "uuid": "5b1c939b-eb6a-4043-83a4-671edc4d79cc", "status": "requesting"}
+{"t": 54.78, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "298d6b3c-7b16-41f1-b3c5-8e6a2e6887dc", "ev": "message_start"}
+{"t": 55.41, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "f08b0b4c-531f-45ce-a3bd-ca45e1754aa8"}
+{"t": 56.06, "kind": "msg", "type": "system", "subtype": "thinking_tokens", "uuid": "0b89b32a-c6ab-4596-b2a3-6287e40bfd17"}
+{"t": 56.08, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "5ffae38b-f1ab-4ff0-bb1e-5a3d74188ca6", "blocks": [["thinking", "None"]], "parent_tool_use_id": null}
+{"t": 56.09, "kind": "msg", "type": "assistant", "subtype": null, "uuid": "b1cf0c7c-04ac-4324-9d3c-8946596f058f", "blocks": [["text", "OK-D\n\nBANANA"]], "parent_tool_use_id": null}
+{"t": 56.12, "kind": "msg", "type": "stream_event", "subtype": null, "uuid": "ef427feb-588d-4403-a2ec-6d1e52d91a44", "ev": "message_stop"}
+{"t": 56.13, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "0e663c9d-efea-46f9-b252-869c261b659e"}
+{"t": 56.16, "kind": "msg", "type": "result", "subtype": "success", "uuid": "87d76caf-1b22-471d-b991-b184df34022d", "num_turns": 2, "stop_reason": "end_turn", "terminal_reason": "completed", "is_error": false, "result": "OK-D\n\nBANANA"}
+{"t": 56.16, "kind": "msg", "type": "command_lifecycle", "subtype": null, "uuid": "3eec3fc6-e872-4a8a-8065-fec63feafbae"}
+{"t": 87.88, "kind": "timeout", "label": "settle after D/E"}

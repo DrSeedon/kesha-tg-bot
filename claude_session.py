@@ -1,11 +1,13 @@
 """Claude session via ClaudeSDKClient — persistent connection with injection support."""
 
 import asyncio
+import collections
 import json
 import logging
 import os
 import re
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -32,6 +34,8 @@ from claude_agent_sdk import (
     PermissionResultAllow,
     fork_session,
 )
+
+from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 
 from config import AUTO_COMPACT_TRIGGER_PCT, CLAUDE_MAX_TURNS, MODEL
 from quota_gate import claude_windows, fetch_claude_usage, quota_exhausted
@@ -147,6 +151,114 @@ CONTEXT_PROBE_TIMEOUT_S = 10.0
 class _ProbeTimeout(Exception):
     """Both bounded context probes went unanswered."""
 
+
+# The CLI takes an idle-time prompt into a turn within ~1-4 s (V-43 spike:
+# 0.8-1.1 s warm, 2.9 s on a fresh process). A minute between turns with our
+# prompt still untaken is not slowness; the prompt will never be answered.
+PROMPT_PICKUP_TIMEOUT_S = 60.0
+
+_STREAM_END = object()
+
+
+class _ClientStream:
+    """The only reader of one client's message stream, for that client's life.
+
+    The SDK parks every frame in a 100-slot buffer and its single read loop
+    blocks once it is full — and that same loop routes control responses. A
+    stream read only inside `send_message` therefore filled up between turns
+    (task notifications, background agents' progress) and starved the control
+    channel: context probes timed out, a reconnect followed and killed the
+    background agents (prod 14.10.2026; V-43 research §1: 100 frames answer,
+    101 time out). The pump drains into an unbounded deque instead; consumers
+    read from it and bookkeeping that must not lag (open agents) happens here.
+    """
+
+    def __init__(self, client, on_unread_turn):
+        self.client = client
+        self.frames: collections.deque = collections.deque()
+        self.ended = False
+        self.error: Optional[BaseException] = None
+        # prompt uuid -> taken into a turn (echoed by --replay-user-messages)
+        self.pending: dict[str, bool] = {}
+        self.turn_open = False
+        self.turn_uids: set[str] = set()
+        self.agents_open: set[str] = set()
+        self._consumers = 0
+        self._signalled = False
+        self._on_unread_turn = on_unread_turn
+        self._wake = asyncio.Event()
+        self.task = asyncio.ensure_future(self._pump())
+
+    @staticmethod
+    def opens_turn(msg) -> bool:
+        """Main-agent output or user content: only a running turn emits them."""
+        return isinstance(msg, (AssistantMessage, StreamEvent, UserMessage)) and (
+            getattr(msg, "parent_tool_use_id", None) is None
+        )
+
+    def has_unread_turn(self) -> bool:
+        return self.turn_open or any(self.opens_turn(msg) for msg in self.frames)
+
+    def attach(self) -> None:
+        self._consumers += 1
+
+    def detach(self) -> None:
+        self._consumers = max(0, self._consumers - 1)
+        self._signalled = False
+
+    def stop(self) -> None:
+        if not self.task.done():
+            self.task.cancel()
+        self.ended = True
+        self._wake.set()
+
+    def _track_agents(self, msg) -> None:
+        # Same ledger as the SDK's own stdin hold (DEFERRING_TASK_TYPES): only
+        # agents reliably reach a terminal status; a background shell may never.
+        if isinstance(msg, TaskStartedMessage):
+            if getattr(msg, "task_type", None) in DEFERRING_TASK_TYPES:
+                self.agents_open.add(msg.task_id)
+        elif isinstance(msg, TaskNotificationMessage) or (
+            isinstance(msg, TaskUpdatedMessage)
+            and (msg.patch or {}).get("status") in TERMINAL_TASK_STATUSES
+        ):
+            self.agents_open.discard(msg.task_id)
+
+    async def _pump(self) -> None:
+        try:
+            async for msg in self.client.receive_messages():
+                self._track_agents(msg)
+                self.frames.append(msg)
+                self._wake.set()
+                if not self._consumers and not self._signalled and self.opens_turn(msg):
+                    self._signalled = True
+                    try:
+                        self._on_unread_turn()
+                    except Exception:
+                        logger.exception("Background turn listener failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self.ended = True
+            self._wake.set()
+
+    async def next(self, deadline: Optional[float] = None):
+        """Next frame; `_STREAM_END` once drained and closed. TimeoutError at `deadline`."""
+        while not self.frames:
+            if self.ended:
+                return _STREAM_END
+            self._wake.clear()
+            if deadline is None:
+                await self._wake.wait()
+            else:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError
+                await asyncio.wait_for(self._wake.wait(), remaining)
+        return self.frames.popleft()
+
 _USAGE_LIMIT_RE = re.compile(
     r"(hit\s+your\s+.*limit|session\s+limit|usage\s+limit|monthly\s+spend\s+limit)",
     re.IGNORECASE,
@@ -241,8 +353,9 @@ class ClaudeSession:
         self.use_1m = True
         self._pending_disconnect = None
         self._last_ctx_usage: Optional[dict] = None
-        self._expected_results = 0
         self._is_processing = False
+        self._stream: Optional[_ClientStream] = None
+        self._background_listener = None
         self._session_resumed = bool(self.session_id)
         self._query_lock = asyncio.Lock()
         self._session_replacement: Optional[_SessionReplacement] = None
@@ -445,13 +558,25 @@ class ClaudeSession:
                 options.mcp_servers = in_process
             if external:
                 options.extra_args = {"mcp-config": write_external_mcp_config(external)}
+        # The echo of our own prompt is the only way to tell a turn that answers
+        # us from one the CLI started for a task notification (V-43).
+        options.extra_args = {**(options.extra_args or {}), "replay-user-messages": None}
         if self.session_id:
             options.resume = self.session_id
         return options
 
     async def _ensure_connected(self, *, preserve_session: bool = False):
         if self._client and self._connected:
-            return
+            stream = self._stream
+            if stream is None or stream.client is not self._client or not stream.ended:
+                self._attach_stream()
+                return
+            # The pump saw the CLI's stream close: the process is gone.
+            logger.warning("CLI stream closed; reconnecting (keeping session_id)")
+            dead = self._client
+            self._client = None
+            self._connected = False
+            await self._safe_disconnect(dead)
         if self._pending_disconnect is not None:
             try:
                 await self._pending_disconnect.disconnect()
@@ -489,6 +614,7 @@ class ClaudeSession:
             else:
                 raise
         self._connected = True
+        self._attach_stream()
 
     def _transcript_path(self, session_id: str) -> Path:
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
@@ -507,7 +633,6 @@ class ClaudeSession:
         failed_client = self._client
         self._client = None
         self._connected = False
-        self._expected_results = 0
         await self._safe_disconnect(failed_client)
         source = self.session_id
         if not source or not refused_user_uuid or self._session_replacement is not None:
@@ -715,8 +840,158 @@ class ClaudeSession:
         if carried:
             self.last_response_usage["context_tokens"] = carried
 
+    @staticmethod
+    async def _user_frames(text: str, prompt_uuid: str):
+        # Our uuid travels with the prompt; the CLI echoes it back
+        # (--replay-user-messages) at the moment it takes the prompt into a turn.
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "parent_tool_use_id": None,
+            "uuid": prompt_uuid,
+        }
+
+    def set_background_listener(self, listener) -> None:
+        """`listener()` is called when the CLI starts a turn nobody is reading."""
+        self._background_listener = listener
+
+    def _on_unread_turn(self) -> None:
+        listener = self._background_listener
+        if listener is not None:
+            listener()
+
+    def _attach_stream(self) -> "_ClientStream":
+        stream = self._stream
+        if stream is None or stream.client is not self._client:
+            stream = _ClientStream(self._client, self._on_unread_turn)
+            self._stream = stream
+        return stream
+
+    def _pump_alive(self) -> bool:
+        stream = self._stream
+        return (
+            stream is not None
+            and stream.client is self._client
+            and self._connected
+            and not stream.ended
+        )
+
+    def has_background_turn(self) -> bool:
+        """A CLI turn is waiting in the stream and no reader is attached."""
+        return self._pump_alive() and self._stream.has_unread_turn()
+
+    def background_agents_open(self) -> int:
+        """Background agents the CLI still runs; our compact or /clear kills them."""
+        return len(self._stream.agents_open) if self._pump_alive() else 0
+
+    async def background_turns(self) -> AsyncGenerator[dict, None]:
+        """Chunks of turns the CLI started on its own (task notifications).
+
+        Ends at a turn boundary once nothing more is queued. A stream that dies
+        here only marks the client dead: there is no question to answer.
+        """
+        if not self._pump_alive():
+            return
+        stream = self._stream
+        stream.attach()
+        try:
+            async for chunk in self._turn_chunks(stream, None):
+                yield chunk
+        except Exception as exc:
+            logger.error("Background turn stream failed: %s", exc)
+            if self._client is stream.client:
+                self._connected = False
+        finally:
+            stream.detach()
+
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
+        stream: Optional[_ClientStream] = None
+        try:
+            logger.info("send_message: ensuring connected...")
+            await self._ensure_connected(preserve_session=True)
+            if self._model_restore_required and not await self._restore_primary_model():
+                yield {
+                    "type": "error",
+                    "content": "Не удалось вернуть основную модель. Запрос не отправлен; попробуйте позже.",
+                }
+                return
+            stream = self._attach_stream()
+            stream.attach()
+            prompt_uuid = str(uuid.uuid4())
+            logger.info("send_message: connected, sending query...")
+            async with self._query_lock:
+                stream.pending[prompt_uuid] = False
+                await self._client.query(self._user_frames(text, prompt_uuid))
+                self._is_processing = True
+            logger.info("send_message: query sent, receiving messages...")
+            async for chunk in self._turn_chunks(stream, prompt_uuid):
+                yield chunk
+        except Exception as e:
+            err = str(e)
+            if isinstance(e, ResultError) and e.subtype == "error_max_turns":
+                if e.session_id:
+                    self.session_id = e.session_id
+                    self._save_session()
+                failed_client = self._client
+                self._connected = False
+                self._client = None
+                await self._safe_disconnect(failed_client)
+                logger.warning("Claude query reached max_turns=%s", CLAUDE_MAX_TURNS)
+                yield {"type": "error", "kind": "max_turns", "content": err}
+                return
+            if usage_limit_reset(err) is not None:
+                self.usage_limit_active = True
+                self._connected = False
+                self._client = None
+                yield {"type": "error", "kind": "usage_limit", "content": err}
+                return
+            if is_context_limit(err):
+                self._connected = False
+                self._client = None
+                yield {"type": "error", "kind": "context_limit", "content": err}
+                return
+            if self.session_id and (
+                "No conversation found" in err or "exit code 1" in err
+            ):
+                logger.warning(
+                    "Session %s unavailable (%s); preserving for explicit /clear",
+                    self.session_id[:8], type(e).__name__,
+                )
+                self._connected = False
+                self._client = None
+                yield {
+                    "type": "error",
+                    "kind": "session_unavailable",
+                    "content": err,
+                }
+                return
+            logger.error(f"SDK error: {e}", exc_info=True)
+            failed_client = self._client
+            self._connected = False
+            self._client = None
+            await self._safe_disconnect(failed_client)
+            yield {"type": "error", "content": err}
+        finally:
+            if stream is not None:
+                stream.detach()
+            if self._is_processing:
+                async with self._query_lock:
+                    self._is_processing = False
+
+    async def _turn_chunks(
+        self, stream: "_ClientStream", prompt_uuid: Optional[str]
+    ) -> AsyncGenerator[dict, None]:
+        """Normalize the pump's frames into chunks, turn by turn.
+
+        A turn is everything up to its Result. It is OURS when the CLI echoed
+        `prompt_uuid` inside it; the CLI also runs turns of its own (task
+        notifications), merges a queued prompt into a running turn, and can put
+        a notification and our prompt into one turn (V-43 research §2), so no
+        count of Results maps onto prompts. With `prompt_uuid` the generator
+        ends once our turn closed, yielding any CLI turn before it; without it,
+        once no turn is open and nothing is queued.
+        """
         pending_limit: Optional[str] = None
         limit_seen = False
         limit_content = ""
@@ -733,424 +1008,413 @@ class ClaudeSession:
         # a result yet and tasks (bash, subagents) without a terminal status. A
         # silent stream is only a stall when this is empty (V-42).
         open_work: set[str] = set()
+        pickup_deadline: Optional[float] = None
+        loop = asyncio.get_running_loop()
 
-        try:
-            logger.info("send_message: ensuring connected...")
-            await self._ensure_connected(preserve_session=True)
-            if self._model_restore_required and not await self._restore_primary_model():
+        while True:
+            awaiting_pickup = (
+                prompt_uuid is not None
+                and stream.pending.get(prompt_uuid) is False
+                and not stream.turn_open
+            )
+            if prompt_uuid is None and not stream.frames and not stream.turn_open:
+                return
+            if awaiting_pickup:
+                if pickup_deadline is None:
+                    pickup_deadline = loop.time() + PROMPT_PICKUP_TIMEOUT_S
+            else:
+                pickup_deadline = None
+            try:
+                msg = await stream.next(pickup_deadline)
+            except (asyncio.TimeoutError, TimeoutError):
+                # The CLI is between turns and still has not taken the prompt:
+                # it never will (an echo contract change, a lost write). Waiting
+                # on would hold the chat in PROCESSING forever.
+                stream.pending.pop(prompt_uuid, None)
+                logger.error(
+                    "CLI stayed idle %.0fs without taking prompt %s",
+                    PROMPT_PICKUP_TIMEOUT_S, prompt_uuid[:8],
+                )
                 yield {
                     "type": "error",
-                    "content": "Не удалось вернуть основную модель. Запрос не отправлен; попробуйте позже.",
+                    "kind": "prompt_lost",
+                    "content": "Claude CLI did not take the message into a turn",
                 }
                 return
-            logger.info("send_message: connected, sending query...")
-            async with self._query_lock:
-                await self._client.query(text)
-                self._expected_results = 1
-                self._is_processing = True
-            logger.info("send_message: query sent, receiving messages...")
+            if msg is _STREAM_END:
+                if stream.error is not None:
+                    raise stream.error
+                if prompt_uuid is not None:
+                    raise RuntimeError("Claude CLI process ended before answering")
+                return
 
-            async for msg in self._client.receive_messages():
-                if isinstance(msg, AssistantMessage):
-                    self._absorb_assistant_context(getattr(msg, "usage", None))
-                    if getattr(msg, "parent_tool_use_id", None) is None:
-                        actual_model = getattr(msg, "model", None)
-                        if isinstance(actual_model, str) and actual_model.startswith("claude-"):
-                            self.last_response_model = actual_model.removesuffix("[1m]")
-                    assistant_error = getattr(msg, "error", None)
-                    if assistant_error in {"rate_limit", "billing_error"}:
-                        raw = "\n".join(
-                            block.text for block in msg.content
-                            if isinstance(block, TextBlock) and block.text
-                        )
-                        pending_limit = raw or assistant_error
-                        limit_content = limit_content or pending_limit
-                        limit_seen = True
-                        continue
-                    if refusal is not None and assistant_error:
-                        # The CLI's synthetic "API Error: ... safeguards flagged"
-                        # text is not an answer; it reached the chat verbatim.
-                        continue
-                    raw_assistant = "\n".join(
+            if _ClientStream.opens_turn(msg):
+                stream.turn_open = True
+            if (
+                isinstance(msg, UserMessage)
+                and getattr(msg, "uuid", None) in stream.pending
+                and getattr(msg, "parent_tool_use_id", None) is None
+            ):
+                stream.pending[msg.uuid] = True
+                stream.turn_uids.add(msg.uuid)
+                continue
+
+            if isinstance(msg, AssistantMessage):
+                self._absorb_assistant_context(getattr(msg, "usage", None))
+                if getattr(msg, "parent_tool_use_id", None) is None:
+                    actual_model = getattr(msg, "model", None)
+                    if isinstance(actual_model, str) and actual_model.startswith("claude-"):
+                        self.last_response_model = actual_model.removesuffix("[1m]")
+                assistant_error = getattr(msg, "error", None)
+                if assistant_error in {"rate_limit", "billing_error"}:
+                    raw = "\n".join(
                         block.text for block in msg.content
                         if isinstance(block, TextBlock) and block.text
                     )
-                    if (
-                        assistant_error in {"context_limit", "prompt_too_long"}
-                        or is_context_limit(raw_assistant)
-                    ):
-                        context_limit_seen = True
-                        context_limit_content = (
-                            context_limit_content
-                            or raw_assistant
-                            or str(assistant_error)
-                        )
-                        continue
-                    if limit_seen or context_limit_seen:
-                        continue
-                    # Subagent narration ("I'll research all four directions") is
-                    # internal: it interleaves with the main agent's own stream and
-                    # lands mid-word in the user's chat. Its tool calls still show
-                    # up in the status bubble as progress.
-                    from_subagent = getattr(msg, "parent_tool_use_id", None) is not None
-                    for block in msg.content:
-                        if isinstance(block, TextBlock) and block.text:
-                            if from_subagent:
-                                continue
-                            result_has_visible_main_output = True
-                            yield {"type": "text", "content": block.text}
-                        elif isinstance(block, ToolUseBlock):
-                            if not from_subagent:
-                                open_work.add(f"tool:{block.id}")
-                            yield {"type": "tool", "name": block.name, "input": block.input}
-                            if not from_subagent:
-                                yield {"type": "liveness", "open": len(open_work)}
-                        elif isinstance(block, ToolResultBlock):
-                            content = block.content if isinstance(block.content, str) else str(block.content)
-                            yield {"type": "result", "content": content[:200], "error": block.is_error}
-                elif isinstance(msg, UserMessage):
-                    if isinstance(msg.content, list):
-                        for block in msg.content:
-                            if isinstance(block, ToolResultBlock):
-                                open_work.discard(f"tool:{block.tool_use_id}")
-                    yield {"type": "liveness", "open": len(open_work)}
-                elif isinstance(msg, (TaskStartedMessage, TaskProgressMessage)):
-                    logger.info(f"System: {msg.subtype}")
-                    open_work.add(f"task:{msg.task_id}")
-                    yield {"type": "liveness", "open": len(open_work)}
-                elif isinstance(msg, TaskNotificationMessage) or (
-                    isinstance(msg, TaskUpdatedMessage)
-                    and (msg.patch or {}).get("status") in TERMINAL_TASK_STATUSES
+                    pending_limit = raw or assistant_error
+                    limit_content = limit_content or pending_limit
+                    limit_seen = True
+                    continue
+                if refusal is not None and assistant_error:
+                    # The CLI's synthetic "API Error: ... safeguards flagged"
+                    # text is not an answer; it reached the chat verbatim.
+                    continue
+                raw_assistant = "\n".join(
+                    block.text for block in msg.content
+                    if isinstance(block, TextBlock) and block.text
+                )
+                if (
+                    assistant_error in {"context_limit", "prompt_too_long"}
+                    or is_context_limit(raw_assistant)
                 ):
-                    logger.info(f"System: {msg.subtype}")
-                    open_work.discard(f"task:{msg.task_id}")
-                    yield {"type": "liveness", "open": len(open_work)}
-                elif isinstance(msg, ResultMessage):
-                    if getattr(msg, "session_id", None):
-                        self.session_id = msg.session_id
-                        self._save_session()
-                        logger.info(f"Session ID saved: {self.session_id[:8]}...")
-                    if getattr(msg, "total_cost_usd", None) is not None:
-                        self._absorb_result_cost(float(msg.total_cost_usd))
-                    complete = self._absorb_result_model_usage(
-                        getattr(msg, "model_usage", None)
+                    context_limit_seen = True
+                    context_limit_content = (
+                        context_limit_content
+                        or raw_assistant
+                        or str(assistant_error)
                     )
-                    if getattr(msg, "usage", None):
-                        self.last_usage = msg.usage
-                        self._absorb_result_usage(msg.usage, tokens=not complete)
+                    continue
+                if limit_seen or context_limit_seen:
+                    continue
+                # Subagent narration ("I'll research all four directions") is
+                # internal: it interleaves with the main agent's own stream and
+                # lands mid-word in the user's chat. Its tool calls still show
+                # up in the status bubble as progress — but only inside a turn:
+                # a background agent working between turns is nobody's bubble.
+                from_subagent = getattr(msg, "parent_tool_use_id", None) is not None
+                if from_subagent and not stream.turn_open:
+                    continue
+                for block in msg.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        if from_subagent:
+                            continue
+                        result_has_visible_main_output = True
+                        yield {"type": "text", "content": block.text}
+                    elif isinstance(block, ToolUseBlock):
+                        if not from_subagent:
+                            open_work.add(f"tool:{block.id}")
+                        yield {"type": "tool", "name": block.name, "input": block.input}
+                        if not from_subagent:
+                            yield {"type": "liveness", "open": len(open_work)}
+                    elif isinstance(block, ToolResultBlock):
+                        content = block.content if isinstance(block.content, str) else str(block.content)
+                        yield {"type": "result", "content": content[:200], "error": block.is_error}
+            elif isinstance(msg, UserMessage):
+                if isinstance(msg.content, list):
+                    for block in msg.content:
+                        if isinstance(block, ToolResultBlock):
+                            open_work.discard(f"tool:{block.tool_use_id}")
+                yield {"type": "liveness", "open": len(open_work)}
+            elif isinstance(msg, (TaskStartedMessage, TaskProgressMessage)):
+                logger.info(f"System: {msg.subtype}")
+                open_work.add(f"task:{msg.task_id}")
+                yield {"type": "liveness", "open": len(open_work)}
+            elif isinstance(msg, TaskNotificationMessage) or (
+                isinstance(msg, TaskUpdatedMessage)
+                and (msg.patch or {}).get("status") in TERMINAL_TASK_STATUSES
+            ):
+                logger.info(f"System: {msg.subtype}")
+                open_work.discard(f"task:{msg.task_id}")
+                yield {"type": "liveness", "open": len(open_work)}
+            elif isinstance(msg, ResultMessage):
+                ours = prompt_uuid is not None and prompt_uuid in stream.turn_uids
+                for consumed in stream.turn_uids:
+                    stream.pending.pop(consumed, None)
+                stream.turn_uids = set()
+                stream.turn_open = False
+                origin = getattr(msg, "origin", None)
+                if getattr(msg, "session_id", None):
+                    self.session_id = msg.session_id
+                    self._save_session()
+                    logger.info(f"Session ID saved: {self.session_id[:8]}...")
+                if getattr(msg, "total_cost_usd", None) is not None:
+                    self._absorb_result_cost(float(msg.total_cost_usd))
+                complete = self._absorb_result_model_usage(
+                    getattr(msg, "model_usage", None)
+                )
+                if getattr(msg, "usage", None):
+                    self.last_usage = msg.usage
+                    self._absorb_result_usage(msg.usage, tokens=not complete)
 
-                    # Classify a quota/short-circuit terminal BEFORE touching the
-                    # runtime invariant. Such a result may still carry a partial
-                    # usage map (e.g. only the auxiliary Haiku entry observed in
-                    # production), and reading that as "the expected model is
-                    # missing" would weld admission shut again.
-                    raw_result = str(msg.result or "")
-                    result_is_max_turns = (
-                        getattr(msg, "subtype", None) == "error_max_turns"
-                        or getattr(msg, "terminal_reason", None) == "max_turns"
+                # Classify a quota/short-circuit terminal BEFORE touching the
+                # runtime invariant. Such a result may still carry a partial
+                # usage map (e.g. only the auxiliary Haiku entry observed in
+                # production), and reading that as "the expected model is
+                # missing" would weld admission shut again.
+                raw_result = str(msg.result or "")
+                result_is_max_turns = (
+                    getattr(msg, "subtype", None) == "error_max_turns"
+                    or getattr(msg, "terminal_reason", None) == "max_turns"
+                )
+                result_overflow = (
+                    context_limit_seen
+                    or getattr(msg, "terminal_reason", None) == "context_limit"
+                    or is_context_limit(raw_result)
+                )
+                # The CLI's local window guard ("Prompt is too long", $0) also
+                # ends with terminal_reason="blocking_limit"; it is context
+                # overflow, not quota (prod 25.09.2026: reported as a
+                # subscription limit and the recovery never ran).
+                typed_result_limit = (
+                    pending_limit is not None
+                    or limit_seen
+                    or getattr(msg, "api_error_status", None) == 429
+                    or (
+                        getattr(msg, "terminal_reason", None) == "blocking_limit"
+                        and not result_overflow
                     )
-                    result_overflow = (
-                        context_limit_seen
-                        or getattr(msg, "terminal_reason", None) == "context_limit"
-                        or is_context_limit(raw_result)
+                )
+                raw_result_limit = (
+                    usage_limit_reset(raw_result) is not None
+                    and (
+                        msg.is_error
+                        or not result_has_visible_main_output
                     )
-                    # The CLI's local window guard ("Prompt is too long", $0) also
-                    # ends with terminal_reason="blocking_limit"; it is context
-                    # overflow, not quota (prod 25.09.2026: reported as a
-                    # subscription limit and the recovery never ran).
-                    typed_result_limit = (
-                        pending_limit is not None
-                        or limit_seen
-                        or getattr(msg, "api_error_status", None) == 429
-                        or (
-                            getattr(msg, "terminal_reason", None) == "blocking_limit"
-                            and not result_overflow
+                )
+                result_is_limit = typed_result_limit or raw_result_limit
+                # A refusal mid-turn may still end in a normal answer
+                # (stop=end_turn); only a turn that ENDED refused is dropped.
+                result_is_refusal = (
+                    refusal is not None
+                    and not result_is_limit
+                    and (
+                        getattr(msg, "stop_reason", None) == "refusal"
+                        or msg.is_error
+                    )
+                )
+                # A context-limit short circuit is equally not evidence about
+                # the runtime, and latching here would block the very
+                # /compact the message tells the user to run.
+                short_circuited = result_is_limit or result_is_refusal or (
+                    getattr(msg, "terminal_reason", None) == "context_limit"
+                    or is_context_limit(raw_result)
+                )
+
+                if not msg.is_error and not short_circuited:
+                    model_usage = getattr(msg, "model_usage", None) or {}
+                    expected_usage = model_usage.get(self.expected_context_model)
+                    observed_max_output = (
+                        expected_usage.get("maxOutputTokens")
+                        if isinstance(expected_usage, dict)
+                        else None
+                    )
+                    if observed_max_output == self.expected_max_output_tokens:
+                        # A proven-good payload also clears an earlier latch.
+                        # NOTE: this is reachable from an in-flight turn, a
+                        # compact, or after /clear — NOT from a fresh user
+                        # turn, which admission blocks first. A genuine
+                        # contradiction is therefore operator-recoverable by
+                        # /clear, by design: we do not spend a probe query
+                        # re-testing a runtime that already lied.
+                        self.last_max_output_tokens = observed_max_output
+                        self._max_output_tokens_valid = True
+                    elif observed_max_output is None and not model_usage:
+                        # EMPTY usage is not evidence of a wrong runtime.
+                        # Usage-limit and other short-circuited results carry
+                        # no model_usage at all; latching here bricked
+                        # production until restart (2026-08-01).
+                        logger.warning(
+                            "Terminal result carried no usage for %s; "
+                            "runtime invariant left unchanged",
+                            self.expected_context_model,
                         )
-                    )
-                    raw_result_limit = (
-                        usage_limit_reset(raw_result) is not None
-                        and (
-                            msg.is_error
-                            or not result_has_visible_main_output
+                    elif observed_max_output is None:
+                        # Non-empty usage that omits the expected model IS
+                        # affirmative drift evidence — the runtime billed a
+                        # model we did not ask for.
+                        self._max_output_tokens_valid = False
+                        logger.error(
+                            "Terminal usage missing expected model %s; "
+                            "reported models=%r",
+                            self.expected_context_model,
+                            sorted(model_usage),
                         )
-                    )
-                    result_is_limit = typed_result_limit or raw_result_limit
-                    # A refusal mid-turn may still end in a normal answer
-                    # (stop=end_turn); only a turn that ENDED refused is dropped.
-                    result_is_refusal = (
-                        refusal is not None
-                        and not result_is_limit
-                        and (
-                            getattr(msg, "stop_reason", None) == "refusal"
-                            or msg.is_error
+                    else:
+                        self._max_output_tokens_valid = False
+                        logger.error(
+                            "Unexpected terminal model usage: model=%s "
+                            "maxOutputTokens=%r",
+                            self.expected_context_model,
+                            observed_max_output,
                         )
-                    )
-                    # A context-limit short circuit is equally not evidence about
-                    # the runtime, and latching here would block the very
-                    # /compact the message tells the user to run.
-                    short_circuited = result_is_limit or result_is_refusal or (
+                self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
+                self.last_num_turns = getattr(msg, "num_turns", 0) or 0
+                self.last_response_usage["num_turns"] = (
+                    self.last_response_usage.get("num_turns", 0)
+                    + self.last_num_turns
+                )
+                self.last_stop_reason = getattr(msg, "stop_reason", None)
+                dur_s = self.last_duration_ms / 1000
+                logger.info(
+                    f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, "
+                    f"stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}, "
+                    f"turn={'ours' if ours else 'cli'}"
+                    f"{', origin=' + str(origin.get('kind')) if isinstance(origin, dict) else ''}"
+                )
+
+                result_is_context_limit = (
+                    not result_is_limit
+                    and (
                         getattr(msg, "terminal_reason", None) == "context_limit"
                         or is_context_limit(raw_result)
                     )
-
-                    if not msg.is_error and not short_circuited:
-                        model_usage = getattr(msg, "model_usage", None) or {}
-                        expected_usage = model_usage.get(self.expected_context_model)
-                        observed_max_output = (
-                            expected_usage.get("maxOutputTokens")
-                            if isinstance(expected_usage, dict)
-                            else None
-                        )
-                        if observed_max_output == self.expected_max_output_tokens:
-                            # A proven-good payload also clears an earlier latch.
-                            # NOTE: this is reachable from an in-flight turn, a
-                            # compact, or after /clear — NOT from a fresh user
-                            # turn, which admission blocks first. A genuine
-                            # contradiction is therefore operator-recoverable by
-                            # /clear, by design: we do not spend a probe query
-                            # re-testing a runtime that already lied.
-                            self.last_max_output_tokens = observed_max_output
-                            self._max_output_tokens_valid = True
-                        elif observed_max_output is None and not model_usage:
-                            # EMPTY usage is not evidence of a wrong runtime.
-                            # Usage-limit and other short-circuited results carry
-                            # no model_usage at all; latching here bricked
-                            # production until restart (2026-08-01).
-                            logger.warning(
-                                "Terminal result carried no usage for %s; "
-                                "runtime invariant left unchanged",
-                                self.expected_context_model,
-                            )
-                        elif observed_max_output is None:
-                            # Non-empty usage that omits the expected model IS
-                            # affirmative drift evidence — the runtime billed a
-                            # model we did not ask for.
-                            self._max_output_tokens_valid = False
-                            logger.error(
-                                "Terminal usage missing expected model %s; "
-                                "reported models=%r",
-                                self.expected_context_model,
-                                sorted(model_usage),
-                            )
-                        else:
-                            self._max_output_tokens_valid = False
-                            logger.error(
-                                "Unexpected terminal model usage: model=%s "
-                                "maxOutputTokens=%r",
-                                self.expected_context_model,
-                                observed_max_output,
-                            )
-                    self.last_duration_ms = getattr(msg, "duration_ms", 0) or 0
-                    self.last_num_turns = getattr(msg, "num_turns", 0) or 0
-                    self.last_response_usage["num_turns"] = (
-                        self.last_response_usage.get("num_turns", 0)
-                        + self.last_num_turns
+                )
+                if result_is_limit:
+                    limit_seen = True
+                    limit_content = limit_content or pending_limit or raw_result or "usage limit"
+                    self.usage_limit_active = True
+                elif result_is_refusal:
+                    refusal_terminal = True
+                elif result_is_context_limit:
+                    context_limit_seen = True
+                    context_limit_content = (
+                        context_limit_content or raw_result or "context limit"
                     )
-                    self.last_stop_reason = getattr(msg, "stop_reason", None)
-                    dur_s = self.last_duration_ms / 1000
-                    logger.info(
-                        f"Result: {dur_s:.1f}s, {self.last_num_turns} turns, "
-                        f"stop={self.last_stop_reason}, cost=${self.last_cost_usd or 0:.4f}"
+                elif result_is_max_turns:
+                    max_turns_seen = True
+                    errors = getattr(msg, "errors", None) or []
+                    max_turns_content = (
+                        max_turns_content
+                        or raw_result
+                        or "; ".join(str(error) for error in errors)
+                        or "maximum number of turns reached"
                     )
-
-                    result_is_context_limit = (
-                        not result_is_limit
-                        and (
-                            getattr(msg, "terminal_reason", None) == "context_limit"
-                            or is_context_limit(raw_result)
-                        )
+                elif msg.is_error:
+                    batch_had_error = True
+                    if raw_result:
+                        generic_errors.append(raw_result)
+                if self._model_refusal_fallback_seen:
+                    restored = await self._restore_primary_model()
+                    answered_by = self.last_response_model or "резервная модель"
+                    configured = self.model.removesuffix("[1m]")
+                    suffix = (
+                        " Основная модель восстановлена для следующего сообщения."
+                        if restored
+                        else " Следующий запрос будет остановлен, пока основная модель не восстановится."
                     )
-                    if result_is_limit:
-                        limit_seen = True
-                        limit_content = limit_content or pending_limit or raw_result or "usage limit"
-                        self.usage_limit_active = True
-                    elif result_is_refusal:
-                        refusal_terminal = True
-                    elif result_is_context_limit:
-                        context_limit_seen = True
-                        context_limit_content = (
-                            context_limit_content or raw_result or "context limit"
-                        )
-                    elif result_is_max_turns:
-                        max_turns_seen = True
-                        errors = getattr(msg, "errors", None) or []
-                        max_turns_content = (
-                            max_turns_content
-                            or raw_result
-                            or "; ".join(str(error) for error in errors)
-                            or "maximum number of turns reached"
-                        )
-                    elif msg.is_error:
-                        batch_had_error = True
-                        if raw_result:
-                            generic_errors.append(raw_result)
-                    if self._model_refusal_fallback_seen:
-                        restored = await self._restore_primary_model()
-                        answered_by = self.last_response_model or "резервная модель"
-                        configured = self.model.removesuffix("[1m]")
-                        suffix = (
-                            " Основная модель восстановлена для следующего сообщения."
-                            if restored
-                            else " Следующий запрос будет остановлен, пока основная модель не восстановится."
-                        )
-                        yield {
-                            "type": "warning",
-                            "content": (
-                                f"⚠️ Модель {configured} отказала; этот ответ дала "
-                                f"{answered_by}.{suffix}"
-                            ),
-                        }
-                    pending_limit = None
-                    result_has_visible_main_output = False
-
-                    async with self._query_lock:
-                        self._expected_results = max(0, self._expected_results - 1)
-                        terminal = self._expected_results == 0
-                        if terminal:
-                            self._is_processing = False
-
-                    if terminal:
-                        if limit_seen:
-                            yield {
-                                "type": "error",
-                                "kind": "usage_limit",
-                                "content": limit_content or "usage limit",
-                            }
-                        elif refusal_terminal:
-                            pass  # rolled back below, once this client is released
-                        elif context_limit_seen:
-                            yield {
-                                "type": "error",
-                                "kind": "context_limit",
-                                "content": context_limit_content or "context limit",
-                            }
-                        elif max_turns_seen:
-                            logger.warning(
-                                "Claude stream result reached max turns: subtype=%s terminal_reason=%s",
-                                getattr(msg, "subtype", None),
-                                getattr(msg, "terminal_reason", None),
-                            )
-                            yield {
-                                "type": "error",
-                                "kind": "max_turns",
-                                "content": max_turns_content,
-                            }
-                        else:
-                            if not batch_had_error:
-                                self.usage_limit_active = False
-                            for error in generic_errors:
-                                yield {"type": "error", "content": error}
-                        break
-                    if not limit_seen:
-                        yield {"type": "turn_done"}
-                elif isinstance(msg, StreamEvent):
-                    if limit_seen or context_limit_seen:
-                        continue
-                    if getattr(msg, "parent_tool_use_id", None) is not None:
-                        continue
-                    evt = msg.event
-                    if evt.get("type") == "content_block_delta":
-                        delta = evt.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                result_has_visible_main_output = True
-                            yield {"type": "text_delta", "content": text}
-                elif isinstance(msg, SystemMessage):
-                    if msg.subtype == "init":
-                        commands = msg.data.get("slash_commands")
-                        if isinstance(commands, list):
-                            self.slash_commands = [str(command) for command in commands]
-                    logger.info(f"System: {msg.subtype}")
-                    if msg.subtype == "model_refusal_no_fallback":
-                        refusal = msg.data if isinstance(msg.data, dict) else {}
-                        logger.warning(
-                            "Claude refused the turn: category=%s refused_message=%s",
-                            refusal.get("apiRefusalCategory"),
-                            refusal.get("refusedUserMessageUuid"),
-                        )
-                    if msg.subtype == "model_refusal_fallback":
-                        self._model_refusal_fallback_seen = True
-                        logger.warning(
-                            "Claude CLI emitted model_refusal_fallback for configured model %s",
-                            self.model,
-                        )
-                elif isinstance(msg, RateLimitEvent):
-                    rl = msg.rate_limit_info
-                    self.rate_limit = {
-                        "status": rl.status,
-                        "type": rl.rate_limit_type,
-                        "utilization": rl.utilization,
+                    yield {
+                        "type": "warning",
+                        "content": (
+                            f"⚠️ Модель {configured} отказала; этот ответ дала "
+                            f"{answered_by}.{suffix}"
+                        ),
                     }
-                    if rl.status == "rejected":
-                        pending_limit = pending_limit or "usage limit"
-                        limit_content = limit_content or pending_limit
-                        limit_seen = True
-                    logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
-            if refusal_terminal:
-                rolled_back = await self._rollback_refused_turn(
-                    refusal.get("refusedUserMessageUuid")
-                )
-                yield {
-                    "type": "error",
-                    "kind": "safety_refusal",
-                    "content": str(refusal.get("apiRefusalCategory") or ""),
-                    "rolled_back": rolled_back,
+
+                if limit_seen:
+                    yield {
+                        "type": "error",
+                        "kind": "usage_limit",
+                        "content": limit_content or "usage limit",
+                    }
+                    return
+                if refusal_terminal:
+                    break  # rolled back below, once this client is released
+                if context_limit_seen:
+                    yield {
+                        "type": "error",
+                        "kind": "context_limit",
+                        "content": context_limit_content or "context limit",
+                    }
+                    return
+                if max_turns_seen:
+                    logger.warning(
+                        "Claude stream result reached max turns: subtype=%s terminal_reason=%s",
+                        getattr(msg, "subtype", None),
+                        getattr(msg, "terminal_reason", None),
+                    )
+                    yield {
+                        "type": "error",
+                        "kind": "max_turns",
+                        "content": max_turns_content,
+                    }
+                    return
+                if not batch_had_error:
+                    self.usage_limit_active = False
+                for error in generic_errors:
+                    yield {"type": "error", "content": error}
+                if ours:
+                    return
+                yield {"type": "turn_done", "ours": False}
+                pending_limit = None
+                batch_had_error = False
+                generic_errors = []
+                result_has_visible_main_output = False
+                refusal = None
+            elif isinstance(msg, StreamEvent):
+                if limit_seen or context_limit_seen:
+                    continue
+                if getattr(msg, "parent_tool_use_id", None) is not None:
+                    continue
+                evt = msg.event
+                if evt.get("type") == "content_block_delta":
+                    delta = evt.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            result_has_visible_main_output = True
+                        yield {"type": "text_delta", "content": text}
+            elif isinstance(msg, SystemMessage):
+                if msg.subtype == "init":
+                    commands = msg.data.get("slash_commands")
+                    if isinstance(commands, list):
+                        self.slash_commands = [str(command) for command in commands]
+                logger.info(f"System: {msg.subtype}")
+                if msg.subtype == "model_refusal_no_fallback":
+                    refusal = msg.data if isinstance(msg.data, dict) else {}
+                    logger.warning(
+                        "Claude refused the turn: category=%s refused_message=%s",
+                        refusal.get("apiRefusalCategory"),
+                        refusal.get("refusedUserMessageUuid"),
+                    )
+                if msg.subtype == "model_refusal_fallback":
+                    self._model_refusal_fallback_seen = True
+                    logger.warning(
+                        "Claude CLI emitted model_refusal_fallback for configured model %s",
+                        self.model,
+                    )
+            elif isinstance(msg, RateLimitEvent):
+                rl = msg.rate_limit_info
+                self.rate_limit = {
+                    "status": rl.status,
+                    "type": rl.rate_limit_type,
+                    "utilization": rl.utilization,
                 }
-        except Exception as e:
-            err = str(e)
-            if isinstance(e, ResultError) and e.subtype == "error_max_turns":
-                if e.session_id:
-                    self.session_id = e.session_id
-                    self._save_session()
-                failed_client = self._client
-                self._connected = False
-                self._client = None
-                self._expected_results = 0
-                await self._safe_disconnect(failed_client)
-                logger.warning("Claude query reached max_turns=%s", CLAUDE_MAX_TURNS)
-                yield {"type": "error", "kind": "max_turns", "content": err}
-                return
-            if usage_limit_reset(err) is not None:
-                self.usage_limit_active = True
-                self._connected = False
-                self._client = None
-                self._expected_results = 0
-                yield {"type": "error", "kind": "usage_limit", "content": err}
-                return
-            if is_context_limit(err):
-                self._connected = False
-                self._client = None
-                self._expected_results = 0
-                yield {"type": "error", "kind": "context_limit", "content": err}
-                return
-            if self.session_id and (
-                "No conversation found" in err or "exit code 1" in err
-            ):
-                logger.warning(
-                    "Session %s unavailable (%s); preserving for explicit /clear",
-                    self.session_id[:8], type(e).__name__,
-                )
-                self._connected = False
-                self._client = None
-                self._expected_results = 0
-                yield {
-                    "type": "error",
-                    "kind": "session_unavailable",
-                    "content": err,
-                }
-                return
-            logger.error(f"SDK error: {e}", exc_info=True)
-            failed_client = self._client
-            self._connected = False
-            self._client = None
-            self._expected_results = 0
-            await self._safe_disconnect(failed_client)
-            yield {"type": "error", "content": err}
-        finally:
-            if self._is_processing:
-                async with self._query_lock:
-                    self._is_processing = False
+                if rl.status == "rejected":
+                    pending_limit = pending_limit or "usage limit"
+                    limit_content = limit_content or pending_limit
+                    limit_seen = True
+                logger.info(f"Rate limit: {rl.status} ({rl.rate_limit_type}) util={rl.utilization}")
+
+        # Only a refused turn leaves the loop by `break`.
+        rolled_back = await self._rollback_refused_turn(
+            refusal.get("refusedUserMessageUuid")
+        )
+        yield {
+            "type": "error",
+            "kind": "safety_refusal",
+            "content": str(refusal.get("apiRefusalCategory") or ""),
+            "rolled_back": rolled_back,
+        }
 
     async def _probe_context_usage(self):
         """Ask the runtime for usage within our own budget, twice at most.
@@ -1197,16 +1461,27 @@ class ClaudeSession:
         """
         boundary: Optional[dict] = None
         error: Optional[str] = None
+        stream: Optional[_ClientStream] = None
         try:
             await self._ensure_connected(preserve_session=True)
+            stream = self._attach_stream()
+            stream.attach()
             async with self._query_lock:
                 await self._client.query("/compact")
-                self._expected_results = 1
                 self._is_processing = True
-            async for msg in self._client.receive_messages():
+            while True:
+                msg = await stream.next()
+                if msg is _STREAM_END:
+                    raise stream.error or RuntimeError("CLI stream closed during /compact")
                 if isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
                     boundary = msg.data.get("compact_metadata") or {}
                 elif isinstance(msg, ResultMessage):
+                    stream.turn_open = False
+                    origin = getattr(msg, "origin", None)
+                    if boundary is None and isinstance(origin, dict) and (
+                        origin.get("kind") == "task-notification"
+                    ):
+                        continue  # a notification turn queued ahead of /compact
                     if getattr(msg, "session_id", None):
                         self.session_id = msg.session_id
                         self._save_session()
@@ -1218,8 +1493,9 @@ class ClaudeSession:
         except Exception as exc:
             error = str(exc)
         finally:
+            if stream is not None:
+                stream.detach()
             async with self._query_lock:
-                self._expected_results = 0
                 self._is_processing = False
         if boundary is None:
             return {"ok": False, "error": error or "no compact_boundary"}
@@ -1274,13 +1550,21 @@ class ClaudeSession:
         try:
             usage = await self._probe_context_usage()
         except _ProbeTimeout:
-            # Two bounded probes in a row went unanswered: this is not a slow
-            # runtime, it is one that has stopped servicing the control channel.
-            # Refuse — we still have no measurement — and drop the bad client so
-            # the next probe meets a healthy one. Deciding what to do with the
-            # refused batch is the caller's job, not ours: this function stays a
-            # pure measurement. `_run_batch` retries it once (#25), which is safe
-            # only because it rejects before anything is sent or logged.
+            if self._pump_alive():
+                # The stream is drained and the CLI process is alive, so the
+                # control channel is not wedged by us (V-43: probes answer in
+                # 0.01-0.5 s even mid-turn). Reconnecting would kill the CLI and
+                # every background agent with it for no gain: report the
+                # context as unmeasured and let the batch go.
+                logger.error(
+                    "Context reserve probe timed out twice with a live stream; "
+                    "not reconnecting"
+                )
+                return {"ok": False, "reason": "unmeasured", "required": required}
+            # Two bounded probes in a row went unanswered and the stream is
+            # gone: drop the bad client so the next probe meets a healthy one.
+            # `_run_batch` retries once (#25), which is safe only because it
+            # rejects before anything is sent or logged.
             if self._session_replacement is None:
                 logger.error(
                     "Context reserve probe timed out twice; reconnecting the "
@@ -1384,29 +1668,6 @@ class ClaudeSession:
             }
         return {"ok": True, "reason": None}
 
-    async def inject(self, text: str) -> bool:
-        if not (self._client and self._connected and self._is_processing):
-            return False
-        try:
-            async with self._query_lock:
-                if not (self._client and self._connected and self._is_processing):
-                    return False
-                client = self._client
-                await client.query(text)
-                if not (
-                    self._client is client
-                    and self._connected
-                    and self._is_processing
-                ):
-                    return False
-                self._expected_results += 1
-                expected = self._expected_results
-            logger.info(f"Injected (expect {expected} results): {text[:80]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Inject error: {e}")
-            return False
-
     async def interrupt(self):
         if self._client and self._connected:
             try:
@@ -1479,7 +1740,6 @@ class ClaudeSession:
             await asyncio.wait_for(self.safe_disconnect(), timeout=15)
         except Exception as e:
             logger.warning(f"abort_turn: disconnect failed: {e}")
-        self._expected_results = 0
         self._is_processing = False
         logger.info("Turn aborted: CLI disconnected (keeping session_id)")
 
@@ -1505,6 +1765,8 @@ class ClaudeSession:
                 await old_client.disconnect()
             except Exception as e:
                 logger.debug(f"reset_async disconnect error: {e}")
+        if self._stream is not None and self._stream.client is old_client:
+            self._stream.stop()
         logger.info("Session reset (cleared session_id, disconnect awaited)")
 
     def reset(self):
@@ -1533,5 +1795,8 @@ class ClaudeSession:
                 await target.disconnect()
             except Exception:
                 pass
+            stream = self._stream
+            if stream is not None and stream.client is target:
+                stream.stop()
 
     _safe_disconnect = safe_disconnect

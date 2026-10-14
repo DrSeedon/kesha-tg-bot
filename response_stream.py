@@ -171,8 +171,12 @@ def _get_session(chat_id: int):
 from telegramify_markdown import convert as _md_convert, split_entities as _split_entities
 
 
-async def _ask(message: Optional[types.Message], prompt: str, chat_id: int):
-    """Stream a Claude response. message may be None for reminder turns (uses bot.send_message)."""
+async def _ask(message: Optional[types.Message], prompt: Optional[str], chat_id: int):
+    """Stream a Claude response. message may be None for reminder turns (uses bot.send_message).
+
+    prompt=None renders turns the CLI started on its own (V-43: task
+    notifications) from `session.background_turns()`; nothing is sent.
+    """
     cid = chat_id
     typer = asyncio.create_task(typing_loop(cid))
     try:
@@ -200,7 +204,21 @@ CHUNK_TIMEOUT_TOOL = 300
 CHUNK_TIMEOUT_OPEN_WORK = 1800
 
 
+async def _close_stream(stream) -> None:
+    # Detach from the runtime's stream now, not at garbage collection: an
+    # abandoned reader would keep the frames of the rest of the turn from the
+    # background reader that must deliver them.
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception as exc:
+        logger.debug(f"stream close failed: {exc}")
+
+
 async def _ask_inner(message, prompt, cid, typer):
+    background = prompt is None
     retries = 0
     max_turn_continuations = 0
     current_prompt = prompt
@@ -219,6 +237,11 @@ async def _ask_inner(message, prompt, cid, typer):
     finalized: list[int] = []
     completed_text_blocks: list[str] = []
     terminal_handled = False
+    # Output of turns that answer the prompt. A turn the CLI ran on its own
+    # (turn_done ours=False) is shown but is not an answer (V-43: its empty
+    # Result once produced "🤷 Пустой ответ" for a question still in flight).
+    answer_seen = False
+    turn_had_output = False
 
     status: Optional[ToolStatusTracker] = None
 
@@ -578,8 +601,13 @@ async def _ask_inner(message, prompt, cid, typer):
                     message,
                     _t_cfg(message, "reconnecting", n=retries),
                 )
+        stream = None
         try:
-            stream = _get_session(cid).send_message(current_prompt).__aiter__()
+            session = _get_session(cid)
+            stream = (
+                session.background_turns() if background
+                else session.send_message(current_prompt)
+            ).__aiter__()
             while True:
                 try:
                     _in_tool_phase = _last_chunk_type in ("tool", "result")
@@ -591,7 +619,10 @@ async def _ask_inner(message, prompt, cid, typer):
                     logger.warning(f"Chat {cid}: stream stall after {timeout}s (last_chunk={_last_chunk_type}, open_work={open_work}), finalizing")
                     await _abort_cli_turn()
                     # A started tool may already have had effects; re-asking would repeat them.
-                    if not parts and not finalized and status is None and retries < MAX_RETRIES:
+                    if (
+                        not background and not parts and not finalized
+                        and status is None and retries < MAX_RETRIES
+                    ):
                         logger.info(f"Chat {cid}: stall on empty response, retrying ({retries+1}/{MAX_RETRIES})")
                         retries += 1
                         need_retry = True
@@ -606,13 +637,15 @@ async def _ask_inner(message, prompt, cid, typer):
                             raise
                         logger.info(f"Chat {cid}: breaking inner loop for retry")
                         break
+                    terminal_handled = True
                     if parts:
                         parts.append("\n\n⚠️ _ответ прервался (stream timeout)_")
-                    elif status is not None:
-                        failed_mid = await status.fail()
-                        if failed_mid:
-                            finalized.append(failed_mid)
-                        status = None
+                    else:
+                        if status is not None:
+                            failed_mid = await status.fail()
+                            if failed_mid:
+                                finalized.append(failed_mid)
+                            status = None
                         if message is not None:
                             await _send_safe(message, "⚠️ _ответ прервался (stream timeout)_")
                         else:
@@ -645,7 +678,7 @@ async def _ask_inner(message, prompt, cid, typer):
                         f"Chat {cid}: runtime gave up on parsing a tool call "
                         f"(retries={retries}/{MAX_RETRIES})"
                     )
-                    if retries < MAX_RETRIES and not finalized:
+                    if not background and retries < MAX_RETRIES and not finalized:
                         retries += 1
                         need_retry = True
                         # Keep the live message: the retry's text overwrites the
@@ -667,6 +700,8 @@ async def _ask_inner(message, prompt, cid, typer):
                     )
                     await _edit_update()
                     continue
+                if ct in ("text_delta", "text", "tool"):
+                    turn_had_output = True
                 if ct == "text_delta":
                     has_deltas = True
                     await _open_text_block()
@@ -702,10 +737,20 @@ async def _ask_inner(message, prompt, cid, typer):
                     if parts:
                         await _finalize_text_block()
                     await _finalize_status()
+                    if chunk.get("ours", True):
+                        answer_seen = answer_seen or turn_had_output
+                    turn_had_output = False
+                    # Deltas vs full blocks is decided per turn: an earlier
+                    # turn's deltas must not mute the next turn's text block.
+                    has_deltas = False
                 elif ct == "error":
                     err = chunk["content"]
+                    if chunk.get("kind") == "prompt_lost":
+                        logger.error(f"Chat {cid}: runtime never took the prompt, NOT retrying")
+                        await _handle_context_limit("prompt_lost")
+                        break
                     if chunk.get("kind") == "max_turns":
-                        if max_turn_continuations < MAX_TURN_CONTINUATIONS:
+                        if not background and max_turn_continuations < MAX_TURN_CONTINUATIONS:
                             max_turn_continuations += 1
                             current_prompt = _MAX_TURN_CONTINUATION_PROMPT
                             logger.warning(
@@ -761,7 +806,7 @@ async def _ask_inner(message, prompt, cid, typer):
                         logger.warning(f"Session error, reconnecting: {err}")
                         _get_session(cid).reconnect()
                         retries += 1
-                        if retries <= MAX_RETRIES and not finalized:
+                        if not background and retries <= MAX_RETRIES and not finalized:
                             need_retry = True
                             try:
                                 parts.clear()
@@ -778,6 +823,8 @@ async def _ask_inner(message, prompt, cid, typer):
                                 raise
                             break
                     parts.append(f"Error: {err}")
+                    terminal_handled = True
+            await _close_stream(stream)
             if not need_retry:
                 logger.info(f"Chat {cid}: inner loop done, no retry needed")
                 break
@@ -798,8 +845,10 @@ async def _ask_inner(message, prompt, cid, typer):
                 await _handle_context_limit()
                 break
             logger.error(f"Chat {cid}: outer exception in retry loop (retries={retries}): {type(e).__name__}: {e}", exc_info=True)
+            if stream is not None:
+                await _close_stream(stream)
             retries += 1
-            if retries <= MAX_RETRIES:
+            if not background and retries <= MAX_RETRIES:
                 _get_session(cid).reconnect()
                 current_msg_id = None
                 last_edit_text = ""
@@ -837,5 +886,6 @@ async def _ask_inner(message, prompt, cid, typer):
             await status.cancel_empty()
         status = None
 
-    if not text and not finalized and not terminal_handled:
+    answer_seen = answer_seen or turn_had_output
+    if not background and not answer_seen and not terminal_handled:
         await _answer(STRINGS["ru"]["empty"] if message is None else _t_cfg(message, "empty"))

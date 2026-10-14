@@ -482,9 +482,14 @@ async def h_stop(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     cid = msg.chat.id
-    stopped = await _registry.get(cid).request_stop()
+    cs = _registry.get(cid)
+    # The CLI's interrupt also stops its background agents (V-43 research §5).
+    agents = cs.background_agents_open()
+    stopped = await cs.request_stop()
     if stopped:
-        await _send_safe(msg, "Stopping...")
+        await _send_safe(
+            msg, t(msg, "stop_with_background", n=agents) if agents else "Stopping..."
+        )
     else:
         await _send_safe(msg, "Nothing to stop.")
 

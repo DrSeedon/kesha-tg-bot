@@ -18,6 +18,10 @@ from config import (
 )
 from message_log import ActivityPersistenceError
 
+# A healthy control request answers in under 3.4 s (docs/tasks/20); the SDK's
+# own 60 s budget held the chat in PROCESSING for a minute (prod 14.10.2026).
+POST_TURN_PROBE_TIMEOUT_S = 10.0
+
 if TYPE_CHECKING:
     from aiogram import Bot, types
     from claude_session import ClaudeSession
@@ -119,6 +123,63 @@ class ChatState:
         self._build_runtime = build_runtime_fn
         self._reset_runtimes = reset_runtimes_fn
         self._reload_mcp = reload_mcp_fn
+        # A manual /compact asked for while background agents run: our compact
+        # replaces the CLI process and would kill them (V-43).
+        self.compact_after_background: bool = False
+        self._listen_for_background_turns(session)
+
+    # --- Background turns (V-43) ---
+
+    def _listen_for_background_turns(self, session) -> None:
+        """Turns the CLI starts on its own reach the chat only through this hook.
+
+        Optional runtime surface, like `abort_turn`: Codex drains its own
+        app-server notifications and starts no turns by itself.
+        """
+        setter = getattr(session, "set_background_listener", None)
+        if callable(setter):
+            setter(self._on_background_turn)
+
+    def _on_background_turn(self) -> None:
+        try:
+            asyncio.get_running_loop().create_task(self._start_background_if_idle())
+        except RuntimeError:
+            pass
+
+    def _session_has_background_turn(self) -> bool:
+        probe = getattr(self.session, "has_background_turn", None)
+        return callable(probe) and probe() is True
+
+    def background_agents_open(self) -> int:
+        count = getattr(self.session, "background_agents_open", None)
+        value = count() if callable(count) else 0
+        return value if type(value) is int else 0
+
+    async def _start_background_if_idle(self) -> None:
+        """Render a CLI-started turn when the chat is idle.
+
+        In any other phase the turn is not lost: a running answer reads it
+        itself, and `_drain_or_idle` looks again before the chat goes idle.
+        """
+        async with self._lock:
+            if self._shutdown or self.phase != ChatPhase.IDLE:
+                return
+            if not self._session_has_background_turn():
+                return
+            self.phase = ChatPhase.PROCESSING
+            logger.info(f"Chat {self.chat_id}: phase idle → processing [background_turn]")
+        self._activity_store.begin_activity(self.chat_id)
+        self._processing_task = asyncio.create_task(self._run_background())
+
+    async def _run_background(self) -> None:
+        turn_ran = False
+        try:
+            await self._ask_fn(None, None, self.chat_id)
+            turn_ran = True
+        except Exception as e:
+            logger.error(f"Chat {self.chat_id} background turn error: {e}", exc_info=True)
+        finally:
+            await self._finish_processing(check_context=turn_ran)
 
     @property
     def is_busy(self) -> bool:
@@ -290,6 +351,7 @@ class ChatState:
             logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_clear gen={self.generation}]")
 
         # I/O outside lock
+        stopped_agents = self.background_agents_open()
         if self._reset_runtimes:
             await self._reset_runtimes(
                 self.chat_id, self.session, self.runtime_id
@@ -300,6 +362,16 @@ class ChatState:
             self._activity_store.finish_activity(self.chat_id)
         except ActivityPersistenceError as exc:
             logger.error(f"Chat {self.chat_id}: clear completion persistence failed: {exc}")
+        if stopped_agents:
+            # The reset replaced the CLI process; its background agents died with it.
+            try:
+                await self.bot.send_message(
+                    self.chat_id,
+                    _render("clear_with_background", n=stopped_agents),
+                    parse_mode=None,
+                )
+            except Exception as exc:
+                logger.warning(f"Chat {self.chat_id}: clear notice failed: {exc}")
         return True
 
     async def reload_cli(self) -> dict:
@@ -413,6 +485,7 @@ class ChatState:
             self._activity_store.set_runtime(self.chat_id, target)
             self.session = new_session
             self.runtime_id = target
+            self._listen_for_background_turns(new_session)
         except asyncio.CancelledError:
             await self._finish_cancel_safely(
                 self._abort_runtime_switch(new_session, target)
@@ -689,23 +762,43 @@ class ChatState:
                     )
                 self.compact_requested = True
                 return True
-            if self._debounce_task and not self._debounce_task.done():
-                self._debounce_task.cancel()
-                self._debounce_task = None
-            if self.pending:
-                self.deferred.append(list(self.pending))
-                self.pending.clear()
-            if self.pending_transcriptions > 0:
-                cancelled_count = self.pending_transcriptions
-                self.media_generation += 1
-                self.pending_transcriptions = 0
-                logger.info(
-                    f"Chat {self.chat_id}: compact cancelled "
-                    f"{cancelled_count} pending transcriptions"
-                )
-            prev = self.phase
-            self.phase = ChatPhase.COMPACTING
-            logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_compact]")
+            postponed = 0 if automatic else self.background_agents_open()
+            settle_activity = postponed and self.phase == ChatPhase.IDLE and not self.pending
+            if postponed:
+                self.compact_after_background = True
+            else:
+                if self._debounce_task and not self._debounce_task.done():
+                    self._debounce_task.cancel()
+                    self._debounce_task = None
+                if self.pending:
+                    self.deferred.append(list(self.pending))
+                    self.pending.clear()
+                if self.pending_transcriptions > 0:
+                    cancelled_count = self.pending_transcriptions
+                    self.media_generation += 1
+                    self.pending_transcriptions = 0
+                    logger.info(
+                        f"Chat {self.chat_id}: compact cancelled "
+                        f"{cancelled_count} pending transcriptions"
+                    )
+                prev = self.phase
+                self.phase = ChatPhase.COMPACTING
+                logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [request_compact]")
+        if postponed:
+            logger.info(
+                f"Chat {self.chat_id}: manual compact postponed, {postponed} background agent(s)"
+            )
+            if settle_activity:
+                try:
+                    self._activity_store.finish_activity(self.chat_id)
+                except ActivityPersistenceError as exc:
+                    logger.error(f"Chat {self.chat_id}: completion persistence failed: {exc}")
+            await self.bot.send_message(
+                self.chat_id,
+                _render("compact_after_background", n=postponed),
+                parse_mode=None,
+            )
+            return True
         await self._do_compact(automatic=automatic)
         return True
 
@@ -954,6 +1047,13 @@ class ChatState:
             if not reserve.get("ok"):
                 if await self._reject_batch_for_context(batch, reserve):
                     return
+            elif reserve.get("should_compact") and self.background_agents_open():
+                logger.warning(
+                    "Chat %s: compact due but %d background agent(s) running; "
+                    "sending without it",
+                    self.chat_id,
+                    self.background_agents_open(),
+                )
             elif reserve.get("should_compact"):
                 compact_result = await self._compact_admitted_batch(batch)
                 if compact_result.get("ok"):
@@ -1057,6 +1157,18 @@ class ChatState:
             self.cancel_requested = False
             self.batch_message_ids.clear()
 
+        agents = self.background_agents_open()
+        if needs_compact and agents:
+            if not automatic:
+                self.compact_after_background = True
+            logger.info(
+                f"Chat {self.chat_id}: compact postponed, {agents} background agent(s) running"
+            )
+            needs_compact = False
+        elif self.compact_after_background and not agents:
+            self.compact_after_background = False
+            needs_compact, automatic = True, False
+
         # Only after a turn that ran: a failed admission compact must not be retried here.
         if check_context and not needs_compact and await self._context_needs_compact_after_turn():
             needs_compact = automatic = True
@@ -1077,8 +1189,14 @@ class ChatState:
             return False
         if getattr(self.session, "usage_limit_active", False):
             return False
+        if self.background_agents_open():
+            # The last agent's notification turn ends here too and re-checks.
+            return False
         try:
-            usage = await self.session.get_context_usage()
+            probe = asyncio.ensure_future(self.session.get_context_usage())
+            # Do not cancel the SDK call: its own timeout cleans its pending entry.
+            probe.add_done_callback(lambda t: t.cancelled() or t.exception())
+            usage = await asyncio.wait_for(asyncio.shield(probe), POST_TURN_PROBE_TIMEOUT_S)
             pct = float((usage or {}).get("percentage") or 0)
         except Exception as exc:
             logger.warning("Chat %s: post-turn context check failed: %s", self.chat_id, exc)
@@ -1262,6 +1380,7 @@ class ChatState:
     async def _drain_or_idle(self, *, record_activity: bool = True) -> None:
         """Atomically: if deferred exists → PROCESSING + drain, else → IDLE. No IDLE window."""
         merged: list[PendingEntry] | None = None
+        start_background = False
         async with self._lock:
             if self._shutdown:
                 self.phase = ChatPhase.IDLE
@@ -1284,6 +1403,12 @@ class ChatState:
                 self.phase = ChatPhase.IDLE
                 await self._arm_debounce()
                 return
+            elif self._session_has_background_turn():
+                # A CLI turn arrived while we were busy; nobody else will read it.
+                start_background = True
+                prev = self.phase
+                self.phase = ChatPhase.PROCESSING
+                logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [background_turn]")
             else:
                 if record_activity:
                     try:
@@ -1299,6 +1424,8 @@ class ChatState:
                 logger.info(f"Chat {self.chat_id}: phase {prev} → {self.phase} [idle]")
         if merged:
             await self._start_processing(merged)
+        elif start_background:
+            self._processing_task = asyncio.create_task(self._run_background())
 
 
 

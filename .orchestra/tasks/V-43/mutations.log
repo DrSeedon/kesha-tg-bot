@@ -1,0 +1,10 @@
+KILLED  pump reads only while a consumer is attached (pre-V-43) -> 1 failed in 6.40s
+KILLED  every Result answers the question -> 1 failed in 5.40s
+KILLED  prompt merged into a notification turn is not ours -> 1 failed in 7.50s
+KILLED  probe timeout reconnects although the stream is alive -> 1 failed in 5.29s
+KILLED  CLI-started turns are not delivered -> 1 failed in 5.65s
+KILLED  a real stall no longer stops the CLI -> 1 failed in 5.74s
+KILLED  an untaken prompt is waited for forever -> 1 failed in 7.31s
+KILLED  compact ignores running background agents -> 1 failed in 5.09s
+KILLED  between-turn silence is timed like a stall -> 1 failed in 5.96s
+EXIT=0

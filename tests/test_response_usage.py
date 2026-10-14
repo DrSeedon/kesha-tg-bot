@@ -5,11 +5,14 @@ subscription from it. Both defects tested below were live in production for one
 deploy and were caught only by comparing a row with the CLI transcript.
 """
 
+import asyncio
 import sqlite3
 import json
 import re
 
 import pytest
+
+from tests.sdk_echo import echo, prompt_frames
 
 from message_log import MessageLog
 
@@ -187,10 +190,15 @@ async def test_resumed_session_cost_and_tokens_start_at_transcript_baseline(tmp_
         async def connect(self):
             return None
 
-        async def query(self, _text):
-            return None
+        def __init__(self):
+            self.taken = asyncio.Queue()
+
+        async def query(self, prompt):
+            for message in echo(await prompt_frames(prompt)):
+                self.taken.put_nowait(message)
 
         async def receive_messages(self):
+            yield await self.taken.get()
             yield AssistantMessage(
                 content=[TextBlock("resumed answer")],
                 model="claude-opus-5-5",
@@ -297,7 +305,7 @@ async def test_a_real_stream_fills_the_row(tmp_path):
             "ephemeral_1h_input_tokens": 4420,
         },
     }
-    for event in (
+    events = [
         AssistantMessage(
             content=[TextBlock("первый вызов")], model="claude",
             usage={"input_tokens": 2, "output_tokens": 6,
@@ -311,11 +319,13 @@ async def test_a_real_stream_fills_the_row(tmp_path):
                    "cache_creation_input_tokens": 2444},
         ),
         terminal,
-    ):
-        client.events.put_nowait(event)
-
+    ]
     session.reset_response_usage()
-    await collect(session)
+    answer = asyncio.create_task(collect(session))
+    await asyncio.sleep(0)  # the CLI takes the prompt, then answers
+    for event in events:
+        client.events.put_nowait(event)
+    await answer
 
     usage = session.last_response_usage
     # 11 is what the snapshots claimed; 1927 is the answer plus its helper model.
