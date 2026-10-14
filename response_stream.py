@@ -193,6 +193,13 @@ async def _stop_typer(typer: asyncio.Task) -> None:
             await typer
 
 
+CHUNK_TIMEOUT_TEXT = 120
+CHUNK_TIMEOUT_TOOL = 300
+# Ceiling for silence while the CLI still has a tool/task open (V-42: a
+# 7-min bash is alive, not stalled). Reaching it IS a real hang.
+CHUNK_TIMEOUT_OPEN_WORK = 1800
+
+
 async def _ask_inner(message, prompt, cid, typer):
     retries = 0
     max_turn_continuations = 0
@@ -521,12 +528,20 @@ async def _ask_inner(message, prompt, cid, typer):
         last_edit_text = ""
         terminal_handled = True
 
-    CHUNK_TIMEOUT_TEXT = 120
-    CHUNK_TIMEOUT_TOOL = 300
+    async def _abort_cli_turn():
+        # The turn must really stop before the user hears it was cut; a parked
+        # CLI keeps acting blind (commits, answers nobody receives).
+        session = _get_session(cid)
+        abort = getattr(session, "abort_turn", None)
+        if abort is not None:
+            await abort()
+        else:
+            session.reconnect()
 
     while retries <= MAX_RETRIES:
         need_retry = False
         _last_chunk_type = None
+        open_work = 0
         logger.info(f"Chat {cid}: retry loop iteration retries={retries}/{MAX_RETRIES}")
         if retries:
             reserve = await _get_session(cid).check_context_reserve(current_prompt)
@@ -569,12 +584,15 @@ async def _ask_inner(message, prompt, cid, typer):
                 try:
                     _in_tool_phase = _last_chunk_type in ("tool", "result")
                     timeout = CHUNK_TIMEOUT_TOOL if _in_tool_phase else CHUNK_TIMEOUT_TEXT
+                    if open_work:
+                        timeout = CHUNK_TIMEOUT_OPEN_WORK
                     chunk = await asyncio.wait_for(stream.__anext__(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    logger.warning(f"Chat {cid}: stream stall after {timeout}s (last_chunk={_last_chunk_type}), finalizing")
-                    if not parts and not finalized and retries < MAX_RETRIES:
+                    logger.warning(f"Chat {cid}: stream stall after {timeout}s (last_chunk={_last_chunk_type}, open_work={open_work}), finalizing")
+                    await _abort_cli_turn()
+                    # A started tool may already have had effects; re-asking would repeat them.
+                    if not parts and not finalized and status is None and retries < MAX_RETRIES:
                         logger.info(f"Chat {cid}: stall on empty response, retrying ({retries+1}/{MAX_RETRIES})")
-                        _get_session(cid).reconnect()
                         retries += 1
                         need_retry = True
                         try:
@@ -597,12 +615,13 @@ async def _ask_inner(message, prompt, cid, typer):
                         status = None
                         if message is not None:
                             await _send_safe(message, "⚠️ _ответ прервался (stream timeout)_")
+                        else:
+                            await _bot.send_message(cid, "⚠️ _ответ прервался (stream timeout)_")
                     if status is not None:
                         failed_mid = await status.fail()
                         if failed_mid:
                             finalized.append(failed_mid)
                         status = None
-                    _get_session(cid).reconnect()
                     break
                 except StopAsyncIteration:
                     break
@@ -612,6 +631,9 @@ async def _ask_inner(message, prompt, cid, typer):
                         parts.append("\n\n_(stopped)_")
                     break
                 ct = chunk["type"]
+                if ct == "liveness":
+                    open_work = chunk.get("open", 0)
+                    continue
                 _last_chunk_type = ct
                 if ct in ("text", "text_delta") and _is_tool_call_giveup(
                     chunk.get("content", "")

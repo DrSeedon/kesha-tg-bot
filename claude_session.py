@@ -19,7 +19,13 @@ from claude_agent_sdk import (
     RateLimitEvent,
     StreamEvent,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
+    TERMINAL_TASK_STATUSES,
     TextBlock,
+    UserMessage,
     ToolUseBlock,
     ToolResultBlock,
     McpSdkServerConfig,
@@ -723,6 +729,10 @@ class ClaudeSession:
         result_has_visible_main_output = False
         refusal: Optional[dict] = None
         refusal_terminal = False
+        # Work the CLI is demonstrably still doing: main-agent tool calls without
+        # a result yet and tasks (bash, subagents) without a terminal status. A
+        # silent stream is only a stall when this is empty (V-42).
+        open_work: set[str] = set()
 
         try:
             logger.info("send_message: ensuring connected...")
@@ -790,10 +800,31 @@ class ClaudeSession:
                             result_has_visible_main_output = True
                             yield {"type": "text", "content": block.text}
                         elif isinstance(block, ToolUseBlock):
+                            if not from_subagent:
+                                open_work.add(f"tool:{block.id}")
                             yield {"type": "tool", "name": block.name, "input": block.input}
+                            if not from_subagent:
+                                yield {"type": "liveness", "open": len(open_work)}
                         elif isinstance(block, ToolResultBlock):
                             content = block.content if isinstance(block.content, str) else str(block.content)
                             yield {"type": "result", "content": content[:200], "error": block.is_error}
+                elif isinstance(msg, UserMessage):
+                    if isinstance(msg.content, list):
+                        for block in msg.content:
+                            if isinstance(block, ToolResultBlock):
+                                open_work.discard(f"tool:{block.tool_use_id}")
+                    yield {"type": "liveness", "open": len(open_work)}
+                elif isinstance(msg, (TaskStartedMessage, TaskProgressMessage)):
+                    logger.info(f"System: {msg.subtype}")
+                    open_work.add(f"task:{msg.task_id}")
+                    yield {"type": "liveness", "open": len(open_work)}
+                elif isinstance(msg, TaskNotificationMessage) or (
+                    isinstance(msg, TaskUpdatedMessage)
+                    and (msg.patch or {}).get("status") in TERMINAL_TASK_STATUSES
+                ):
+                    logger.info(f"System: {msg.subtype}")
+                    open_work.discard(f"task:{msg.task_id}")
+                    yield {"type": "liveness", "open": len(open_work)}
                 elif isinstance(msg, ResultMessage):
                     if getattr(msg, "session_id", None):
                         self.session_id = msg.session_id
@@ -1430,6 +1461,27 @@ class ClaudeSession:
                 f"MCP reload lost the conversation: session {before} → {self.session_id}"
             )
         logger.info(f"MCP reload: reconnected with {list(servers)}")
+
+    async def abort_turn(self) -> None:
+        """Stop the running turn for real: interrupt, then kill the CLI and WAIT.
+
+        reconnect() only parks the client; the CLI keeps executing the turn
+        blind until the next message disconnects it (V-42: a 7-min bash, then
+        commits and a full answer nobody received).
+        """
+        client = self._client
+        if client is not None and self._connected:
+            try:
+                await asyncio.wait_for(client.interrupt(), timeout=5)
+            except Exception as e:
+                logger.warning(f"abort_turn: interrupt failed: {e}")
+        try:
+            await asyncio.wait_for(self.safe_disconnect(), timeout=15)
+        except Exception as e:
+            logger.warning(f"abort_turn: disconnect failed: {e}")
+        self._expected_results = 0
+        self._is_processing = False
+        logger.info("Turn aborted: CLI disconnected (keeping session_id)")
 
     def reconnect(self):
         self._connected = False
