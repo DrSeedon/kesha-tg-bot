@@ -36,7 +36,7 @@ def _state(tmp_path, *, store=None):
     session.check_context_reserve = AsyncMock(
         return_value={"ok": True, "remaining": 900_000, "required": 80_000}
     )
-    session.inject = AsyncMock(return_value=True)
+    session.steer = AsyncMock(return_value=True)
     session.usage_limit_active = False
     bot = MagicMock()
     bot.send_message = AsyncMock(return_value=MagicMock(message_id=17))
@@ -85,19 +85,20 @@ async def test_manual_compact_below_floor_is_one_terminal_without_query(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_processing_arrival_is_deferred_without_injection(tmp_path):
+async def test_processing_arrival_is_held_for_a_steer_not_written_inline(tmp_path):
     state, _store, _compact = _state(tmp_path)
     state.phase = ChatPhase.PROCESSING
     pending = _entry()
 
     await state.accept_entry(pending)
 
-    assert state.deferred == [[pending]]
-    state.session.inject.assert_not_awaited()
+    assert state.steering == [pending] and state.deferred == []
+    state.session.steer.assert_not_awaited()
+    state._steer_task.cancel()
 
 
 @pytest.mark.asyncio
-async def test_processing_media_completion_is_deferred_without_injection(tmp_path):
+async def test_processing_media_completion_is_held_for_a_steer(tmp_path):
     state, _store, _compact = _state(tmp_path)
     generation, media_generation = await state.media_started()
     state.phase = ChatPhase.PROCESSING
@@ -105,8 +106,9 @@ async def test_processing_media_completion_is_deferred_without_injection(tmp_pat
 
     await state.media_finished(pending, generation, media_generation)
 
-    assert state.deferred == [[pending]]
-    state.session.inject.assert_not_awaited()
+    assert state.steering == [pending] and state.deferred == []
+    state.session.steer.assert_not_awaited()
+    state._steer_task.cancel()
 
 
 @pytest.mark.asyncio
@@ -118,7 +120,7 @@ async def test_processing_urgent_reminder_is_deferred_without_injection(tmp_path
 
     assert len(state.deferred) == 1
     assert state.deferred[0][0].prompt == "urgent"
-    state.session.inject.assert_not_awaited()
+    state.session.steer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

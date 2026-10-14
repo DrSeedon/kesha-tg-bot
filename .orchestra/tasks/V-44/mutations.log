@@ -1,0 +1,4 @@
+KILLED   every mid-turn arrival goes to deferred (pre-V-44) -> 1 failed in 5.72s
+KILLED   reader ends at our Result although a steer is owed -> 1 failed in 5.40s
+KILLED   steer skips admission -> 1 failed in 5.45s
+KILLED   failed steer write is dropped -> 1 failed in 5.51s

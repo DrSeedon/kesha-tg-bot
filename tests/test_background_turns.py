@@ -202,9 +202,11 @@ async def test_notification_turns_reach_the_chat_without_killing_the_cli(chat):
 
 
 @pytest.mark.asyncio
-async def test_question_during_a_cli_turn_is_queued_and_answered_correctly(chat):
+async def test_question_during_a_cli_turn_is_steered_and_answered(chat):
+    """V-44: the message goes to the CLI at once; the CLI runs it after its own turn."""
     state, session, client, bot = chat
     await launch_nine_agents(state, client)
+    client.echo_on_query = False
 
     # A notification turn starts and streams; the user writes in the middle of it.
     client.events.put_nowait(agent_finished(0))
@@ -212,11 +214,11 @@ async def test_question_during_a_cli_turn_is_queued_and_answered_correctly(chat)
     await asyncio.sleep(0.05)
     assert state.phase == ChatPhase.PROCESSING
     await ask(state, "А что там с отзывами?", 2)
-    assert state.deferred, "the question waits for the CLI's own turn to end"
+    await asyncio.sleep(0.05)
+    assert client.queries[-1].endswith("А что там с отзывами?"), "sent before the CLI turn ended"
 
     client.events.put_nowait(done(origin=NOTIFICATION))
-    await asyncio.sleep(0.05)  # deferred batch is admitted and sent
-    assert client.queries[-1].endswith("А что там с отзывами?")
+    client.take()  # the CLI dequeues it as its next turn
     client.events.put_nowait(say("Отзывы хорошие"))
     client.events.put_nowait(done())
     await settle(state)
@@ -224,6 +226,7 @@ async def test_question_during_a_cli_turn_is_queued_and_answered_correctly(chat)
     shown = visible_text(bot)
     assert "Готово 7 из 9" in shown and "Отзывы хорошие" in shown
     assert "Пустой ответ" not in shown
+    assert not state.deferred
     assert client.log == []
 
 

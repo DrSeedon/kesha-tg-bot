@@ -158,6 +158,7 @@ class _ProbeTimeout(Exception):
 PROMPT_PICKUP_TIMEOUT_S = 60.0
 
 _STREAM_END = object()
+_NUDGE = object()
 
 
 class _ClientStream:
@@ -183,6 +184,8 @@ class _ClientStream:
         self.turn_open = False
         self.turn_uids: set[str] = set()
         self.agents_open: set[str] = set()
+        # A reader that will see a steered prompt's turn through to its Result.
+        self.reader_open = False
         self._consumers = 0
         self._signalled = False
         self._on_unread_turn = on_unread_turn
@@ -198,6 +201,20 @@ class _ClientStream:
 
     def has_unread_turn(self) -> bool:
         return self.turn_open or any(self.opens_turn(msg) for msg in self.frames)
+
+    def close_reader(self) -> None:
+        """No reader is left to answer prompts: forget the ones still owed.
+
+        Their turns, if the CLI still runs them, arrive as CLI turns and are
+        delivered by the background reader.
+        """
+        self.reader_open = False
+        self.pending.clear()
+
+    def nudge(self) -> None:
+        """Make a waiting reader re-check `pending` (a steer was withdrawn)."""
+        self.frames.append(_NUDGE)
+        self._wake.set()
 
     def attach(self) -> None:
         self._consumers += 1
@@ -894,15 +911,45 @@ class ClaudeSession:
             return
         stream = self._stream
         stream.attach()
+        stream.reader_open = True
         try:
             async for chunk in self._turn_chunks(stream, None):
                 yield chunk
         except Exception as exc:
+            stream.close_reader()
             logger.error("Background turn stream failed: %s", exc)
             if self._client is stream.client:
                 self._connected = False
         finally:
+            stream.close_reader()
             stream.detach()
+
+    async def steer(self, text: str) -> bool:
+        """Hand a user message to the CLI while a turn is being read.
+
+        The CLI merges it into the running turn at the next tool boundary or
+        runs it as the next turn (V-43 research §2, prompts B and E) — what
+        Claude Code does with a message typed mid-turn. The attached reader
+        waits for its echo and Result, so the answer reaches the same reply.
+        False means nothing was sent: queue it instead.
+        """
+        stream = self._stream
+        if not (self._pump_alive() and stream.reader_open):
+            return False
+        prompt_uuid = str(uuid.uuid4())
+        stream.pending[prompt_uuid] = False  # before any await: the reader must wait for it
+        try:
+            async with self._query_lock:
+                if self._client is not stream.client or not stream.reader_open:
+                    raise RuntimeError("reader closed before the steer was written")
+                await self._client.query(self._user_frames(text, prompt_uuid))
+        except Exception as exc:
+            stream.pending.pop(prompt_uuid, None)
+            stream.nudge()
+            logger.warning(f"Steer not delivered, queueing: {exc}")
+            return False
+        logger.info(f"Steered into the running turn: {text[:80]}...")
+        return True
 
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
@@ -918,6 +965,7 @@ class ClaudeSession:
                 return
             stream = self._attach_stream()
             stream.attach()
+            stream.reader_open = True
             prompt_uuid = str(uuid.uuid4())
             logger.info("send_message: connected, sending query...")
             async with self._query_lock:
@@ -928,6 +976,8 @@ class ClaudeSession:
             async for chunk in self._turn_chunks(stream, prompt_uuid):
                 yield chunk
         except Exception as e:
+            if stream is not None:
+                stream.close_reader()
             err = str(e)
             if isinstance(e, ResultError) and e.subtype == "error_max_turns":
                 if e.session_id:
@@ -974,6 +1024,7 @@ class ClaudeSession:
             yield {"type": "error", "content": err}
         finally:
             if stream is not None:
+                stream.close_reader()
                 stream.detach()
             if self._is_processing:
                 async with self._query_lock:
@@ -1012,12 +1063,12 @@ class ClaudeSession:
         loop = asyncio.get_running_loop()
 
         while True:
-            awaiting_pickup = (
-                prompt_uuid is not None
-                and stream.pending.get(prompt_uuid) is False
-                and not stream.turn_open
-            )
-            if prompt_uuid is None and not stream.frames and not stream.turn_open:
+            # Prompts owed an answer: ours plus any steered in meanwhile. The
+            # reader ends only once all of them were taken and their turns closed.
+            awaiting_pickup = not stream.turn_open and not all(stream.pending.values())
+            if not stream.turn_open and not stream.pending and (
+                prompt_uuid is not None or not stream.frames
+            ):
                 return
             if awaiting_pickup:
                 if pickup_deadline is None:
@@ -1030,10 +1081,14 @@ class ClaudeSession:
                 # The CLI is between turns and still has not taken the prompt:
                 # it never will (an echo contract change, a lost write). Waiting
                 # on would hold the chat in PROCESSING forever.
-                stream.pending.pop(prompt_uuid, None)
+                lost = [uid for uid, taken in stream.pending.items() if not taken]
+                if not lost:
+                    continue
+                for uid in lost:
+                    stream.pending.pop(uid, None)
                 logger.error(
-                    "CLI stayed idle %.0fs without taking prompt %s",
-                    PROMPT_PICKUP_TIMEOUT_S, prompt_uuid[:8],
+                    "CLI stayed idle %.0fs without taking prompt(s) %s",
+                    PROMPT_PICKUP_TIMEOUT_S, [uid[:8] for uid in lost],
                 )
                 yield {
                     "type": "error",
@@ -1041,6 +1096,8 @@ class ClaudeSession:
                     "content": "Claude CLI did not take the message into a turn",
                 }
                 return
+            if msg is _NUDGE:
+                continue
             if msg is _STREAM_END:
                 if stream.error is not None:
                     raise stream.error
@@ -1137,7 +1194,8 @@ class ClaudeSession:
                 open_work.discard(f"task:{msg.task_id}")
                 yield {"type": "liveness", "open": len(open_work)}
             elif isinstance(msg, ResultMessage):
-                ours = prompt_uuid is not None and prompt_uuid in stream.turn_uids
+                # Ours: the turn took a prompt we sent (the question or a steer).
+                ours = bool(stream.turn_uids)
                 for consumed in stream.turn_uids:
                     stream.pending.pop(consumed, None)
                 stream.turn_uids = set()
@@ -1352,9 +1410,9 @@ class ClaudeSession:
                     self.usage_limit_active = False
                 for error in generic_errors:
                     yield {"type": "error", "content": error}
-                if ours:
+                if prompt_uuid is not None and not stream.pending:
                     return
-                yield {"type": "turn_done", "ours": False}
+                yield {"type": "turn_done", "ours": ours}
                 pending_limit = None
                 batch_had_error = False
                 generic_errors = []
@@ -1471,6 +1529,8 @@ class ClaudeSession:
                 self._is_processing = True
             while True:
                 msg = await stream.next()
+                if msg is _NUDGE:
+                    continue
                 if msg is _STREAM_END:
                     raise stream.error or RuntimeError("CLI stream closed during /compact")
                 if isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":

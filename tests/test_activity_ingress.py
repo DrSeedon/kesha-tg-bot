@@ -159,8 +159,8 @@ async def test_ingress_during_processing_defers_without_blocking_the_stream():
     """A message arriving mid-turn must not stall the streaming edit loop.
 
     Regression guard for the reported "bot freezes while streaming when the user
-    types": ingress may only defer. It must not await the Claude query lock
-    (no inject) and must not hold ChatState._lock across any network await,
+    types": ingress only records the arrival. It must not write to the CLI
+    itself (the steer runs in its own task, V-44) and must not hold ChatState._lock across any network await,
     otherwise the response_stream edit loop starves behind it.
     """
     import asyncio
@@ -169,8 +169,8 @@ async def test_ingress_during_processing_defers_without_blocking_the_stream():
     from chat_state import ChatPhase, ChatState, PendingEntry
 
     session = MagicMock()
-    session.inject = AsyncMock(
-        side_effect=AssertionError("ingress must not inject during a turn")
+    session.steer = AsyncMock(
+        side_effect=AssertionError("ingress must not write to the CLI inline")
     )
     state = ChatState(
         chat_id=42,
@@ -209,9 +209,10 @@ async def test_ingress_during_processing_defers_without_blocking_the_stream():
     stop = True
     await loop_task
 
-    session.inject.assert_not_awaited()
-    assert len(state.deferred) == 5, "every mid-turn arrival must be deferred"
+    session.steer.assert_not_awaited()
+    assert len(state.steering) == 5, "mid-turn arrivals are glued for one steer"
     assert not state.pending, "mid-turn arrivals must not enter the active batch"
+    state._steer_task.cancel()
     assert ticks > before, "edit loop must keep running while ingress is admitted"
 
 
