@@ -43,6 +43,10 @@ _MAX_TURN_CONTINUATION_PROMPT = (
 
 _bot = None
 _registry = None
+# chat -> the one message that shows background progress (V-47). Turns the CLI
+# runs on each task notification while other agents still work edit it in
+# place: a new message per notification pushed the owner every 10-40 s at night.
+_progress_messages: dict[int, int] = {}
 
 
 def _runtime_limit_suffix(chat_id: int) -> Optional[str]:
@@ -217,8 +221,16 @@ async def _close_stream(stream) -> None:
         logger.debug(f"stream close failed: {exc}")
 
 
+def _agents_still_running(cid: int) -> bool:
+    count = getattr(_get_session(cid), "background_agents_open", None)
+    return callable(count) and count() > 0
+
+
 async def _ask_inner(message, prompt, cid, typer):
     background = prompt is None
+    if not background:
+        # The user wrote: an older progress message is above his question now.
+        _progress_messages.pop(cid, None)
     retries = 0
     max_turn_continuations = 0
     current_prompt = prompt
@@ -242,6 +254,10 @@ async def _ask_inner(message, prompt, cid, typer):
     # Result once produced "🤷 Пустой ответ" for a question still in flight).
     answer_seen = False
     turn_had_output = False
+    # A CLI turn that starts while other agents still run is progress, not the
+    # result: it goes to the progress message, without tool bubbles. Decided at
+    # the turn's first output; None = not decided yet.
+    progress_turn: Optional[bool] = None
 
     status: Optional[ToolStatusTracker] = None
 
@@ -327,6 +343,7 @@ async def _ask_inner(message, prompt, cid, typer):
         if not raw:
             return
         completed_text_blocks.append(raw)
+        _progress_messages.pop(cid, None)
         await _stop_typer(typer)
 
         try:
@@ -406,6 +423,42 @@ async def _ask_inner(message, prompt, cid, typer):
         last_edit_text = ""
         parts = []
         has_deltas = False
+
+    async def _finalize_progress():
+        nonlocal parts, has_deltas
+        raw = "".join(parts).strip()
+        parts = []
+        has_deltas = False
+        if not raw:
+            return
+        completed_text_blocks.append(raw)
+        await _stop_typer(typer)
+        try:
+            converted_text, entities = _md_convert(raw)
+            text, ents = _split_entities(converted_text, entities, TG_MSG_LIMIT)[0]
+            ent_dicts = [e.to_dict() for e in ents] if ents else None
+        except Exception as e:
+            logger.warning(f"telegramify_markdown convert failed: {e}, sending plain")
+            text, ent_dicts = raw[:TG_MSG_LIMIT], None
+        mid = _progress_messages.get(cid)
+        if mid is not None:
+            try:
+                await edit_bot.edit_message_text(
+                    text, chat_id=cid, message_id=mid, parse_mode=None, entities=ent_dicts
+                )
+                return
+            except Exception as e:
+                # Progress is not worth a new push: on flood control skip it.
+                if "message is not modified" in str(e) or _retry_after(e) is not None:
+                    return
+                logger.warning(f"Chat {cid}: progress edit failed, sending anew: {e}")
+        try:
+            m = await _answer(text, parse_mode=None, entities=ent_dicts)
+        except Exception as e:
+            logger.error(f"Chat {cid}: progress send failed: {e}")
+            return
+        if m:
+            _progress_messages[cid] = m.message_id
 
     async def _finalize_status():
         nonlocal status
@@ -702,6 +755,19 @@ async def _ask_inner(message, prompt, cid, typer):
                     continue
                 if ct in ("text_delta", "text", "tool"):
                     turn_had_output = True
+                    if background and progress_turn is None:
+                        progress_turn = _agents_still_running(cid)
+                if progress_turn and ct in ("text_delta", "text", "tool"):
+                    if ct == "tool":
+                        logger.info(f"Chat {cid} progress tool: {chunk.get('name', '?')}")
+                        if parts:
+                            parts.append("\n\n")
+                    elif ct == "text_delta":
+                        has_deltas = True
+                        parts.append(chunk["content"])
+                    elif not has_deltas:
+                        parts.append(chunk["content"])
+                    continue
                 if ct == "text_delta":
                     has_deltas = True
                     await _open_text_block()
@@ -724,6 +790,7 @@ async def _ask_inner(message, prompt, cid, typer):
                         await _finalize_text_block()
                     if status is None:
                         status = ToolStatusTracker(edit_bot, message, cid)
+                        _progress_messages.pop(cid, None)
                     try:
                         _ti_short = json.dumps(tool_input, ensure_ascii=False)[:400]
                     except Exception:
@@ -734,9 +801,14 @@ async def _ask_inner(message, prompt, cid, typer):
                     if status is not None:
                         await status.complete_current()
                 elif ct == "turn_done":
-                    if parts:
+                    # A steered user message merged into the turn makes its
+                    # text an answer: that one is pushed as a new message.
+                    if progress_turn and not chunk.get("ours", False):
+                        await _finalize_progress()
+                    elif parts:
                         await _finalize_text_block()
                     await _finalize_status()
+                    progress_turn = None
                     if chunk.get("ours", True):
                         answer_seen = answer_seen or turn_had_output
                     turn_had_output = False
@@ -875,7 +947,10 @@ async def _ask_inner(message, prompt, cid, typer):
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
     if parts:
-        await _finalize_text_block()
+        if progress_turn:
+            await _finalize_progress()
+        else:
+            await _finalize_text_block()
 
     if status is not None:
         if status.tools:

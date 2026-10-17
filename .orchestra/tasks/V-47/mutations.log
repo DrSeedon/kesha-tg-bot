@@ -1,0 +1,4 @@
+KILLED   every notification turn is a new message (pre-V-47) -> 1 failed in 4.23s
+KILLED   progress message never reused -> 1 failed in 4.37s
+KILLED   background agent's tools reach the bubble (pre-V-47) -> 1 failed in 7.27s
+KILLED   answer merged into a progress turn is only an edit -> 1 failed in 3.85s

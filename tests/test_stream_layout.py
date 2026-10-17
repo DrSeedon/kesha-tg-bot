@@ -203,6 +203,9 @@ async def test_subagent_narration_never_reaches_the_user(tmp_path):
     session, client = make_session(tmp_path)
     for msg in (
         _assistant(text="Кеша говорит"),
+        AssistantMessage(
+            content=[ToolUseBlock(id="tu-agent", name="Agent", input={})], model="m"
+        ),
         _assistant(text="I'll research all four directions", parent="tu-agent"),
         _assistant(tool="WebSearch", parent="tu-agent"),
         StreamEvent(
@@ -231,5 +234,5 @@ async def test_subagent_narration_never_reaches_the_user(tmp_path):
 
     texts = [c["content"] for c in chunks if c["type"] in ("text", "text_delta")]
     assert texts == ["Кеша говорит", "Кеша печатает"]
-    # Тулы субагента остаются — это прогресс в пузыре.
-    assert [c["name"] for c in chunks if c["type"] == "tool"] == ["WebSearch"]
+    # Тулы субагента, которого ход ждёт, остаются — это прогресс в пузыре.
+    assert [c["name"] for c in chunks if c["type"] == "tool"] == ["Agent", "WebSearch"]

@@ -1156,10 +1156,13 @@ class ClaudeSession:
                 # Subagent narration ("I'll research all four directions") is
                 # internal: it interleaves with the main agent's own stream and
                 # lands mid-word in the user's chat. Its tool calls still show
-                # up in the status bubble as progress — but only inside a turn:
-                # a background agent working between turns is nobody's bubble.
-                from_subagent = getattr(msg, "parent_tool_use_id", None) is not None
-                if from_subagent and not stream.turn_open:
+                # up in the status bubble as progress — but only while the
+                # turn waits on that agent's call. A background agent's call
+                # already returned: its tools are nobody's bubble, and each one
+                # cut the main text mid-word (prod 18.10.2026: 15 pieces).
+                parent = getattr(msg, "parent_tool_use_id", None)
+                from_subagent = parent is not None
+                if from_subagent and f"tool:{parent}" not in open_work:
                     continue
                 for block in msg.content:
                     if isinstance(block, TextBlock) and block.text:
