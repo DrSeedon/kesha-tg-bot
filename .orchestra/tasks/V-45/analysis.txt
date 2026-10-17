@@ -1,0 +1,61 @@
+== metric: correct  (A = text, B = semantic; per-question mean over repeats)
+hist-P    n=17  A=0.794  B=0.824  d=A-B=-0.029  CI95=[-0.118,+0.059]  p(sem better)=0.500
+notes-P   n=18  A=0.861  B=0.917  d=A-B=-0.056  CI95=[-0.194,+0.056]  p(sem better)=0.375
+pooled-P  n=35  A=0.829  B=0.871  d=A-B=-0.043  CI95=[-0.129,+0.029]  p(sem better)=0.267
+hist-D    n= 3  A=1.000  B=1.000  d=A-B=+0.000  CI95=[+0.000,+0.000]  p(sem better)=1.000
+notes-D   n= 2  A=0.750  B=1.000  d=A-B=-0.250  CI95=[-0.500,+0.000]  p(sem better)=0.500
+== metric: retrieved  (A = text, B = semantic; per-question mean over repeats)
+hist-P    n=17  A=0.735  B=0.794  d=A-B=-0.059  CI95=[-0.294,+0.176]  p(sem better)=0.406
+notes-P   n=18  A=0.889  B=0.944  d=A-B=-0.056  CI95=[-0.139,+0.000]  p(sem better)=0.250
+pooled-P  n=35  A=0.814  B=0.871  d=A-B=-0.057  CI95=[-0.171,+0.057]  p(sem better)=0.246
+hist-D    n= 3  A=0.667  B=0.667  d=A-B=+0.000  CI95=[+0.000,+0.000]  p(sem better)=1.000
+notes-D   n= 2  A=1.000  B=1.000  d=A-B=+0.000  CI95=[+0.000,+0.000]  p(sem better)=1.000
+== cost / behaviour (mean per run)
+A runs 80 rc!=0 0 outside_cwd 0 search 3.75 read 0.99 paid_tok 9214 sec 14.9 api$ 0.05
+B runs 80 rc!=0 0 outside_cwd 0 search 2.27 read 0.09 paid_tok 9831 sec 15.8 api$ 0.047
+pure hybrid hist-P {'top5': 0.529, 'top10': 0.706}
+pure hybrid notes-P {'top5': 0.444, 'top10': 0.611}
+pure hybrid pooled-P {'top5': 0.486, 'top10': 0.657}
+pure hybrid hist-D {'top5': 0.667, 'top10': 0.667}
+pure hybrid notes-D {'top5': 1.0, 'top10': 1.0}
+== per-question (correct A/B, retrieved A/B)
+M01 P 1.0 1.0 1.0 1.0
+M02 P 1.0 1.0 1.0 1.0
+M03 P 0.0 0.0 1.0 0.0
+M04 P 1.0 1.0 1.0 1.0
+M06 P 0.5 0.0 1.0 1.0
+M07 P 1.0 1.0 1.0 1.0
+M08 P 1.0 1.0 0.5 1.0
+M09 P 1.0 1.0 1.0 0.0
+M10 P 1.0 1.0 1.0 1.0
+M12 P 0.5 1.0 0.5 1.0
+M13 P 0.0 0.0 0.0 0.0
+M14 P 1.0 1.0 1.0 1.0
+M15 P 1.0 1.0 1.0 1.0
+M16 P 1.0 1.0 0.0 0.5
+M17 P 1.0 1.0 0.0 1.0
+M18 P 1.0 1.0 1.0 1.0
+M19 D 1.0 1.0 1.0 1.0
+M20 P 0.5 1.0 0.5 1.0
+M21 D 1.0 1.0 1.0 1.0
+M22 D 1.0 1.0 0.0 0.0
+F01 P 1.0 1.0 0.5 1.0
+F02 P 1.0 1.0 1.0 1.0
+F03 P 0.0 1.0 0.5 1.0
+F04 P 1.0 1.0 1.0 1.0
+F05 P 1.0 1.0 1.0 1.0
+F06 P 1.0 1.0 0.0 0.0
+F07 P 1.0 1.0 1.0 1.0
+F08 P 1.0 1.0 1.0 1.0
+F09 P 1.0 1.0 1.0 1.0
+F10 P 0.0 0.0 1.0 1.0
+F11 P 1.0 1.0 1.0 1.0
+F12 P 1.0 0.5 1.0 1.0
+F13 P 1.0 1.0 1.0 1.0
+F14 P 0.5 1.0 1.0 1.0
+F15 P 1.0 1.0 1.0 1.0
+F16 D 1.0 1.0 1.0 1.0
+F17 P 1.0 1.0 1.0 1.0
+F18 P 1.0 1.0 1.0 1.0
+F19 D 0.5 1.0 1.0 1.0
+F20 P 1.0 1.0 1.0 1.0

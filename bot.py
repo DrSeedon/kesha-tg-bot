@@ -4,7 +4,6 @@ import asyncio
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +38,6 @@ from tool_bridge import ToolBridge, issue_token
 import reminders as _reminders
 import compact as _compact
 import inbox_server as _inbox
-import rag as _rag
 
 import file_access as _file_access
 import telegram_io as _tio
@@ -121,8 +119,6 @@ def _acquire_singleton_lock():
 
 
 _singleton_lock_fp = None
-_rag_executor: Optional[ThreadPoolExecutor] = None
-_rag_read_executor: Optional[ThreadPoolExecutor] = None
 
 
 async def main():
@@ -166,53 +162,6 @@ async def main():
     _media.cleanup_logs()
     asyncio.create_task(_media.daily_cleanup_loop())
 
-    # RAG semantic memory — два потока: write (index/backfill, RW conn) и read (search, RO conn).
-    # WAL → search не ждёт backfill (иначе search висел 300с в очереди за embed-батчами). #10-opt
-    global _rag_executor, _rag_read_executor
-    _rag_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-w")
-    _rag_read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-r")
-    _rag.set_executor(_rag_executor, _rag_read_executor)
-    loop = asyncio.get_running_loop()
-    rag_queue: asyncio.Queue = asyncio.Queue()
-
-    async def _rag_worker():
-        while True:
-            mid, cid, role, content = await rag_queue.get()
-            try:
-                await _rag.run(loop, "index_message", mid, cid, role, content)
-            except Exception as e:
-                logger.error(f"RAG index failed (id={mid}): {e}")
-            finally:
-                rag_queue.task_done()
-    asyncio.create_task(_rag_worker())
-
-    def _enqueue_index(mid, cid, role, c):
-        loop.call_soon_threadsafe(rag_queue.put_nowait, (mid, cid, role, c))
-    _msg_db().set_on_message(_enqueue_index)
-    asyncio.ensure_future(_rag.run(loop, "backfill"))
-
-    # RAG file indexing (task #10) — knowledge base (cog-second-brain) → same rag_executor.
-    # backfill on startup (non-blocking) + live watchfiles watcher.
-    asyncio.ensure_future(_rag.run(loop, "backfill_files"))
-
-    async def _file_watcher():
-        from watchfiles import awatch, Change
-        root = _rag.KNOWLEDGE_DIR
-        try:
-            async for changes in awatch(str(root)):
-                for change, raw_path in changes:
-                    rel = _rag.file_change_target(raw_path, root)
-                    if rel is None:
-                        continue
-                    deleted = change == Change.deleted
-                    try:
-                        await _rag.run(loop, "apply_file_change", deleted, rel, raw_path)
-                    except Exception as e:
-                        logger.error(f"RAG file change failed ({rel}): {e}")
-        except Exception as e:
-            logger.error(f"RAG file watcher stopped: {e}", exc_info=True)
-    asyncio.create_task(_file_watcher())
-
     await _handlers.set_commands(bot)
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL}")
     logger.info(f"Allowed: {ALLOWED or 'all'}")
@@ -249,10 +198,6 @@ async def main():
     finally:
         await tool_bridge.stop()
         await registry.shutdown()
-        if _rag_executor:
-            _rag_executor.shutdown(wait=False)
-        if _rag_read_executor:
-            _rag_read_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

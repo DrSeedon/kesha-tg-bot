@@ -39,7 +39,7 @@ One chat = one agent process with a persistent session. Like chatting in a Claud
 - **Persistent connection** — the client stays alive between messages
 - **Night-only auto-compaction** — automatic compaction runs in the 23:00–08:00 window; during the day a fail-closed context reserve admits a message only if enough context is left
 - **Context reserve** — a message is never sent into a context that cannot hold the answer; the refusal names the real reason instead of failing silently
-- **RAG semantic memory** — hybrid search (bge-m3 int8 + sqlite-vec + FTS5) over both the dialogue history and `.md`/`.txt` knowledge-base files, live-updated by a filesystem watcher
+- **Text memory search** — `search_memory` (regex over the chat history, ids + snippets) and `read_messages`; notes are searched by the agent itself with `rg`/Grep, guided by the system prompt (no embeddings)
 - **Reminders** — 3 types: `plain` (alarm/buzzer, raw text), `urgent_llm` (task for the bot at a specific time — check servers, read mail, etc.), `lazy_llm` (silent note injected on next user message). Persistent SQLite, repeat intervals, missed delivery on startup, TTL auto-promotion, retry 3x with backoff
 - **Reactions** — emoji reactions on messages via MCP tool
 - **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, reminders (CRUD), search_memory, self-config, run_on_laptop
@@ -105,7 +105,7 @@ python bot.py
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | **required** |
 | `ALLOWED_USERS` | Telegram user IDs, comma-separated | all |
 | `CLAUDE_MODEL` | Claude model | claude-opus-5 |
-| `WORK_DIR` | Working directory (with CLAUDE.md, also the RAG knowledge base) | `.` (current) |
+| `WORK_DIR` | Working directory (with CLAUDE.md, also the notes knowledge base) | `.` (current) |
 | `KESHA_RUNTIME` | Startup runtime: `claude` or `codex` | claude |
 | `KESHA_CODEX_MODEL` | Model for the Codex runtime | gpt-5.6-sol |
 | `KESHA_CODEX_BIN` | Path to the `codex` binary | autodetected |
@@ -153,7 +153,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - `file_access.py` — whitelist + TOCTOU-safe reads for outgoing files
 - `kesha_tools.py` — MCP tools (media, reactions, reminders CRUD, search_memory, self-config)
 - `compact.py` — context compaction (summarize → reset → continue)
-- `rag.py` — semantic memory over dialogues and knowledge-base files
+- `memory_search.py` — text search over the chat history
 - `reminders.py`, `message_log.py`, `media.py`, `telegram_io.py`, `tool_status.py` — supporting modules
 - `system_prompt.txt` — the bot's TG context and formatting rules
 
@@ -163,8 +163,6 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - aiogram 3.28+ + aiogram-media-group
 - claude-agent-sdk 0.2.128+ (official Anthropic)
 - Codex CLI (`codex app-server`) — optional, only for the second runtime
-- fastembed (bge-m3 int8) + sqlite-vec + FTS5 — RAG
-- watchfiles — knowledge-base watcher
 - Deepgram Nova-2 (STT)
 - ffmpeg (video note audio extraction)
 
@@ -203,7 +201,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - **Persistent connection** — клиент держится между сообщениями
 - **Автокомпакт только ночью** — автоматическое сжатие работает в окне 23:00–08:00, днём сообщение пропускается только если хватает резерва контекста (fail-closed)
 - **Резерв контекста** — сообщение не уходит в контекст, который не вместит ответ; отказ называет настоящую причину, а не молчит
-- **RAG семантическая память** — гибридный поиск (bge-m3 int8 + sqlite-vec + FTS5) по истории диалогов И по файлам `.md`/`.txt` базы знаний, индекс обновляется вотчером в реальном времени
+- **Текстовый поиск по памяти** — `search_memory` (regex по истории чата, id + фрагменты) и `read_messages`; заметки Кеша ищет сам через `rg`/Grep по подсказке системного промпта (без эмбеддингов)
 - **Напоминания** — 3 типа: `plain` (будильник, чистый текст), `urgent_llm` (задание для бота в конкретное время — проверить сервер, почту и т.д.), `lazy_llm` (тихая заметка, вклеивается при следующем сообщении). Persistent SQLite, повторы, доставка пропущенных при старте, автопромоушен по TTL, retry 3x с backoff
 - **Реакции** — эмодзи-реакции на сообщения через MCP tool
 - **MCP tools** — send_photo, send_file, send_video, send_audio, send_voice, react, напоминания (CRUD), search_memory, самонастройка, run_on_laptop
@@ -269,7 +267,7 @@ python bot.py
 | `TELEGRAM_BOT_TOKEN` | Токен бота из @BotFather | **обязательно** |
 | `ALLOWED_USERS` | Telegram user IDs через запятую | все |
 | `CLAUDE_MODEL` | Модель Claude | claude-opus-5 |
-| `WORK_DIR` | Рабочая директория (с CLAUDE.md, она же база знаний для RAG) | `.` (текущая) |
+| `WORK_DIR` | Рабочая директория (с CLAUDE.md, она же база знаний) | `.` (текущая) |
 | `KESHA_RUNTIME` | Рантайм при старте: `claude` или `codex` | claude |
 | `KESHA_CODEX_MODEL` | Модель для рантайма Codex | gpt-5.6-sol |
 | `KESHA_CODEX_BIN` | Путь к бинарю `codex` | автоопределение |
@@ -308,7 +306,7 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - `file_access.py` — whitelist и TOCTOU-безопасное чтение для исходящих файлов
 - `kesha_tools.py` — MCP tools (медиа, реакции, напоминания CRUD, search_memory, самонастройка)
 - `compact.py` — сжатие контекста (выжимка → reset → продолжение)
-- `rag.py` — семантическая память по диалогам и файлам базы знаний
+- `memory_search.py` — текстовый поиск по истории чата
 - `reminders.py`, `message_log.py`, `media.py`, `telegram_io.py`, `tool_status.py` — вспомогательные модули
 - `system_prompt.txt` — TG-контекст и правила форматирования для бота
 
@@ -318,7 +316,5 @@ Telegram → Aiogram 3 → handlers.py → chat_state.py → runtime_registry.py
 - aiogram 3.28+ + aiogram-media-group
 - claude-agent-sdk 0.2.128+ (официальный Anthropic)
 - Codex CLI (`codex app-server`) — опционально, только для второго рантайма
-- fastembed (bge-m3 int8) + sqlite-vec + FTS5 — RAG
-- watchfiles — вотчер базы знаний
 - Deepgram Nova-2 (STT)
 - ffmpeg (извлечение аудио из кружочков)

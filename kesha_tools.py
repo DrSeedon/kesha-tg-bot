@@ -10,6 +10,7 @@ from pathlib import Path
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
+import memory_search
 import reminders as _rem
 from file_access import FileNotAllowed, open_sendable
 
@@ -282,44 +283,38 @@ async def update_reminder(args):
 
 
 @tool("search_memory",
-      "Semantic search across the ENTIRE knowledge base: dialog history AND the user's file notes "
-      "(cog-second-brain — diaries, daily dumps, projects). Survives context compaction/reset. "
-      "Use when the user references the past ('помнишь', 'что я говорил про…', 'мы обсуждали') or "
-      "asks about their notes/knowledge. Do NOT call on every message — only when memory is needed. "
-      "Results are tagged: [file: path] for notes, [timestamp | role] for dialog. "
-      "query: what to find (natural language). role: optional filter 'user'/'assistant' "
-      "(filters dialog messages by role; files are always searched). limit: max results (default 5).",
-      {"query": str, "limit": int, "role": str})
+      "Text search (like grep) over the chat history of THIS chat: case-insensitive regex over message text. "
+      "It matches characters, not meaning - you choose the words the original message likely used: word stems "
+      "and alternations, e.g. `фиолетов|сиренев`, identifiers, numbers, names. Results: `[id | time | role] snippet`, "
+      "newest first, with the total match count. Too many hits -> add a second word or since/until; none -> try "
+      "another word form or synonym. Notes (markdown files) are NOT searched here - use Grep/Glob/Read (or rg) on the "
+      "working directory. Survives context compaction/reset. Do NOT call on every message - only when memory is needed. "
+      "pattern: regex. role: optional 'user'/'assistant'. since/until: YYYY-MM-DD. limit: default 10, max 30.",
+      {"pattern": str, "role": str, "since": str, "until": str, "limit": int})
 async def search_memory(args):
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id
-    query = (args.get("query") or "").strip()
-    if not query:
-        return {"content": [{"type": "text", "text": "query is required"}], "is_error": True}
-    try:
-        limit = min(max(int(args.get("limit") or 5), 1), 20)
-    except (TypeError, ValueError):
-        limit = 5
-    role = args.get("role") or None
-    try:
-        import rag
-        loop = asyncio.get_running_loop()
-        rows = await rag.run(loop, "search", chat_id, query, limit, role)
-    except Exception as e:
-        logger.error(f"search_memory failed, fallback to LIKE: {e}", exc_info=True)
-        from message_log import get_db
-        rows = [dict(r) for r in get_db().search(chat_id, query, limit)]
-    if not rows:
-        return {"content": [{"type": "text", "text": "No matches in history"}]}
+    import message_log
+    text = await asyncio.to_thread(
+        memory_search.search_history, message_log.DB_PATH, chat_id, args.get("pattern") or "",
+        args.get("role") or None, args.get("since") or None, args.get("until") or None, args.get("limit") or 10)
+    return {"content": [{"type": "text", "text": text}]}
 
-    def _fmt(r):
-        # file результат → [file: rel/path]; диалог (или LIKE-фолбэк без source) → [ts | role]
-        if r.get("source") == "file":
-            return f"[file: {r['path']}] {r['content']}"
-        return f"[{r['timestamp']} | {r['role']}] {r['content']}"
-    lines = [_fmt(r) for r in rows]
-    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+@tool("read_messages",
+      "Read a chat message in full by id (ids come from search_memory) plus `before`/`after` neighbouring "
+      "messages of the same chat (default 2 and 2, max 10).",
+      {"id": int, "before": int, "after": int})
+async def read_messages(args):
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
+    import message_log
+    text = await asyncio.to_thread(
+        memory_search.read_messages, message_log.DB_PATH, chat_id, int(args.get("id") or 0),
+        2 if args.get("before") is None else args["before"], 2 if args.get("after") is None else args["after"])
+    return {"content": [{"type": "text", "text": text}]}
 
 
 @tool("send_video", "Send a video to the user in Telegram (with player/preview)", {"path": str, "caption": str})
@@ -542,7 +537,7 @@ async def run_on_laptop(args):
 ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_photo, send_file, send_video, send_audio, send_voice, react,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
-             search_memory, run_on_laptop]
+             search_memory, read_messages, run_on_laptop]
 
 # run_on_laptop shells out over SSH to the user's machine and still awaits its
 # own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.

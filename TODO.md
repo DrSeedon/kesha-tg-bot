@@ -18,7 +18,6 @@
 - [ ] **Мост Кеша↔Orchestra** (запрос Александра, НЕ срочно) — дать боту дёргать Orchestra-агентов
 - [ ] **Ozon фильтры** — бренд/тип телескопа/etc в ozon_search. Фасеты есть в raw JSON (research #9 подтвердил), category-dynamic. Medium effort
 - [ ] **Inject batching** — при множественных inject'ах за <500ms склеивать в один query
-- [ ] **RAG diary-templates шум** — 1061 near-empty дневник может засорять retrieval (skip-empty guard ловит большинство). Мониторить, при нужде — min-real-chars порог
 - [ ] Inline кнопки для частых действий
 - [ ] Webhook вместо polling
 - [ ] Rate limiting per-user

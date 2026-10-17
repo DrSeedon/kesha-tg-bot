@@ -52,7 +52,7 @@ def test_dangerous_tools_are_not_exposed_yet():
     names = {t.name for t in bridge_tools()}
     assert BRIDGE_EXCLUDED == {"run_on_laptop"}
     assert not (names & BRIDGE_EXCLUDED)
-    assert len(names) == 15
+    assert len(names) == 16
 
 
 @pytest.mark.parametrize(
@@ -71,8 +71,8 @@ def test_path_taking_tools_are_gated(tool_name):
 
 
 def test_all_tools_accounted_for():
-    assert len(ALL_TOOLS) == 16
-    assert len(bridge_tools()) + len(BRIDGE_EXCLUDED) == 16
+    assert len(ALL_TOOLS) == 17
+    assert len(bridge_tools()) + len(BRIDGE_EXCLUDED) == 17
 
 
 @pytest.mark.parametrize("tool", bridge_tools(), ids=lambda t: t.name)
@@ -119,7 +119,7 @@ async def test_chat_resolved_server_side_not_from_args(bridge, monkeypatch):
 
     monkeypatch.setitem(bridge._handlers, "search_memory", fake_search)
     resp = await _call(
-        bridge, "search_memory", {"query": "hi"}, session=issue_session(4242)
+        bridge, "search_memory", {"pattern": "hi"}, session=issue_session(4242)
     )
     assert resp.status == 200
     assert seen["chat"] == 4242

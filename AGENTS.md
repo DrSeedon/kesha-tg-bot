@@ -24,8 +24,8 @@ Telegram (Aiogram 3) → handlers.py → chat_state.py (ChatState) → response_
 | **compact.py** | ~140 | Context compaction (summarize → reset → continue) |
 | **kesha_tools.py** | ~400 | MCP tools: send_media, reminders, config, search_memory, run_on_laptop |
 | **reminders.py** | ~360 | SQLite reminders (plain/urgent_llm/lazy_llm) |
-| **message_log.py** | ~80 | SQLite full message logging (user+assistant), on_message callback for RAG |
-| **rag.py** | ~730 | RAG semantic memory: bge-m3 int8 + sqlite-vec + FTS5 + chunking. Диалоги + ФАЙЛЫ (.md/.txt heading-aware), watchfiles watcher, RO/RW executor split |
+| **message_log.py** | ~80 | SQLite full message logging (user+assistant) |
+| **memory_search.py** | ~70 | Текстовый поиск по истории (regex по messages.db, read-only conn на вызов), без эмбеддингов |
 
 ### ChatState — центр per-chat state
 
@@ -64,7 +64,7 @@ IDLE → COLLECTING → PROCESSING → IDLE
 - `set_debounce`, `toggle_debug`, `get_bot_status`, `restart_bot`
 - `send_photo`, `send_file`, `send_video`, `send_audio`, `send_voice`
 - `create_reminder`, `list_reminders`, `cancel_reminder`, `update_reminder`
-- `search_memory` — RAG семантический поиск по всей истории диалогов (bge-m3 int8 + sqlite-vec + FTS5 hybrid)
+- `search_memory` — текстовый (regex) поиск по истории чата, `read_messages` — сообщение с соседями; заметки ищет сам Кеша через rg/Grep (V-45)
 - `run_on_laptop` — SSH команды на ноуте через reverse tunnel (whitelist)
 - Context compaction is automatic (95% threshold) and via /compact command — no MCP tool
 - `react` — emoji reactions
@@ -152,7 +152,7 @@ ssh root@158.220.127.161 "systemctl status kesha-bot-vps --no-pager | head -8"
 
 ## Session notes (2026-06-27)
 
-### RAG Memory — полная хронология
+### RAG Memory — историческая хронология (RAG удалён в V-45, 2026-10-17: поиск по тексту; замер — .orchestra/tasks/V-45/report.md)
 - v2.3.0: MiniLM + sqlite-vec + FTS5 hybrid → качество 2.2/5
 - v2.3.1: e5-large int8 (561MB) → OOM на VPS 2.9GB → mpnet тоже OOM → откат на MiniLM
 - v2.3.2: e5-small int8 (Xenova/multilingual-e5-small, 118MB, ONNX) + batch_size=16 + arena-off → качество 4.3/5, RAM стабильный
