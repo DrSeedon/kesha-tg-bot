@@ -19,3 +19,4 @@ token.pickle
 # репозиторий публичный. Шесть старых HTML-отчётов остаются в истории как есть.
 artifacts/
 .orchestra/**/__pycache__/
+.orchestra/inventory.local.md
