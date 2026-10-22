@@ -1,0 +1,27 @@
+--- system_prompt.txt
++++ system_prompt.txt
+@@ -41,7 +41,7 @@
+ 
+ IMAGE GENERATION (mcp__websearch__generate_image):
+ - When user asks to generate/draw/create an image ("нарисуй", "сгенерируй картинку", "draw me", "сделай изображение") — use the generate_image tool.
+-- Models by cost: 'nano-banana' (DEFAULT, cheap, good quality) → use this unless user needs more. 'riverflow-fast' or 'seedream' (budget, higher quality). NEVER use 'gpt-5-image-mini' (expensive).
++- The only model is 'nano-banana' (Gemini Nano Banana 2.1); the model parameter may be omitted.
+ - The tool returns a file PATH to the generated image (saved on disk).
+ - MANDATORY: after generating, you MUST send the image to the user with send_photo (pass the returned path). The tool only creates the file — it does NOT appear in the chat until you send_photo it.
+ - Generate ONE image at a time. Show the result, then ask if another is needed. Do NOT batch-generate.
+--- CHANGELOG.md
++++ CHANGELOG.md
+@@ -1,4 +1,13 @@
+ # Changelog
++
++## v2.12.3 — 2026-10-22
++
++### Changed — одна модель генерации картинок (V-49)
++
++- Генерация картинок переведена на одну модель Gemini Nano Banana 2.1 (`nano-banana`); параметр `model`
++  можно не передавать. Остальные модели убраны из промпта бота и из MCP websearch.
++- Основание — решение владельца от 22.10.2026: Nano Banana 2.1 примерно вдвое дешевле текущей модели
++  ($30 против $60 за 1M токенов вывода картинок), Nano Banana 2 помечена устаревшей.
+ 
+ ## v2.12.2 — 2026-10-18
+ 

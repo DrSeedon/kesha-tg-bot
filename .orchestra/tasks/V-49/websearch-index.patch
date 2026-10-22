@@ -1,0 +1,72 @@
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -69 +69 @@
+-      description: 'Generate or edit an image via OpenRouter. Can create from text prompt, or edit/modify an existing image by providing reference_image path. Cost: ~$0.07/image (nano-banana, default), ~$0.04 (nano-banana-lite).',
++      description: 'Generate or edit an image via OpenRouter. Can create from text prompt, or edit/modify an existing image by providing reference_image path. Single model: nano-banana (Gemini Nano Banana 2.1), ~$0.034/image at 1K.',
+@@ -82,4 +82,4 @@
+           model: {
+             type: 'string',
+-            description: 'Image model ID. Short aliases: nano-banana (DEFAULT, $0.07/img, Gemini 3.1 Flash Image), nano-banana-lite (cheap $0.04/img, Gemini 3.1 Flash Lite), riverflow-fast, seedream, flux-klein. Or any OpenRouter model ID. Default: nano-banana.'
++            description: 'Optional. Only nano-banana (Gemini Nano Banana 2.1) is allowed; any other value is rejected. Default: nano-banana.'
+           },
+@@ -102,10 +102,3 @@
+ const MODEL_MAP = {
+-  'nano-banana': 'google/gemini-3.1-flash-image-preview',
+-  'nano-banana-lite': 'google/gemini-3.1-flash-lite-image',
+-  'riverflow-fast': 'sourceful/riverflow-v2-fast',
+-  'riverflow-pro': 'sourceful/riverflow-v2-pro',
+-  'riverflow-max': 'sourceful/riverflow-v2-max-preview',
+-  'flux-klein': 'black-forest-labs/flux-2-klein',
+-  'flux-max': 'black-forest-labs/flux-2-max',
+-  'seedream': 'bytedance-seed/seedream-4.5',
++  'nano-banana': 'google/gemini-nano-banana-2.1',
+ };
+@@ -124,9 +117,17 @@
+ const SEARCH_ALLOWED = new Set(['sonar', 'sonar-pro-search']);
++
++function resolveImageModel(raw) {
++  const model = raw === undefined || raw === '' ? 'nano-banana' : raw;
++  if (model !== 'nano-banana' && model !== MODEL_MAP['nano-banana']) {
++    return { error: 'unknown image model. Allowed: nano-banana' };
++  }
++  return { modelFull: MODEL_MAP['nano-banana'] };
++}
+ 
+ function resolveSearchModel(raw) {
+   const short = String(raw || 'sonar').replace(/^perplexity\//, '');
+   if (!SEARCH_ALLOWED.has(short)) {
+     return { error: `unknown search model. Allowed: sonar, sonar-pro-search` };
+   }
+   return { short };
+ }
+@@ -248,5 +249,8 @@
+ async function handleGenerateImage(args) {
+   const prompt = args.prompt;
+-  const modelShort = args.model || 'nano-banana';
+-  const modelFull = MODEL_MAP[modelShort] || (modelShort.includes('/') ? modelShort : MODEL_MAP['nano-banana']);
++  const resolved = resolveImageModel(args.model);
++  if (resolved.error) {
++    return { content: [{ type: 'text', text: `Error: ${resolved.error}` }] };
++  }
++  const modelFull = resolved.modelFull;
+   const aspectRatio = args.aspect_ratio || '1:1';
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -53,4 +53 @@
+-| `nano-banana` | Дефолт, хорошее качество |
+-| `nano-banana-lite` | Бюджетный вариант |
+-| `riverflow-fast` / `riverflow-pro` / `riverflow-max` | Альтернативный движок, от быстрого к качественному |
+-| `seedream` | Ещё один вариант стиля |
++| `nano-banana` | Gemini Nano Banana 2.1, единственная модель |
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,6 @@
+ node_modules/
+ generated/
+ *.log
+ .env
+ .env.local
++index.js.bak-*

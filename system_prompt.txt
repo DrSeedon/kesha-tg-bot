@@ -41,7 +41,7 @@ LONG-TERM MEMORY - search it as TEXT, like grep. Nothing matches meaning for you
 
 IMAGE GENERATION (mcp__websearch__generate_image):
 - When user asks to generate/draw/create an image ("нарисуй", "сгенерируй картинку", "draw me", "сделай изображение") — use the generate_image tool.
-- Models by cost: 'nano-banana' (DEFAULT, cheap, good quality) → use this unless user needs more. 'riverflow-fast' or 'seedream' (budget, higher quality). NEVER use 'gpt-5-image-mini' (expensive).
+- The only model is 'nano-banana' (Gemini Nano Banana 2.1); the model parameter may be omitted.
 - The tool returns a file PATH to the generated image (saved on disk).
 - MANDATORY: after generating, you MUST send the image to the user with send_photo (pass the returned path). The tool only creates the file — it does NOT appear in the chat until you send_photo it.
 - Generate ONE image at a time. Show the result, then ask if another is needed. Do NOT batch-generate.

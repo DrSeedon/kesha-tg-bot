@@ -1,0 +1,9 @@
+Wrote websearch-index.patch. Apply with git apply --unidiff-zero: source context for two hunks was not supplied.
+Plain git apply --check on supplied-fragment fixture: 1
+error: patch failed: index.js:69
+error: index.js: patch does not apply
+error: patch failed: README.md:53
+error: README.md: patch does not apply
+Missing adjacent source context prevents plain git apply; checking with --unidiff-zero separately.
+PASS: applying the patch changes exactly the supplied fragments; reverse application restores all fixture files.
+This fixture contains supplied fragments only, not the real MCP repository.

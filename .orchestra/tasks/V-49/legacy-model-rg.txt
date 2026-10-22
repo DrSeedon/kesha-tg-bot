@@ -1,0 +1,4 @@
+Command: rg -n -i --hidden --no-ignore --glob '!CHANGELOG.md' --glob '!.orchestra/tasks/**' --glob '!.git/**' 'riverflow|seedream|gpt-5-image|nano-banana-lite|flux' .
+stdout: <empty>
+stderr: <empty>
+Exit status: 1 (no matches).

@@ -1,0 +1,28 @@
+| Input | Resolver result | Fetch calls |
+|---|---|---|
+| undefined | google/gemini-nano-banana-2.1 | 1 |
+| '' | google/gemini-nano-banana-2.1 | 1 |
+| nano-banana | google/gemini-nano-banana-2.1 | 1 |
+| google/gemini-nano-banana-2.1 | google/gemini-nano-banana-2.1 | 1 |
+| nano-banana-lite | Error: unknown image model. Allowed: nano-banana | 0 |
+| riverflow-fast | Error: unknown image model. Allowed: nano-banana | 0 |
+| riverflow-pro | Error: unknown image model. Allowed: nano-banana | 0 |
+| riverflow-max | Error: unknown image model. Allowed: nano-banana | 0 |
+| seedream | Error: unknown image model. Allowed: nano-banana | 0 |
+| flux-klein | Error: unknown image model. Allowed: nano-banana | 0 |
+| flux-max | Error: unknown image model. Allowed: nano-banana | 0 |
+| gpt-5-image-mini | Error: unknown image model. Allowed: nano-banana | 0 |
+| google/gemini-3.1-flash-image-preview | Error: unknown image model. Allowed: nano-banana | 0 |
+| google/gemini-3.1-flash-lite-image | Error: unknown image model. Allowed: nano-banana | 0 |
+| openai/arbitrary | Error: unknown image model. Allowed: nano-banana | 0 |
+| unknown | Error: unknown image model. Allowed: nano-banana | 0 |
+|  nano-banana  | Error: unknown image model. Allowed: nano-banana | 0 |
+| __proto__ | Error: unknown image model. Allowed: nano-banana | 0 |
+| constructor | Error: unknown image model. Allowed: nano-banana | 0 |
+| toString | Error: unknown image model. Allowed: nano-banana | 0 |
+| null | Error: unknown image model. Allowed: nano-banana | 0 |
+| false | Error: unknown image model. Allowed: nano-banana | 0 |
+| 0 | Error: unknown image model. Allowed: nano-banana | 0 |
+| {} | Error: unknown image model. Allowed: nano-banana | 0 |
+| [] | Error: unknown image model. Allowed: nano-banana | 0 |
+PASS: 25 resolver and handler-guard cases, plus omitted-model edit arguments. The full MCP handler and network are not exercised.
