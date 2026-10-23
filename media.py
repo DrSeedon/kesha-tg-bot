@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -117,6 +118,53 @@ def _save_transcription_cache():
 _transcription_cache = _load_transcription_cache()
 
 
+# Deepgram recommends ~0.65 for high-precision error detection:
+# https://developers.deepgram.com/docs/confidence
+LOW_WORD_CONFIDENCE = 0.65
+UNCERTAIN_TRANSCRIPT_HEADER = "[Расшифровка содержит неуверенно распознанные слова: [?]]"
+
+
+def _format_transcript(alternative: dict) -> str:
+    """Annotate word confidence without replacing Deepgram's best guess."""
+    text = alternative["transcript"]
+    words = alternative.get("words") or []
+    uncertain = [
+        isinstance(word.get("confidence"), (int, float))
+        and not isinstance(word["confidence"], bool)
+        and 0 <= word["confidence"] < LOW_WORD_CONFIDENCE
+        for word in words
+    ]
+    if not text or not any(uncertain):
+        return text
+
+    # Prefer the provider's formatted tokens (casing, punctuation, numerals).
+    # Keep the original whitespace when tokens align with the transcript.
+    tokens = [word.get("punctuated_word") or word["word"] for word in words]
+    marked = []
+    for token, low_confidence in zip(tokens, uncertain):
+        if low_confidence:
+            # Place the marker before closing quotes and sentence punctuation.
+            token = re.sub(r"(\W*)$", r"[?]\1", token, count=1)
+        marked.append(token)
+
+    pieces = []
+    cursor = 0
+    for token, annotated in zip(tokens, marked):
+        match = re.compile(r"(?<!\w)" + re.escape(token) + r"(?!\w)").search(text, cursor)
+        if match is None:
+            # Smart Format may combine spoken words into an entity. In that
+            # case retain every word and its marker, rather than guess a span.
+            body = " ".join(marked)
+            break
+        start = match.start()
+        pieces.extend((text[cursor:start], annotated))
+        cursor = start + len(token)
+    else:
+        pieces.append(text[cursor:])
+        body = "".join(pieces)
+    return f"{UNCERTAIN_TRANSCRIPT_HEADER}\n{body}"
+
+
 async def transcribe(path: str, unique_id: str = "") -> tuple[str, str | None]:
     if unique_id and unique_id in _transcription_cache:
         cached = _transcription_cache[unique_id]
@@ -144,7 +192,8 @@ async def transcribe(path: str, unique_id: str = "") -> tuple[str, str | None]:
             return "", data["error"]
         if "err_msg" in data:
             return "", data["err_msg"]
-        text = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        alternative = data["results"]["channels"][0]["alternatives"][0]
+        text = _format_transcript(alternative)
         duration = data.get("metadata", {}).get("duration", 0)
         cost = duration / 60 * 0.0043
         logger.info(f"Deepgram: {duration:.1f}s, ${cost:.4f}, {len(text)} chars")

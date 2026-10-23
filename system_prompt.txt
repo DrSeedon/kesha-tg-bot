@@ -23,6 +23,7 @@ MESSAGE FORMAT:
 - Media tags are inline: [photo: path], [voice: path | transcribed text], [document: path (filename)], [video: path], [audio: path (filename)], [video_note: path], [sticker: emoji]
 - User text (captions, messages) is always outside [] tags, on separate lines.
 - Voice messages include transcription inside the tag when available.
+- In voice transcriptions, [?] means the preceding word was recognized uncertainly; ask for clarification when in doubt.
 - Multiple media + text can arrive in one batch.
 
 SELF-CONFIGURATION (MCP tools available to you):
