@@ -1,0 +1,22 @@
+claude-agent-sdk: 0.2.158
+mcp: 1.28.1
+Bundled CLI: 2.1.280 (Claude Code)
+
+Actual CLI hard timeout / idle timeout functions:
+function nr(e){let r=(e?.timeout!==void 0&&e.timeout>=1000?e.timeout:void 0)??a.MCP_TOOL_TIMEOUT??as;return Math.min(Math.max(r,1000),ag)}var Ts=300000,Ps=1800000,ws=new Set(["sse-ide","ws-ide","sdk"]);function vs(e){let n=e?.type??"stdio";if(ws.has(n))return 0;let r=a.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT??(n==="stdio"?Ps:Ts);if(r<=0)return 0;let s=e?.timeout!==void 0&&e.timeout>=1000?e.timeout:0;return Math.min(Math.max(r,s,1000),nr(e))}
+Hard timeout default in the same code region: var as=1e8
+Hard timeout default: 100000000 ms = 100000 s
+Stdio idle timeout default: 1800000 ms = 1800 s
+Both defaults exceed 400 s; no bot-side Claude override needed.
+
+Actual CLI timeout field description:
+Per-server tool-call timeout in milliseconds. Overrides the MCP_TOOL_TIMEOUT environment variable for this server. Hard wall-clock limit per call; progress notifications do not extend it. Values below 1000ms are ignored (falls through to MCP_TOOL_TIMEOUT or the default).
+Stdio schema includes timeout:Et(); timeout is a per-server millisecond budget.
+
+Actual SDK child environment construction:
+process_env = {
+                **inherited_env,
+                "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+                **self._options.env,
+                "CLAUDE_AGENT_SDK_VERSION": __version__,
+            }

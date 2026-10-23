@@ -40,6 +40,7 @@ The bot is built around one working directory (`WORK_DIR`): your notes, `CLAUDE.
 | Two runtimes | Claude (default) and Codex, switched by hand with `/runtime`. No automatic failover. |
 | Streaming answers | The reply is sent once and edited live; a separate bubble shows tool calls with timers. |
 | Voice, photos, files | Voice notes and video notes are transcribed (Deepgram, optional); photos, albums, documents, audio and video are downloaded and handed to the agent as files. |
+| Image generation | Uses the optional hub image tool, announces the wait (about a minute) and sends the result as a photo. One paid Nano Banana fallback attempt if the hub is unavailable or fails. |
 | Messages while it works | A message sent mid-turn is steered into the running Claude turn, like typing into Claude Code. On Codex it waits for the next turn. |
 | Context management | The context is measured before every message; the bot compacts it itself before the window fills. |
 | Memory | Chat history is searched as text (`search_memory`, `read_messages`); your notes are searched with `rg`/Grep. No embeddings, no index to rebuild. |

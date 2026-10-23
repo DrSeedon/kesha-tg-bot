@@ -225,3 +225,62 @@ def test_single_link_file_skips_the_scan(rooted):
     allowed, _ = rooted
     path, blob = file_access.open_sendable(str(allowed / "report.pdf"))
     assert blob == b"ok"
+
+
+@pytest.fixture
+def image_roots(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    generated = tmp_path / "orchestra" / "data" / "generated-images"
+    storage.mkdir()
+    generated.mkdir(parents=True)
+    image = generated / "x.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage-test")
+    monkeypatch.setenv("KESHA_SENDABLE_ROOTS", f"{storage}:{generated}")
+    return storage, generated, image
+
+
+def test_configured_external_image_root_is_sendable(image_roots, monkeypatch):
+    storage, generated, image = image_roots
+    assert file_access.open_sendable(str(image)) == (image.resolve(), image.read_bytes())
+    monkeypatch.setenv("KESHA_SENDABLE_ROOTS", str(storage))
+    with pytest.raises(FileNotAllowed, match="outside the allowed"):
+        file_access.open_sendable(str(image))
+
+
+def test_image_links_between_allowed_roots_are_sendable(image_roots):
+    storage, _, image = image_roots
+    hardlink = storage / "copy.png"
+    os.link(image, hardlink)
+    symlink = storage / "preview.png"
+    symlink.symlink_to(image)
+    for path in (image, hardlink, symlink):
+        assert file_access.open_sendable(str(path))[1] == image.read_bytes()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_external_image_root_rejects_links_outside(image_roots, tmp_path, kind):
+    _, generated, _ = image_roots
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"private-test")
+    link = generated / "linked.png"
+    if kind == "symlink":
+        link.symlink_to(outside)
+    else:
+        os.link(outside, link)
+    with pytest.raises(FileNotAllowed):
+        file_access.open_sendable(str(link))
+
+
+@pytest.mark.parametrize("alias", ["symlink", "overlapping_root"])
+def test_image_hardlink_scan_cannot_double_count_names(image_roots, tmp_path, monkeypatch, alias):
+    storage, generated, _ = image_roots
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"private-test")
+    link = generated / "linked.png"
+    os.link(outside, link)
+    if alias == "symlink":
+        (generated / "preview.png").symlink_to(link)
+    else:
+        monkeypatch.setenv("KESHA_SENDABLE_ROOTS", f"{storage}:{generated.parent}:{generated}")
+    with pytest.raises(FileNotAllowed, match="hard-linked outside"):
+        file_access.open_sendable(str(link))

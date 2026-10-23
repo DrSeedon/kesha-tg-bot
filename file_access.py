@@ -67,18 +67,20 @@ def _link_stays_inside(real: Path, info: os.stat_result) -> bool:
     Rather than scan the filesystem, require that a multi-linked file be
     reachable only from inside a root — the common case (one link) is free.
     """
-    seen = 0
+    seen: set[Path] = set()
     for root in sendable_roots():
         for candidate in root.rglob("*"):
             try:
-                if not candidate.is_file():
+                # A symlink is not another hard-link name. Count each real
+                # directory entry once even when configured roots overlap.
+                cand = candidate.lstat()
+                if not _stat.S_ISREG(cand.st_mode):
                     continue
-                cand = candidate.stat()
             except OSError:
                 continue
             if (cand.st_dev, cand.st_ino) == (info.st_dev, info.st_ino):
-                seen += 1
-                if seen >= info.st_nlink:
+                seen.add(candidate)
+                if len(seen) >= info.st_nlink:
                     return True
     return False
 

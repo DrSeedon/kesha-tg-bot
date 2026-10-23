@@ -617,6 +617,43 @@ def test_mcp_profile_preserves_toml_special_characters(tmp_path):
     }
 
 
+def test_mcp_timeouts_reach_toml_from_workdir_config(tmp_path, monkeypatch):
+    from config import load_mcp_servers
+
+    # Isolate the loader and profile from any real user's config or auth.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(CodexSession, "_link_auth", staticmethod(lambda home: None))
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        "hub-images": {
+            "command": "image-server", "args": ["--stdio"],
+            "tool_timeout_sec": 400, "startup_timeout_sec": 45.5,
+            "env": {"IMAGE_TEST_OPTION": "test-only"},
+        },
+        "ordinary": {"command": "ordinary-server"},
+    }}))
+    session = make_session(tmp_path, mcp_servers=load_mcp_servers(str(tmp_path)))
+    servers, _ = session._normalized_mcp_servers()
+    home = Path(session._ensure_codex_home())
+    session._write_mcp_config(home, servers)
+    configured = tomllib.loads((home / "config.toml").read_text())["mcp_servers"]
+
+    assert configured["hub-images"]["tool_timeout_sec"] == 400
+    assert configured["hub-images"]["startup_timeout_sec"] == 45.5
+    assert configured["hub-images"]["env"] == {"IMAGE_TEST_OPTION": "test-only"}
+    assert "tool_timeout_sec" not in configured["ordinary"]
+    assert "startup_timeout_sec" not in configured["ordinary"]
+
+
+@pytest.mark.parametrize("key", ["tool_timeout_sec", "startup_timeout_sec"])
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, "400", float("inf"), float("nan")])
+def test_mcp_rejects_invalid_timeouts(tmp_path, key, value):
+    session = make_session(tmp_path, mcp_servers={
+        "hub-images": {"command": "image-server", key: value},
+    })
+    with pytest.raises(ValueError, match=key):
+        session._normalized_mcp_servers()
+
+
 # ---------- auth linking (a re-login must not silently deauthorize Kesha) ----------
 
 
@@ -1298,6 +1335,31 @@ def test_tool_calls_map_to_status_bubble(tmp_path):
     assert tools == [{"type": "tool", "name": "mcp__kesha__send_photo",
                       "input": {"path": "a.png"}}]
     assert [c for c in chunks if c["type"] == "tool_done"] == [{"type": "tool_done"}]
+
+
+def test_open_tools_follow_ids_and_ignore_other_turns(tmp_path):
+    session = make_session(tmp_path)
+    def event(method, item_id, *, turn="current"):
+        return {"method": method, "params": {"turnId": turn, "item": {
+            "id": item_id, "type": "mcpToolCall", "server": "hub-images",
+            "tool": "hub_generate_image",
+        }}}
+    chunks = asyncio.run(drive(session, [
+        event("item/started", "one"),
+        event("item/started", "one"),  # duplicate start cannot inflate the ledger
+        event("item/started", "two"),
+        event("item/completed", "one", turn="stale"),
+        event("item/completed", "one"),
+        event("item/completed", "one"),  # duplicate finish cannot close `two`
+        event("item/completed", "two"),
+        {"method": "turn/completed", "params": {"turnId": "current", "turn": {"status": "completed"}}},
+    ], turn_id="current"))
+    assert [c["open"] for c in chunks if c["type"] == "liveness"] == [1, 1, 2, 1, 1, 0]
+    next_turn = asyncio.run(drive(session, [
+        event("item/completed", "missing"),
+        {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+    ]))
+    assert [c["open"] for c in next_turn if c["type"] == "liveness"] == [0]
 
 
 def test_reasoning_items_do_not_leak_into_the_answer(tmp_path):

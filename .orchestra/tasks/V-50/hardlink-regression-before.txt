@@ -1,0 +1,14 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________ test_image_hardlink_scan_cannot_double_count_names[symlink] __________
+tests/test_file_access.py:285: in test_image_hardlink_scan_cannot_double_count_names
+    with pytest.raises(FileNotAllowed, match="hard-linked outside"):
+E   Failed: DID NOT RAISE FileNotAllowed
+_____ test_image_hardlink_scan_cannot_double_count_names[overlapping_root] _____
+tests/test_file_access.py:285: in test_image_hardlink_scan_cannot_double_count_names
+    with pytest.raises(FileNotAllowed, match="hard-linked outside"):
+E   Failed: DID NOT RAISE FileNotAllowed
+=========================== short test summary info ============================
+FAILED tests/test_file_access.py::test_image_hardlink_scan_cannot_double_count_names[symlink]
+FAILED tests/test_file_access.py::test_image_hardlink_scan_cannot_double_count_names[overlapping_root]
+2 failed, 31 deselected in 0.04s

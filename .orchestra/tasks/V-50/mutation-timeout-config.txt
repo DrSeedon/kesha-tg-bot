@@ -1,0 +1,10 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_mcp_timeouts_reach_toml_from_workdir_config _______________
+tests/test_codex_session.py:640: in test_mcp_timeouts_reach_toml_from_workdir_config
+    assert configured["hub-images"]["tool_timeout_sec"] == 400
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'tool_timeout_sec'
+=========================== short test summary info ============================
+FAILED tests/test_codex_session.py::test_mcp_timeouts_reach_toml_from_workdir_config
+1 failed in 3.40s

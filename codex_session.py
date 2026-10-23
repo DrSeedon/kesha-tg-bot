@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -544,6 +545,18 @@ class CodexSession:
                 "args": [str(arg) for arg in (cfg.get("args") or [])],
                 "env": normalized_env,
             }
+            # Optional Codex budgets are seconds, unlike Claude's `timeout`
+            # (milliseconds). Leave absent values to the runtime defaults.
+            for key in ("tool_timeout_sec", "startup_timeout_sec"):
+                if key not in cfg:
+                    continue
+                value = cfg[key]
+                if (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0
+                ):
+                    raise ValueError(f"Invalid MCP {key} for {name!r}: expected positive seconds")
+                servers[str(name)][key] = value
         return servers, set(shared_values)
 
     def _write_mcp_config(self, home: Path, servers: dict[str, dict]) -> None:
@@ -563,6 +576,9 @@ class CodexSession:
                 f"command = {_toml_str(cfg['command'])}",
                 f"args = [{rendered_args}]",
             ]
+            for key in ("tool_timeout_sec", "startup_timeout_sec"):
+                if key in cfg:
+                    lines.append(f"{key} = {cfg[key]}")
             if cfg["env"]:
                 lines += ["", f"[{table}.env]"]
                 lines += [
@@ -804,6 +820,7 @@ class CodexSession:
         """
         pending_error: Optional[dict] = None
         text_items: set[tuple[str | None, str | None]] = set()
+        open_tools: set[str] = set()
         while True:
             try:
                 msg = await self._notifications.get()
@@ -843,7 +860,12 @@ class CodexSession:
             if method == "item/started":
                 chunk = self._tool_chunk(params.get("item") or {})
                 if chunk:
+                    item_id = item.get("id") or params.get("itemId")
+                    if item_id:
+                        open_tools.add(item_id)
                     yield chunk
+                    if item_id:
+                        yield {"type": "liveness", "open": len(open_tools)}
                 continue
 
             if method == "item/completed":
@@ -857,6 +879,8 @@ class CodexSession:
                         # second delta-less agent item after earlier deltas.
                         yield {"type": "text_delta", "content": text}
                 elif self._tool_chunk(item):
+                    open_tools.discard(item.get("id") or params.get("itemId"))
+                    yield {"type": "liveness", "open": len(open_tools)}
                     # Close the Telegram timer at the real app-server
                     # completion event.  Waiting for the next model event made
                     # 0.3s shell commands look like 151s commands.

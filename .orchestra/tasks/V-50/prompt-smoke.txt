@@ -1,0 +1,1 @@
+PASS: production load_system_prompt() formats the updated prompt and structured result example.
