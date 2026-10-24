@@ -1,0 +1,32 @@
+{
+  "input_count": 12,
+  "input_size": [
+    1280,
+    720
+  ],
+  "sheet_count": 3,
+  "sheet_size": [
+    1568,
+    886
+  ],
+  "thumbnail_size": [
+    780,
+    439
+  ],
+  "numbers": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "original_tokens_estimate": 14745.6,
+  "sheet_tokens_estimate": 5556.992
+}

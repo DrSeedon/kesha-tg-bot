@@ -12,6 +12,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 
 import memory_search
 import reminders as _rem
+from config import BOT_SERVICE_UNIT
 from file_access import FileNotAllowed, open_sendable
 
 logger = logging.getLogger("kesha.tools")
@@ -124,7 +125,7 @@ async def restart_bot(args):
     return {"content": [{"type": "text", "text": "Bot restarting in 1s..."}]}
 
 async def _do_restart():
-    await asyncio.create_subprocess_exec("sudo", "systemctl", "restart", "kesha-bot")
+    await asyncio.create_subprocess_exec("sudo", "systemctl", "restart", BOT_SERVICE_UNIT)
 
 
 @tool("send_photo", "Send a photo to the user in Telegram", {"path": str, "caption": str})

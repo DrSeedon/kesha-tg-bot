@@ -1,0 +1,10 @@
+{
+  "targeted": "164 passed, 4 skipped",
+  "full_collection": "blocked: missing scripts/evaluate_compact_prompt.py",
+  "available_standard": "722 passed, 7 skipped, 2 failed: AF_UNIX path too long",
+  "socket_checks_relative_tmp": "2 passed",
+  "available_relative_tmp": "724 passed, 7 skipped",
+  "bot_import_and_prompt": "passed, synthetic token, no Telegram connection",
+  "sheet_cli": "passed: 12 synthetic inputs, 3 sheets, 1568x886, input order preserved",
+  "missing_tesseract_cli": "passed: status error, exit 1, original unchanged"
+}

@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/DrSeedon/kesha-tg-bot" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/python-3.12+-blue" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
   <img src="https://img.shields.io/badge/telegram-aiogram%203-2CA5E0" alt="aiogram 3">
 </p>
 
@@ -53,7 +53,7 @@
 
 ## Быстрый старт
 
-**Нужно:** Python 3.12+, Git, токен бота от [@BotFather](https://t.me/BotFather) и залогиненный Claude Code на хосте (SDK управляет Claude Code CLI с учётными данными из `~/.claude`). По желанию: `ffmpeg` (кружки), ключ Deepgram (расшифровка голоса), залогиненный на хосте Codex CLI (второй рантайм).
+**Нужно:** Python 3.12 (закреплённый RapidOrientation требует Python <3.13), Git, токен бота от [@BotFather](https://t.me/BotFather) и залогиненный Claude Code на хосте (SDK управляет Claude Code CLI с учётными данными из `~/.claude`). Для выравнивания документов нужен системный Tesseract с русским и английским языками (`sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng` на Ubuntu). По желанию: `ffmpeg` (кружки), ключ Deepgram (расшифровка голоса), залогиненный на хосте Codex CLI (второй рантайм).
 
 ```bash
 git clone https://github.com/DrSeedon/kesha-tg-bot.git
@@ -78,11 +78,11 @@ python bot.py
 `kesha-bot.service` — шаблон с пользователем и путями автора: скопируйте, поправьте `User`, `WorkingDirectory`, `ExecStart`, затем:
 
 ```bash
-sudo cp kesha-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now kesha-bot
+sudo cp kesha-bot.service /etc/systemd/system/kesha-bot-vps.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kesha-bot-vps
 ```
 
-Команда `/restart` и тул `restart_bot` вызывают `sudo systemctl restart <юнит>`, а имена юнитов зашиты в исходники (`handlers.py`, `kesha_tools.py`). Либо разрешите этот вызов без пароля и поправьте имена под свой юнит, либо не пользуйтесь этими двумя.
+Команда `/restart` и тул `restart_bot` используют одну константу `BOT_SERVICE_UNIT` в `config.py` (`kesha-bot-vps`). Разрешите `sudo systemctl restart kesha-bot-vps` без пароля пользователю бота; для другого имени юнита поправьте эту константу. По просьбе владельца агент может менять `CLAUDE_MODEL` или `KESHA_CODEX_MODEL` в `.env` развёрнутого бота и применять настройку рестартом, предварительно предупредив пользователя. Дефолты моделей не менялись.
 
 ## Путь сообщения
 
@@ -112,8 +112,17 @@ Telegram ─► aiogram ─► handlers.py ─► ChatState (на чат) ─►
 - **Текст, ответы, пересылки.** Ссылки, спрятанные за текстом, разворачиваются в `текст (url)`; пересылки и ответы доходят до агента как `[Forwarded from …]` / `[reply: "…"]`.
 - **Голосовые и кружки.** Расшифровка в Deepgram (Nova‑3, язык русский, результат кешируется по id файла). Без ключа агент получает путь к файлу. Кружки сначала проходят через `ffmpeg`.
 - **Фото, альбомы, документы, аудио, видео.** Скачиваются под исходными именами в `MEDIA_DIR` и передаются как `[photo: путь]`, `[document: путь (имя)]` и т. д.; открывает их агент своими инструментами. Альбом склеивается в одно сообщение. Файл, который не скачался, помечается как «слишком большой». Загрузки кешируются по уникальному id файла Telegram.
+- **Выравнивание документов и обзорные листы фото.** Перед чтением данных документа промпт предписывает агенту вызвать `tools/orient_photo.py` на любом рантайме. Скрипт учитывает EXIF, сравнивает OCR четырёх поворотов и использует вероятности локального RapidOrientation только при признаках текста. Неуверенные результаты и фото без текста оставляют оригинал. Несколько фото сначала собираются в листы с номерами; идентификаторы, даты и мелкий текст читаются с нужных полноразмерных выпрямленных копий.
 - **Стикеры** передаются эмодзи. Всё нераспознанное, включая rich-сообщения Telegram, доходит до агента текстом, а не теряется.
 - **Язык интерфейса** (русский или английский) берётся из языка Telegram пользователя; меню команд зарегистрировано на обоих. Часть системных уведомлений (прогресс сжатия, подпись `/limits`, приветствие при старте) только на русском.
+
+Скрипт запускается Python из venv бота, например:
+
+```bash
+/opt/kesha-bot/.venv/bin/python /opt/kesha-bot/tools/orient_photo.py --sheet image-a.jpg image-b.jpg
+```
+
+На каждое фото выводится JSON-строка: выходной путь, угол коррекции против часовой стрелки, метод и баллы OCR; затем строки листов с соответствием номера ячейки исходному и полноразмерному файлам. Копии сохраняются в `/tmp/kesha/oriented/` (или `--output-dir`), входные файлы не перезаписываются. `--sheet-only` собирает уже выпрямленные фото без повторного OCR. По умолчанию `--cell-size 780`: до 2×2 ячеек, длинная сторона листа ≤1568 px; больше фото — несколько листов. Лист нужен для обзора, а не точного чтения документа. Модель входит в закреплённый пакет и не скачивается при первом запуске. Без Tesseract возвращается явная ошибка и оригинал; `--sheet-only` работает и без него. Выравнивание задаётся инструкцией агенту, а не автоматическим фильтром входящих сообщений.
 
 ### ⚡ Стриминг в рамках лимитов Telegram
 
@@ -282,7 +291,7 @@ Telegram ─► aiogram ─► handlers.py ─► ChatState (на чат) ─►
 
 ## Стек
 
-- Python 3.12+, aiogram 3 с aiogram-media-group, telegramify-markdown
+- Python 3.12, aiogram 3 с aiogram-media-group, telegramify-markdown; Pillow, RapidOrientation/ONNX Runtime и системный Tesseract для выравнивания документов
 - `claude-agent-sdk` (включает Claude Code CLI); Codex CLI по желанию
 - SQLite для журнала чата и напоминаний
 - Deepgram (речь в текст) и `ffmpeg` (кружки), оба по желанию

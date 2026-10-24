@@ -22,7 +22,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/DrSeedon/kesha-tg-bot" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/python-3.12+-blue" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
   <img src="https://img.shields.io/badge/telegram-aiogram%203-2CA5E0" alt="aiogram 3">
 </p>
 
@@ -53,7 +53,7 @@ This is a capability summary, not a guarantee that every optional integration (D
 
 ## Quick Start
 
-**Requirements:** Python 3.12+, Git, a Telegram bot token from [@BotFather](https://t.me/BotFather), and a logged-in Claude Code account on the host (the SDK drives the Claude Code CLI with the credentials in `~/.claude`). Optional: `ffmpeg` (video notes), a Deepgram key (voice transcription), the Codex CLI logged in on the host (second runtime).
+**Requirements:** Python 3.12 (the pinned RapidOrientation package requires Python <3.13), Git, a Telegram bot token from [@BotFather](https://t.me/BotFather), and a logged-in Claude Code account on the host (the SDK drives the Claude Code CLI with the credentials in `~/.claude`). Document orientation also needs system Tesseract with Russian and English data (`sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng` on Ubuntu). Optional: `ffmpeg` (video notes), a Deepgram key (voice transcription), the Codex CLI logged in on the host (second runtime).
 
 ```bash
 git clone https://github.com/DrSeedon/kesha-tg-bot.git
@@ -78,11 +78,11 @@ Open the bot in Telegram, send `/start`, then write anything.
 `kesha-bot.service` is a template with the author's user and paths: copy it, change `User`, `WorkingDirectory` and `ExecStart`, then:
 
 ```bash
-sudo cp kesha-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now kesha-bot
+sudo cp kesha-bot.service /etc/systemd/system/kesha-bot-vps.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kesha-bot-vps
 ```
 
-The `/restart` command and the `restart_bot` tool call `sudo systemctl restart <unit>` with unit names that are written into the source (`handlers.py`, `kesha_tools.py`). Either allow that call without a password for your unit name and edit the names, or do not use those two.
+The `/restart` command and the `restart_bot` tool both use `BOT_SERVICE_UNIT` in `config.py` (`kesha-bot-vps`). Allow `sudo systemctl restart kesha-bot-vps` without a password for the bot user; if you use another unit name, change this single constant. On the owner's request, the agent can update `CLAUDE_MODEL` or `KESHA_CODEX_MODEL` in the deployment's `.env` and restart the bot after notifying the user. Model defaults remain unchanged.
 
 ## How a Message Travels
 
@@ -112,8 +112,17 @@ Each chat is a small state machine (`idle → collecting → processing → comp
 - **Text, replies, forwards.** Links hidden behind text are written out as `anchor (url)`; forwards and replies reach the agent as `[Forwarded from …]` / `[reply: "…"]`.
 - **Voice and video notes.** Transcribed with Deepgram (Nova‑3, language set to Russian, results cached by file id). Without a key the agent receives the file path instead. Video notes go through `ffmpeg` first.
 - **Photos, albums, documents, audio, video.** Downloaded under their original names into `MEDIA_DIR` and passed as `[photo: path]`, `[document: path (name)]` and so on; the agent opens them with its own tools. Albums are grouped into one message. A file that cannot be downloaded is reported as "file too large". Downloads are cached by Telegram's unique file id.
+- **Document orientation and photo overview sheets.** Before extracting document data, the prompt tells the agent to run `tools/orient_photo.py` on either runtime. It applies EXIF, compares OCR at four rotations, and uses local RapidOrientation probabilities only with supporting text evidence. Uncertain or text-free inputs retain their originals. Multiple photos first get numbered overview sheets; identifiers, dates and small text are read from the relevant full-size oriented copies.
 - **Stickers** are passed as their emoji. Anything unrecognised, including Telegram's rich messages, reaches the agent as text instead of being dropped.
 - **Interface language** (Russian or English) follows the user's Telegram language. The command menu is registered in both. Some system notices (compaction progress, the `/limits` caption, the start greeting) are Russian only.
+
+The orientation helper runs with the bot's venv Python, for example:
+
+```bash
+/opt/kesha-bot/.venv/bin/python /opt/kesha-bot/tools/orient_photo.py --sheet image-a.jpg image-b.jpg
+```
+
+It emits one JSON line per photo with the output path, corrective counterclockwise angle, method and OCR scores, followed by sheet records mapping cell numbers to source/full-size paths. Copies go to `/tmp/kesha/oriented/` (or `--output-dir`); inputs are never overwritten. `--sheet-only` builds sheets from already oriented photos without repeating OCR. Default `--cell-size 780` makes at most 2×2 cells per sheet, with a long side ≤1568px; larger batches produce multiple sheets. Sheets are for overview, not reliable document transcription. The pinned package includes its model and needs no first-run download. Missing Tesseract produces an explicit error and keeps the original; `--sheet-only` still works. Orientation is an agent instruction, not an automatic ingress filter.
 
 ### ⚡ Streaming that survives Telegram's limits
 
@@ -282,7 +291,7 @@ State lives under `storage/`: `messages.db` (chat log, activity, usage), `remind
 
 ## Stack
 
-- Python 3.12+, aiogram 3 with aiogram-media-group, telegramify-markdown
+- Python 3.12, aiogram 3 with aiogram-media-group, telegramify-markdown; Pillow, RapidOrientation/ONNX Runtime and system Tesseract for document orientation
 - `claude-agent-sdk` (bundles the Claude Code CLI); Codex CLI optional
 - SQLite for the chat log and reminders
 - Deepgram (speech to text) and `ffmpeg` (video notes), both optional

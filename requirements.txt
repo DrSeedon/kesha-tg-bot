@@ -4,3 +4,7 @@ claude-agent-sdk>=0.2.158
 python-dotenv>=1.0
 python-dateutil>=2.9
 telegramify-markdown>=1.1.2,<2
+Pillow>=12.3
+# Pinned: tools/orient_photo.py reads the bundled classifier probabilities.
+# This release supports Python >=3.6,<3.13 and includes its ONNX model.
+rapid-orientation==0.0.11

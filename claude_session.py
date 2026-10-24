@@ -121,9 +121,12 @@ def resolve_context_model(model: str, use_1m: bool = True) -> str:
 EXPECTED_CONTEXT_MODEL = resolve_context_model(MODEL)
 EXPECTED_CONTEXT_TOKENS = 1_000_000
 # Output ceiling the runtime reports per model (`maxOutputTokens` in the terminal
-# usage). Opus 5.5 reports 128000 (prod 25.09.2026); everything older 64000.
+# usage). Opus and Sonnet 5.5 report 128000; everything older 64000.
 # A hardcoded 64000 latched a false "runtime contradiction" on every Opus 5.5 reply.
-_MAX_OUTPUT_TOKENS_BY_MODEL = {"claude-opus-5-5": 128_000}
+_MAX_OUTPUT_TOKENS_BY_MODEL = {
+    "claude-opus-5-5": 128_000,
+    "claude-sonnet-5-5": 128_000,
+}
 _DEFAULT_MAX_OUTPUT_TOKENS = 64_000
 
 

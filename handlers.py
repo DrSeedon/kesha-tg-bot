@@ -20,6 +20,7 @@ from chat_state import PendingEntry
 import config as _cfg
 from config import (
     ALLOWED,
+    BOT_SERVICE_UNIT,
     LOG_DIR,
     STRINGS,
     WORK_DIR,
@@ -472,7 +473,7 @@ async def h_restart(msg: types.Message):
         return
     await _send_safe(msg, t(msg, "restarting"))
     p = await asyncio.create_subprocess_exec(
-        "sudo", "systemctl", "restart", "kesha-bot-vps",
+        "sudo", "systemctl", "restart", BOT_SERVICE_UNIT,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await p.communicate()

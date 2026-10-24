@@ -22,7 +22,7 @@
 - [ ] Rate limiting per-user
 
 - API-ошибка CLI уходит пользователю как ответ: 23.09 строка `API Error: 400 Claude Code 2.1.259 does not support this model` пришла Максиму обычным текстом (тот же класс, что капитуляция разбора тула в v2.9.3 — CLI отдаёт провал ассистентским текстом). Распознавать `API Error:` как ошибку рантайма и показывать русское сообщение.
-- [ ] **Расхождения кода, найденные при переписи README (V-46)** — `.env.example` держит `CLAUDE_MODEL=claude-opus-4-6`, `setup_wizard.py` предлагает `claude-sonnet-4-6` (код по умолчанию `claude-opus-5-5`); `/restart` зовёт юнит `kesha-bot-vps`, а тул `restart_bot` — `kesha-bot` (см. #27); HTTP-inbox на 127.0.0.1:18081 без токена; комментарий в `tool_bridge.py` про «history flows into RAG» устарел после V-45; `.orchestra/project-context.toml` всё ещё описывает память как «sqlite-vec + FTS5 + bge-m3»
+- [ ] **Расхождения кода, найденные при переписи README (V-46)** — `.env.example` держит `CLAUDE_MODEL=claude-opus-4-6`, `setup_wizard.py` предлагает `claude-sonnet-4-6` (код по умолчанию `claude-opus-5-5`); HTTP-inbox на 127.0.0.1:18081 без токена; комментарий в `tool_bridge.py` про «history flows into RAG» устарел после V-45; `.orchestra/project-context.toml` всё ещё описывает память как «sqlite-vec + FTS5 + bge-m3»
 - [ ] **В публичном CHANGELOG chat id владельца** — записи V-42/V-43 (v2.9.9, v2.10.0) цитируют `чат 720740564`; заменить на «чат владельца» при ближайшем касании
 
 - [ ] **Оборванный ответ при лимите на пути напоминалок (#19, предсуществующий, 07–08.2026)** — при исчерпанной квоте urgent_llm-напоминание может оставить оборванный ответ висеть; не проверено после V-47 — перепроверить на проде и закрыть или починить

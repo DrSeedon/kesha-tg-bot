@@ -17,6 +17,7 @@ ALLOWED = {int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip(
 WORK_DIR = os.getenv("WORK_DIR", ".")
 MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 RUNTIME = os.getenv("KESHA_RUNTIME", "claude")
+BOT_SERVICE_UNIT = "kesha-bot-vps"
 
 # Model per runtime. Claude's id would be rejected by Codex and vice versa, so a
 # switch must carry its own. Verified live: gpt-5.1-codex-max is NOT available

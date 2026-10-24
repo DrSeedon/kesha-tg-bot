@@ -1,0 +1,18 @@
+{
+  "python": "3.12.3",
+  "uv": "0.11.28",
+  "packages": {
+    "claude-agent-sdk": "0.2.158",
+    "mcp": "1.28.1",
+    "Pillow": "12.3.0",
+    "rapid-orientation": "0.0.11",
+    "onnxruntime": "1.27.0",
+    "opencv-python": "5.0.0.93",
+    "numpy": "2.5.4",
+    "aiogram": "3.31.0",
+    "pytest": "9.1.1",
+    "pytest-asyncio": "1.4.0"
+  },
+  "lock_present": false,
+  "system_tesseract_present": false
+}
