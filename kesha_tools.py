@@ -329,14 +329,14 @@ def _require_telegram_owner():
     return None
 
 
-@tool("telegram_list_dialogs", "List the owner's Telegram cloud dialogs on demand. Owner only; read-only. Limit 1-100.", {"limit": int})
+@tool("telegram_list_dialogs", "List the owner's Telegram cloud dialogs on demand. Owner only; read-only. Limit 1-100; offset starts at 0 for pagination.", {"limit": int, "offset": int})
 async def telegram_list_dialogs(args):
     denied = _require_telegram_owner()
     if denied:
         return denied
     try:
         import telegram_user_reader
-        rows = await telegram_user_reader.list_dialogs(args.get("limit", 50))
+        rows = await telegram_user_reader.list_dialogs(args.get("limit", 50), args.get("offset", 0))
         return {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]}
     except Exception as exc:
         return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}

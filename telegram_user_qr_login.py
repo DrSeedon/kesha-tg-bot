@@ -39,6 +39,8 @@ async def main():
     finally:
         QR_IMAGE.unlink(missing_ok=True)
         await client.disconnect()
+        if SESSION.with_suffix(".session").exists():
+            os.chmod(SESSION.with_suffix(".session"), 0o600)
 
 
 if __name__ == "__main__":

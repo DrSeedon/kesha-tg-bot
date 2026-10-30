@@ -59,14 +59,19 @@ def _summary(message):
     }
 
 
-async def list_dialogs(limit=50):
+async def list_dialogs(limit=50, offset=0):
     limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
 
     async def op(client):
-        return [
-            {"id": dialog.id, "name": dialog.name, "type": type(dialog.entity).__name__}
-            async for dialog in client.iter_dialogs(limit=limit)
-        ]
+        rows = []
+        index = 0
+        async for dialog in client.iter_dialogs(limit=offset + limit):
+            if index >= offset:
+                kind = "group" if dialog.is_group else "channel" if dialog.is_channel else "private"
+                rows.append({"id": dialog.id, "name": dialog.name, "kind": kind})
+            index += 1
+        return rows
 
     return await _run(op)
 
