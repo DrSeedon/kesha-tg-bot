@@ -9,3 +9,4 @@ Pillow>=12.3
 # This release supports Python >=3.6,<3.13 and includes its ONNX model.
 rapid-orientation==0.0.11
 telethon>=1.42,<2
+qrcode[pil]>=8,<9
