@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+import json
 import logging
 import re
 import shlex
@@ -318,6 +319,56 @@ async def read_messages(args):
     return {"content": [{"type": "text", "text": text}]}
 
 
+def _require_telegram_owner():
+    import config
+    chat_id = _require_chat()
+    if isinstance(chat_id, dict):
+        return chat_id
+    if not config.NOTIFY_CHAT or chat_id != config.NOTIFY_CHAT:
+        return {"content": [{"type": "text", "text": "Only the account owner can read Telegram dialogs"}], "is_error": True}
+    return None
+
+
+@tool("telegram_list_dialogs", "List the owner's Telegram cloud dialogs on demand. Owner only; read-only. Limit 1-100.", {"limit": int})
+async def telegram_list_dialogs(args):
+    denied = _require_telegram_owner()
+    if denied:
+        return denied
+    try:
+        import telegram_user_reader
+        rows = await telegram_user_reader.list_dialogs(args.get("limit", 50))
+        return {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+
+
+@tool("telegram_read_dialog", "Read recent messages from an owner's Telegram cloud dialog. Owner only; read-only. Dialog id from telegram_list_dialogs; limit 1-50.", {"dialog_id": int, "limit": int})
+async def telegram_read_dialog(args):
+    denied = _require_telegram_owner()
+    if denied:
+        return denied
+    try:
+        import telegram_user_reader
+        rows = await telegram_user_reader.read_dialog(args["dialog_id"], args.get("limit", 20))
+        return {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+
+
+@tool("telegram_search_messages", "Search the owner's Telegram cloud messages on demand, globally or within a dialog. Owner only; read-only. Use dialog_id=0 for global search; limit 1-50.", {"query": str, "dialog_id": int, "limit": int})
+async def telegram_search_messages(args):
+    denied = _require_telegram_owner()
+    if denied:
+        return denied
+    try:
+        import telegram_user_reader
+        dialog_id = args.get("dialog_id") or None
+        rows = await telegram_user_reader.search_messages(args["query"], dialog_id, args.get("limit", 20))
+        return {"content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False)}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+
+
 @tool("send_video", "Send a video to the user in Telegram (with player/preview)", {"path": str, "caption": str})
 async def send_video(args):
     path = args["path"]
@@ -538,7 +589,8 @@ async def run_on_laptop(args):
 ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_photo, send_file, send_video, send_audio, send_voice, react,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
-             search_memory, read_messages, run_on_laptop]
+             search_memory, read_messages, telegram_list_dialogs,
+             telegram_read_dialog, telegram_search_messages, run_on_laptop]
 
 # run_on_laptop shells out over SSH to the user's machine and still awaits its
 # own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.
