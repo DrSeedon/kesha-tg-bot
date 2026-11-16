@@ -116,6 +116,17 @@ def session_chat(handle: str) -> int | None:
         return None
     return chat_id
 
+
+def session_valid_for(
+    handle: str, chat_id: int, runtime: str, min_ttl: float = 0,
+) -> bool:
+    """Check a runtime's lease without extending or reviving the handle."""
+    if session_chat(handle) != chat_id:
+        return False
+    _chat, expires_at, owner = _SESSIONS[handle]
+    return owner == runtime and expires_at - time.monotonic() > min_ttl
+
+
 ToolHandler = Callable[[dict], Awaitable[dict]]
 
 

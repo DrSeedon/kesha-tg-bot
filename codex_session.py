@@ -63,6 +63,9 @@ REQUEST_TIMEOUT_SECONDS = 180
 INTERRUPT_TIMEOUT_SECONDS = 5
 COMPACT_TIMEOUT_SECONDS = 300
 CONTEXT_INJECT_TIMEOUT_SECONDS = 10
+BRIDGE_SESSION_TTL_SECONDS = 24 * 60 * 60
+# Rotate while idle before the next turn can run into the absolute expiry.
+BRIDGE_SESSION_RENEW_MARGIN_SECONDS = 60 * 60
 
 # thread/resume returns the complete thread as one JSONL frame. A 65-turn
 # production thread measured 20,005,654 bytes, so the old 16 MiB StreamReader
@@ -478,7 +481,7 @@ class CodexSession:
             raise RuntimeError("Kesha bridge token is unavailable")
         self._revoke_bridge_session()
         self._bridge_session = issue_session(
-            self.chat_id, ttl=24 * 60 * 60, runtime="codex"
+            self.chat_id, ttl=BRIDGE_SESSION_TTL_SECONDS, runtime="codex"
         )
         return {
             "command": sys.executable,
@@ -611,7 +614,21 @@ class CodexSession:
     async def _connect_locked(self) -> None:
         """Start the app-server and attach to a thread (resume when possible)."""
         if self.is_alive:
-            return
+            # MCP env is fixed at spawn. An expired handle cannot be repaired
+            # by issuing another one in the bot alone: restart the proxy's
+            # owning process and resume the same thread with the fresh env.
+            # Quota/context reads can also connect during a turn; never tear
+            # down work already in progress just to rotate its credentials.
+            if not self._bridge_session or self._active_turn_id:
+                return
+            from tool_bridge import session_valid_for
+
+            if session_valid_for(
+                self._bridge_session, self.chat_id, "codex",
+                min_ttl=BRIDGE_SESSION_RENEW_MARGIN_SECONDS,
+            ):
+                return
+            logger.info("Codex: rotating expired or expiring bridge session")
         if self._on_connecting:
             try:
                 self._on_connecting()
