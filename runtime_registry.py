@@ -112,6 +112,7 @@ def _claude_factory(context: RuntimeBuildContext) -> ChatRuntime:
 
 def _codex_factory(context: RuntimeBuildContext) -> ChatRuntime:
     from codex_session import CodexSession
+    from config import CODEX_REASONING_EFFORT
 
     return CodexSession(
         chat_id=context.chat_id,
@@ -121,6 +122,7 @@ def _codex_factory(context: RuntimeBuildContext) -> ChatRuntime:
         mcp_servers=context.mcp_servers,
         session_file=context.session_file,
         on_connecting=context.on_connecting,
+        reasoning_effort=CODEX_REASONING_EFFORT,
     )
 
 

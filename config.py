@@ -24,8 +24,9 @@ BOT_SERVICE_UNIT = "kesha-bot-vps"
 # on a ChatGPT subscription (HTTP 400); gpt-5.6-sol was. Owner's decision
 # 23.09.2026 — GPT-6 Sol (present in this account's Codex model catalog).
 RUNTIME_MODELS = {
-    "codex": os.getenv("KESHA_CODEX_MODEL", "gpt-6-sol"),
+    "codex": os.getenv("KESHA_CODEX_MODEL", "gpt-6.2-sol"),
 }
+CODEX_REASONING_EFFORT = os.getenv("KESHA_CODEX_EFFORT", "medium")
 DEEPGRAM = os.getenv("DEEPGRAM_API_KEY", "")
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 MAX_RETRIES = 2
