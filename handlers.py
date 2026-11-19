@@ -17,6 +17,7 @@ from aiogram.types import (
 from aiogram_media_group import media_group_handler
 
 from chat_state import PendingEntry
+from model_choices import MODELS, resolve_choice
 import config as _cfg
 from config import (
     ALLOWED,
@@ -76,6 +77,11 @@ def allowed(uid: int) -> bool:
     return not ALLOWED or uid in ALLOWED
 
 
+def _interactive_sender(msg) -> bool:
+    user = msg.from_user
+    return user is not None and not getattr(user, "is_bot", False) and user.id in ALLOWED
+
+
 async def _deny_once(msg: types.Message):
     uid = msg.from_user.id
     if uid not in _denied_notified:
@@ -83,7 +89,7 @@ async def _deny_once(msg: types.Message):
         await _send_safe(msg, t(msg, "no_access", uid=uid))
 
 
-async def enqueue(msg: types.Message, prompt: str, *, media=None, bare_photo: bool = False):
+async def enqueue(msg: types.Message, prompt: str, *, media=None, bare_photo: bool = False, audio_paths=()):
     """Enqueue a user message into the ChatState pipeline."""
     chat_id = msg.chat.id
     full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}{prompt}"
@@ -114,6 +120,8 @@ async def enqueue(msg: types.Message, prompt: str, *, media=None, bare_photo: bo
         source="user",
         reply_target=chat_id,
         bare_photo=bare_photo,
+        interactive_user=_interactive_sender(msg),
+        audio_paths=audio_paths,
     )
     try:
         if media is None:
@@ -121,6 +129,10 @@ async def enqueue(msg: types.Message, prompt: str, *, media=None, bare_photo: bo
         else:
             state, generation, media_generation = media
             await state.media_finished(entry, generation, media_generation)
+    except ValueError as exc:
+        if str(exc) != "antigravity_interactive_only":
+            raise
+        await _send_safe(msg, "Antigravity принимает сообщения от разрешённых пользователей Telegram.")
     except ActivityPersistenceError:
         logger.error(f"Chat {chat_id}: activity admission failed")
         await _send_safe(msg, t(msg, "activity_retry"))
@@ -179,7 +191,7 @@ async def h_status(msg: types.Message):
         debug="on" if _cfg.DEBUG else "off",
         uptime=uptime,
         context=ctx_str,
-        cost=f"{s.total_cost_usd:.4f}",
+        cost=f"{s.total_cost_usd:.4f}" if s.total_cost_usd is not None else "n/a",
         media_count=media_count(),
         log_size=log_size(),
     ))
@@ -238,16 +250,21 @@ async def h_compact(msg: types.Message):
         return
     cid = msg.chat.id
     cs = _registry.get(cid)
+    options = {}
+    if cs.runtime_id == "antigravity":
+        if not _interactive_sender(msg):
+            return
+        options["interactive_user"] = True
     if cs.is_busy:
         try:
-            await cs.request_compact()
+            await cs.request_compact(**options)
         except ActivityPersistenceError:
             await _send_safe(msg, t(msg, "activity_retry"))
             return
         await _send_safe(msg, "⏳ Сейчас идёт обработка, сжатие запланировано после.")
         return
     try:
-        await cs.request_compact()
+        await cs.request_compact(**options)
     except ActivityPersistenceError:
         await _send_safe(msg, t(msg, "activity_retry"))
 
@@ -297,6 +314,7 @@ def _runtime_keyboard(current: str) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [button("claude", "Claude"), button("codex", "Codex")],
+        [button("antigravity", "Antigravity (Gemini)")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="runtime:refresh")],
     ])
 
@@ -360,6 +378,8 @@ async def _switch_runtime_command(
     target: str,
     available: list[str],
 ) -> None:
+    if target == "antigravity" and not _interactive_sender(msg):
+        return
     cs = _registry.get(msg.chat.id)
     result = await cs.switch_runtime(target)
     await _send_safe(
@@ -384,6 +404,8 @@ async def h_runtime_callback(query: types.CallbackQuery):
     action = query.data.removeprefix("runtime:")
     prefix = ""
     if action != "refresh":
+        if action == "antigravity" and not _interactive_sender(query):
+            return
         available = list_runtimes()
         result = await cs.switch_runtime(action)
         prefix = _runtime_result_text(query, cs, action, available, result) + "\n\n"
@@ -397,6 +419,59 @@ async def h_runtime_callback(query: types.CallbackQuery):
     except Exception as exc:
         if "message is not modified" not in str(exc).lower():
             logger.warning(f"runtime callback edit failed: {exc}")
+
+
+def _model_keyboard(cs):
+    rows = []
+    active = (cs.session.model, getattr(cs.session, "reasoning_effort", None))
+    for runtime_id, families in MODELS.items():
+        for index, (title, _, efforts) in enumerate(families):
+            buttons = []
+            for effort in efforts:
+                selected = cs.runtime_id == runtime_id and resolve_choice(runtime_id, index, effort) == active
+                label = f"{title} · {effort}" if effort else title
+                buttons.append(InlineKeyboardButton(text=("✓ " if selected else "") + label,
+                                                    callback_data=f"model:{runtime_id}:{index}:{effort}"))
+            rows.extend(buttons[i:i + 2] for i in range(0, len(buttons), 2))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _model_panel(cs):
+    effort = getattr(cs.session, "reasoning_effort", None)
+    return f"/model · {cs.session.model}" + (f" · {effort}" if effort else "")
+
+
+async def h_model(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    cs = _registry.get(msg.chat.id)
+    await _send_safe(msg, _model_panel(cs), reply_markup=_model_keyboard(cs), parse_mode=None)
+
+
+async def h_model_callback(query: types.CallbackQuery):
+    if not allowed(query.from_user.id) or getattr(query.from_user, "is_bot", False):
+        await query.answer(t(query, "no_access", uid=query.from_user.id), show_alert=True)
+        return
+    await query.answer()
+    if not query.message or not query.data:
+        return
+    try:
+        _, runtime, index, effort = query.data.split(":", 3)
+        if not index.isdigit():
+            return
+        selection = resolve_choice(runtime, int(index), effort)
+    except (IndexError, KeyError, ValueError):
+        return
+    if runtime == "antigravity" and query.from_user.id not in ALLOWED:
+        return
+    cs = _registry.get(query.message.chat.id)
+    result = await cs.switch_runtime(runtime, selection=selection)
+    text = _runtime_result_text(query, cs, runtime, list(MODELS), result)
+    try:
+        await query.message.edit_text(text + "\n\n" + _model_panel(cs), reply_markup=_model_keyboard(cs))
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.warning("Model picker edit failed: %s", type(exc).__name__)
 
 
 async def h_ping(msg: types.Message):
@@ -497,6 +572,32 @@ async def h_stop(msg: types.Message):
 
 # --- Media handlers ---
 
+def _native_voice_tag(path, duration, source="voice", video=None):
+    if source == "video_note":
+        return (f"[video_note: {video} | audio: {path} ({duration}s) — "
+                "прослушай звук через read_file, кадры при необходимости извлеки через ffmpeg. "
+                "Не открывай исходный .mp4 через read_file.]")
+    if source == "audio":
+        return f"[audio: {path} ({duration}s) — прослушай аудиофайл через read_file]"
+    return (f"[voice: {path} ({duration}s) — голосовое сообщение (без Deepgram): "
+            "прослушай сам напрямую через read_file и ответь по сути]")
+
+
+async def _enqueue_native_voice(msg, media, path, duration, *, convert=False, video_note=False, source="voice"):
+    from media import native_ogg
+
+    try:
+        ogg = await native_ogg(path, convert=convert)
+    except (OSError, RuntimeError, TimeoutError):
+        await _send_safe(msg, "Не удалось подготовить голосовое сообщение в Ogg.")
+        state, generation, media_generation = media
+        await state.media_finished(None, generation, media_generation)
+        return
+    tag = _native_voice_tag(ogg, duration, "video_note" if video_note else source, path)
+    caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
+    await enqueue(msg, tag + caption, media=media, audio_paths=(ogg,))
+
+
 async def h_voice(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
@@ -505,9 +606,15 @@ async def h_voice(msg: types.Message):
     if media is None:
         return
     cs, gen, media_gen = media
-    path = await download_file(msg.voice.file_id, _media_name("voice", ".oga", msg), msg.voice.file_unique_id)
+    native = cs.runtime_id == "antigravity"
+    path = await download_file(msg.voice.file_id,
+                               _media_name("voice", ".ogg" if native else ".oga", msg),
+                               msg.voice.file_unique_id)
     if not path:
         await enqueue(msg, "[voice: файл слишком большой]", media=media)
+        return
+    if native:
+        await _enqueue_native_voice(msg, media, path, msg.voice.duration)
         return
     from config import DEEPGRAM as _DG
     if not _DG:
@@ -528,7 +635,7 @@ async def h_voice(msg: types.Message):
         full_prompt = f"{user_prefix(msg)}: {forward_meta(msg)}{reply_meta(msg)}[voice: {path}] (transcription failed: {err or 'unknown'})"
         fallback_entry = PendingEntry(
             prompt=full_prompt, message_id=msg.message_id, message=msg,
-            source="user", reply_target=chat_id,
+            source="user", reply_target=chat_id, interactive_user=_interactive_sender(msg),
         )
         await cs.media_finished(fallback_entry, gen, media_gen)
         return
@@ -540,6 +647,7 @@ async def h_voice(msg: types.Message):
         message=msg,
         source="user",
         reply_target=chat_id,
+        interactive_user=_interactive_sender(msg),
     )
     await cs.media_finished(entry, gen, media_gen)
 
@@ -551,7 +659,11 @@ async def h_media_album(messages: list[types.Message]):
     media = await _start_media(messages[0])
     if media is None:
         return
+    from media import native_ogg
+
     parts = []
+    audio_paths = []
+    native = media[0].runtime_id == "antigravity"
     for m in messages:
         if m.photo:
             path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
@@ -570,7 +682,16 @@ async def h_media_album(messages: list[types.Message]):
         elif m.audio:
             name = m.audio.file_name or _media_name("audio", ".mp3", m)
             path = await download_file(m.audio.file_id, name, m.audio.file_unique_id)
-            tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
+            if path and native:
+                try:
+                    ogg = await native_ogg(path, convert=True)
+                except (OSError, RuntimeError, TimeoutError):
+                    tag = "[audio: не удалось подготовить файл в Ogg]"
+                else:
+                    audio_paths.append(ogg)
+                    tag = _native_voice_tag(ogg, m.audio.duration, "audio")
+            else:
+                tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
             parts.append(tag)
     caption = ""
     for m in messages:
@@ -581,7 +702,8 @@ async def h_media_album(messages: list[types.Message]):
     media_block = "\n".join(parts)
     bare_photo = not caption and all(m.photo for m in messages)
     await enqueue(
-        messages[0], f"{fwd}{media_block}{caption}", media=media, bare_photo=bare_photo
+        messages[0], f"{fwd}{media_block}{caption}", media=media, bare_photo=bare_photo,
+        audio_paths=tuple(audio_paths),
     )
 
 
@@ -605,9 +727,13 @@ async def h_video_note(msg: types.Message):
     if media is None:
         return
     cs, gen, media_gen = media
+    native = cs.runtime_id == "antigravity"
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if not path:
         await enqueue(msg, "[video_note: файл слишком большой]", media=media)
+        return
+    if native:
+        await _enqueue_native_voice(msg, media, path, msg.video_note.duration, convert=True, video_note=True)
         return
     from config import DEEPGRAM as _DG
     if not _DG:
@@ -634,6 +760,7 @@ async def h_video_note(msg: types.Message):
                 message=msg,
                 source="user",
                 reply_target=chat_id,
+                interactive_user=_interactive_sender(msg),
             )
             await cs.media_finished(entry, gen, media_gen)
             return
@@ -644,6 +771,7 @@ async def h_video_note(msg: types.Message):
         message=msg,
         source="user",
         reply_target=chat_id,
+        interactive_user=_interactive_sender(msg),
     )
     await cs.media_finished(fallback_entry, gen, media_gen)
 
@@ -690,6 +818,9 @@ async def h_audio(msg: types.Message):
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
     name = msg.audio.file_name or _media_name("audio", ext, msg)
     path = await download_file(msg.audio.file_id, name, msg.audio.file_unique_id)
+    if path and media[0].runtime_id == "antigravity":
+        await _enqueue_native_voice(msg, media, path, msg.audio.duration, convert=True, source="audio")
+        return
     tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
     await enqueue(msg, tag, media=media)
 
@@ -724,6 +855,7 @@ COMMANDS_RU = [
     BotCommand(command="limits", description="Лимиты Claude, Codex, Spark и Grok"),
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
+    BotCommand(command="model", description="Модель / Model"),
     BotCommand(command="runtime", description="Рантайм и лимит (Claude/Codex)"),
     BotCommand(command="claude", description="Переключиться на Claude"),
     BotCommand(command="codex", description="Переключиться на Codex"),
@@ -741,6 +873,7 @@ COMMANDS_EN = [
     BotCommand(command="limits", description="Claude, Codex, Spark and Grok limits"),
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
+    BotCommand(command="model", description="Модель / Model"),
     BotCommand(command="runtime", description="Runtime and quota (Claude/Codex)"),
     BotCommand(command="claude", description="Switch to Claude"),
     BotCommand(command="codex", description="Switch to Codex"),
@@ -795,6 +928,8 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_clear, Command("clear"))
     dp.message.register(h_compact, Command("compact"))
     dp.message.register(h_runtime, Command("runtime"))
+    dp.message.register(h_model, Command("model"))
+    dp.callback_query.register(h_model_callback, F.data.startswith("model:"))
     dp.message.register(h_claude, Command("claude"))
     dp.message.register(h_codex, Command("codex"))
     dp.callback_query.register(h_runtime_callback, F.data.startswith("runtime:"))

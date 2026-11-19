@@ -261,3 +261,42 @@ async def download_file(file_id: str, name: str, unique_id: str = "") -> str | N
 def _media_name(prefix: str, ext: str, msg: types.Message) -> str:
     ts = msg.date.strftime("%Y%m%d_%H%M%S") if msg.date else str(msg.message_id)
     return f"{prefix}_{ts}_{msg.message_id}{ext}"
+
+
+
+async def native_ogg(path: str, *, convert: bool) -> str:
+    """Keep Telegram Ogg/Opus intact and transcode other media for ACP."""
+    import tempfile
+
+    source = Path(path)
+    with source.open("rb") as stream:
+        already_ogg = stream.read(4) == b"OggS"
+    if already_ogg and source.suffix == ".ogg":
+        return str(source)
+    with tempfile.NamedTemporaryFile(dir=source.parent, suffix=".ogg", prefix="voice-", delete=False) as temp:
+        target = Path(temp.name)
+    try:
+        if already_ogg:
+            import shutil
+            await asyncio.to_thread(shutil.copyfile, source, target)
+        elif convert:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1",
+                "-i", str(source), "-vn", "-c:a", "libopus", "-threads", "1", "-y", str(target),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                async with asyncio.timeout(30):
+                    await process.wait()
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+            if process.returncode != 0:
+                raise RuntimeError("Ogg conversion failed")
+        else:
+            raise RuntimeError("Telegram voice is not Ogg")
+        return str(target)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise

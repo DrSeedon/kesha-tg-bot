@@ -52,7 +52,13 @@ def test_dangerous_tools_are_not_exposed_yet():
     names = {t.name for t in bridge_tools()}
     assert BRIDGE_EXCLUDED == {"run_on_laptop"}
     assert not (names & BRIDGE_EXCLUDED)
-    assert len(names) == 16
+    assert names == {
+        "set_debounce", "toggle_debug", "get_bot_status", "restart_bot",
+        "send_photo", "send_file", "send_video", "send_audio", "send_voice", "react",
+        "create_reminder", "list_reminders", "cancel_reminder", "update_reminder",
+        "search_memory", "read_messages", "telegram_list_dialogs",
+        "telegram_read_dialog", "telegram_search_messages",
+    }
 
 
 @pytest.mark.parametrize(
@@ -71,8 +77,9 @@ def test_path_taking_tools_are_gated(tool_name):
 
 
 def test_all_tools_accounted_for():
-    assert len(ALL_TOOLS) == 17
-    assert len(bridge_tools()) + len(BRIDGE_EXCLUDED) == 17
+    all_names = [tool.name for tool in ALL_TOOLS]
+    assert len(all_names) == len(set(all_names)) == 20
+    assert set(all_names) == {tool.name for tool in bridge_tools()} | BRIDGE_EXCLUDED
 
 
 @pytest.mark.parametrize("tool", bridge_tools(), ids=lambda t: t.name)

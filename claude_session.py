@@ -954,6 +954,14 @@ class ClaudeSession:
         logger.info(f"Steered into the running turn: {text[:80]}...")
         return True
 
+    @property
+    def _handoff_file(self):
+        return self._session_file.with_name(self._session_file.name + ".handoff")
+
+    async def queue_handoff(self, text):
+        from runtime_handoff import write_private_json
+        write_private_json(self._handoff_file, text)
+
     async def send_message(self, text: str) -> AsyncGenerator[dict, None]:
         logger.info(f"Prompt: {text[:150]}...")
         stream: Optional[_ClientStream] = None
@@ -972,9 +980,16 @@ class ClaudeSession:
             prompt_uuid = str(uuid.uuid4())
             logger.info("send_message: connected, sending query...")
             async with self._query_lock:
+                handoff_file = self._handoff_file
+                has_handoff = handoff_file.exists()
+                if has_handoff:
+                    import json
+                    text = json.loads(handoff_file.read_text()) + "\n\n" + text
                 stream.pending[prompt_uuid] = False
                 await self._client.query(self._user_frames(text, prompt_uuid))
                 self._is_processing = True
+                if has_handoff:
+                    handoff_file.unlink(missing_ok=True)
             logger.info("send_message: query sent, receiving messages...")
             async for chunk in self._turn_chunks(stream, prompt_uuid):
                 yield chunk
@@ -1820,6 +1835,7 @@ class ClaudeSession:
         """Reset session and WAIT for disconnect to complete before returning.
         Use this when immediately calling send_message() on a new session."""
         self._invalidate_session()
+        self._handoff_file.unlink(missing_ok=True)
         self._last_ctx_usage = None
         self._max_output_tokens_valid = True
         self.last_max_output_tokens = None
@@ -1837,6 +1853,7 @@ class ClaudeSession:
 
     def reset(self):
         self._invalidate_session()
+        self._handoff_file.unlink(missing_ok=True)
         self._last_ctx_usage = None
         self._max_output_tokens_valid = True
         self.last_max_output_tokens = None

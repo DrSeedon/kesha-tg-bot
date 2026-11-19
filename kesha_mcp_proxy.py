@@ -1,6 +1,8 @@
 """Stdio MCP facade for Kesha's in-process Telegram tools."""
 
+import json
 import os
+import stat
 from typing import Any
 
 import aiohttp
@@ -59,6 +61,19 @@ async def call_bridge(name: str, arguments: dict[str, Any]) -> CallToolResult:
     socket = os.environ.get(SOCKET_ENV, "")
     token = os.environ.get(TOKEN_ENV, "")
     session = os.environ.get(SESSION_ENV, "")
+    auth_file = os.environ.get("KESHA_BRIDGE_AUTH_FILE")
+    if auth_file:
+        try:
+            fd = os.open(auth_file, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd) as stream:
+                info = os.fstat(stream.fileno())
+                if (info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode)
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 16_384):
+                    raise ValueError("Unsafe bridge credentials")
+                auth = json.load(stream)
+            socket, token, session = (auth[k] for k in ("socket", "token", "session"))
+        except (OSError, ValueError, KeyError, TypeError):
+            socket = token = session = ""
     if not socket or not token or not session:
         return CallToolResult(
             content=[TextContent(type="text", text="Kesha bridge is not configured")],

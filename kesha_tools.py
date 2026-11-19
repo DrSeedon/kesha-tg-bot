@@ -96,6 +96,7 @@ async def get_bot_status(args):
     dur = f"{c.last_duration_ms/1000:.1f}s" if c.last_duration_ms else "n/a"
     ctx = await c.get_context_usage()
     ctx_str = f"{ctx['percentage']:.0f}% ({ctx['totalTokens']}/{ctx['maxTokens']})" if ctx else "n/a"
+    cost = format(c.total_cost_usd, ".4f") if c.total_cost_usd is not None else "n/a"
     status = (
         f"Model: {c.model}\n"
         f"Session: {c.session_id or 'none'}\n"
@@ -103,9 +104,9 @@ async def get_bot_status(args):
         f"Debug: {'on' if _cfg.DEBUG else 'off'}\n"
         f"CWD: {_cfg.WORK_DIR}\n"
         f"Rate limit: {rl_str}\n"
-        f"Session cost: ${c.total_cost_usd:.4f}\n"
+        f"Session cost: ${cost}\n"
         f"Context: {ctx_str}\n"
-        f"Last response: {dur}, {c.last_num_turns} turns, stop={c.last_stop_reason}\n"
+        f"Last response: {dur}, {c.last_num_turns if c.last_num_turns is not None else 'n/a'} turns, stop={c.last_stop_reason or 'n/a'}\n"
         f"Media files: {_media.media_count()}\n"
         f"Log size: {_media.log_size()}"
     )

@@ -230,12 +230,12 @@ def _validate_summary_sections(summary: str) -> bool:
     return positions == sorted(positions)
 
 
-async def _collect_summary(claude) -> tuple[str, str | None]:
+async def _collect_summary(claude, send_options=None) -> tuple[str, str | None]:
     summary_parts: list[str] = []
     has_deltas = False
     failure_reason = None
     try:
-        async for chunk in claude.send_message(COMPACT_PROMPT):
+        async for chunk in claude.send_message(COMPACT_PROMPT, **(send_options or {})):
             chunk_type = chunk.get("type")
             content = str(chunk.get("content") or "")
             # ONLY typed evidence. Both runtimes normalize a real limit into
@@ -335,6 +335,8 @@ async def compact_session(
     claude,
     notify=None,
     recent_rows=None,
+    *,
+    interactive_user=False,
 ) -> dict:
     """Summarize the active session and atomically replace it with the summary.
 
@@ -342,6 +344,11 @@ async def compact_session(
     their verbatim text is appended to the validated summary so the tail is
     guaranteed by code rather than by the model complying with the prompt.
     """
+    send_options = {}
+    if getattr(claude, "no_prompt_replay", False) is True:
+        if interactive_user is not True:
+            return {"ok": False, "reason": "antigravity_interactive_only"}
+        send_options = {"interactive_user": True, "origin": "telegram"}
     before = await claude.get_context_usage()
     before_pct = before.get("percentage", 0) if before else 0
 
@@ -359,12 +366,14 @@ async def compact_session(
     await report(f"🗜 Сжимаю контекст... (было {before_pct:.0f}%)", replace=True)
     logger.info(f"Compact: requesting summary, before={before_pct:.1f}%")
 
+    if send_options:
+        claude.reset_response_usage()
     transaction = claude.begin_session_replacement()
     summary = ""
     failure_reason = "summary_error"
 
     try:
-        summary, failure_reason = await _collect_summary(claude)
+        summary, failure_reason = await _collect_summary(claude, send_options) if send_options else await _collect_summary(claude)
         if failure_reason:
             raise RuntimeError(failure_reason)
         if claude.session_id != transaction.session_id:
@@ -386,7 +395,10 @@ async def compact_session(
         preamble = CONTINUATION_PREAMBLE.format(summary=summary)
         preamble_failed = False
         preamble_limit = False
-        async for chunk in claude.send_message(preamble):
+        preamble_done = False
+        async for chunk in claude.send_message(preamble, **send_options):
+            if chunk.get("type") == "turn_done" and chunk.get("ok") is True:
+                preamble_done = True
             if chunk.get("type") != "error":
                 continue
             content = str(chunk.get("content") or "")
@@ -400,6 +412,9 @@ async def compact_session(
                 preamble_failed = True
                 failure_reason = "preamble_error"
 
+        if send_options and not preamble_done:
+            preamble_failed = True
+            failure_reason = failure_reason or "preamble_incomplete"
         if preamble_limit or preamble_failed:
             raise RuntimeError(failure_reason)
         if not claude.session_id:
@@ -407,6 +422,8 @@ async def compact_session(
             raise RuntimeError(failure_reason)
 
         claude.commit_session_replacement(transaction)
+        if send_options:
+            await claude._close_native(transaction.state)
         logger.info(f"Compact: committed session_id={claude.session_id[:8]}...")
 
         if notify:
@@ -475,3 +492,18 @@ async def compact_session(
             "after_pct": before_pct,
             "summary_chars": len(summary),
         }
+    finally:
+        if send_options:
+            from message_log import get_db
+
+            usage = claude.last_response_usage
+            try:
+                get_db().log_response_usage(
+                    claude.chat_id, "antigravity", model=claude.model,
+                    input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                    cache_read_tokens=usage.get("cache_read_tokens"),
+                    num_turns=usage.get("num_turns"), total_cost_usd=usage.get("cost_usd"),
+                )
+                logger.info("Antigravity compact usage recorded")
+            except Exception as exc:
+                logger.warning("Antigravity compact usage persistence failed (%s)", type(exc).__name__)

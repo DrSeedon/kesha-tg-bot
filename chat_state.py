@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from aiogram import Bot, types
     from claude_session import ClaudeSession
     from message_log import MessageLog
+    from reminders import OwnedReminder
 
 logger = logging.getLogger("kesha")
 
@@ -56,6 +57,9 @@ class PendingEntry:
     source: Literal["user", "reminder"] = "user"
     reply_target: "int | None" = None  # chat_id to send response to
     bare_photo: bool = False  # фото без подписи — ждём голосовое/текст следом
+    interactive_user: bool = False
+    audio_paths: tuple[str, ...] = ()
+    reminder: "OwnedReminder | None" = None
 
 
 @dataclass(slots=True)
@@ -108,6 +112,7 @@ class ChatState:
         self.cancel_requested: bool = False
         self.compact_requested: bool = False
         self.compact_requested_automatic: bool = False
+        self._compact_interactive = False
         self.batch_message_ids: list[int] = []
         self.last_user_message_id: int | None = None
         self.generation: int = 0
@@ -193,6 +198,8 @@ class ChatState:
 
     async def accept_entry(self, entry: PendingEntry) -> None:
         """Durably admit an entry, deferring every arrival during an active turn."""
+        if self.runtime_id == "antigravity" and not entry.interactive_user:
+            raise ValueError("antigravity_interactive_only")
         self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
@@ -218,7 +225,8 @@ class ChatState:
         message typed mid-turn; while stopping or compacting there is no turn
         to join, so it waits for the next batch.
         """
-        if self.phase == ChatPhase.PROCESSING and callable(getattr(self.session, "steer", None)):
+        steerable = self.runtime_id != "antigravity" or entry.interactive_user
+        if self.phase == ChatPhase.PROCESSING and steerable and callable(getattr(self.session, "steer", None)):
             self.steering.append(entry)
             if self._steer_task is None or self._steer_task.done():
                 self._steer_task = asyncio.create_task(self._steer_after(self.debounce_sec))
@@ -261,7 +269,13 @@ class ChatState:
             )
             await self._requeue(batch)
             return
-        if not await self.session.steer(combined):
+        steer_options = {}
+        if self.runtime_id == "antigravity":
+            steer_options = {
+                "interactive_user": all(e.interactive_user for e in batch),
+                "audio_paths": tuple(path for entry in batch for path in entry.audio_paths),
+            }
+        if not await self.session.steer(combined, **steer_options):
             await self._requeue(batch)
             return
         try:
@@ -515,7 +529,7 @@ class ChatState:
         finally:
             self._runtime_switch_task = None
 
-    async def switch_runtime(self, target: str) -> dict:
+    async def switch_runtime(self, target: str, *, selection=None) -> dict:
         """Swap the chat's backend, keeping the old one alive until the new one proves usable.
 
         Returns a result dict the caller renders into chat. Never silent: every
@@ -527,7 +541,7 @@ class ChatState:
         cheap request is not usable, and announcing a switch to it would strand
         the next message.
         """
-        if target == self.runtime_id:
+        if target == self.runtime_id and selection is None:
             return {"ok": False, "reason": "same", "runtime": target}
 
         try:
@@ -541,7 +555,7 @@ class ChatState:
         async with self._lock:
             if self._shutdown:
                 return {"ok": False, "reason": "shutdown", "runtime": target}
-            if self.phase is not ChatPhase.IDLE:
+            if self.phase is not ChatPhase.IDLE or self.pending_transcriptions:
                 return {"ok": False, "reason": "busy", "phase": str(self.phase),
                         "runtime": target}
             if self._debounce_task and not self._debounce_task.done():
@@ -562,20 +576,33 @@ class ChatState:
         try:
             if not self._build_runtime:
                 raise RuntimeError("runtime switching is not wired for this chat")
-            new_session = self._build_runtime(target, self.chat_id)
+            options = {"selection": selection} if selection is not None else {}
+            new_session = self._build_runtime(target, self.chat_id, **options)
 
             probe = await self._probe_runtime(new_session)
             if not probe["ok"]:
                 raise RuntimeError(probe.get("error") or "runtime did not respond")
 
-            handoff_note, handoff_status = await self._deliver_handoff(
-                new_session,
-                passive=runtime_definition.capabilities.passive_handoff,
-            )
+            handoff_status = "empty"
+            atomic_handoff = target != old_runtime and "antigravity" in (old_runtime, target)
+            if atomic_handoff:
+                handoff_note = await asyncio.wait_for(self._handoff_transcript(), HANDOFF_TIMEOUT_SECONDS)
+                handoff_status = "carried" if handoff_note else "empty"
+            elif target != old_runtime:
+                handoff_note, handoff_status = await self._deliver_handoff(
+                    new_session,
+                    passive=runtime_definition.capabilities.passive_handoff,
+                )
 
             # SQLite is the commit point. A restart after this write restores
             # the same per-chat runtime instead of the process-wide default.
-            self._activity_store.set_runtime(self.chat_id, target)
+            if atomic_handoff:
+                self._activity_store.adopt_runtime(self.chat_id, target, selection=selection,
+                                                   handoff=handoff_note)
+            elif selection is None:
+                self._activity_store.set_runtime(self.chat_id, target)
+            else:
+                self._activity_store.select_model(self.chat_id, target, *selection)
             self.session = new_session
             self.runtime_id = target
             self._listen_for_background_turns(new_session)
@@ -637,7 +664,8 @@ class ChatState:
 
         try:
             from tool_bridge import revoke_chat_sessions
-            revoke_chat_sessions(self.chat_id, old_runtime)
+            if self.runtime_id != old_runtime:
+                revoke_chat_sessions(self.chat_id, old_runtime)
         except Exception as exc:
             logger.warning(f"Chat {self.chat_id}: bridge revoke failed: {exc}")
 
@@ -735,6 +763,10 @@ class ChatState:
         self, new_session, *, passive: bool
     ) -> tuple[str | None, str]:
         """Inject context only when the backend has non-agentic ingress."""
+        inject = getattr(new_session, "inject_context", None)
+        if self.runtime_id == "antigravity" and not passive:
+            inject = getattr(new_session, "queue_handoff", None)
+            passive = callable(inject)
         if not passive:
             return None, "unsupported"
         try:
@@ -747,7 +779,6 @@ class ChatState:
             ) from exc
         if not transcript:
             return None, "empty"
-        inject = getattr(new_session, "inject_context", None)
         if not callable(inject):
             raise RuntimeError("runtime declares passive handoff without inject_context")
         try:
@@ -831,13 +862,17 @@ class ChatState:
         reader = getattr(session, "quota_summary", None)
         return reader() if callable(reader) else None
 
-    async def request_compact(self, automatic: bool = False) -> bool:
+    async def request_compact(self, automatic: bool = False, *, interactive_user=False) -> bool:
         """Request compaction; deferred requests preserve manual-over-automatic provenance."""
+        if self.runtime_id == "antigravity" and (automatic or interactive_user is not True):
+            return False
         if not automatic:
             self._activity_store.begin_activity(self.chat_id)
         async with self._lock:
             if self._shutdown:
                 return False
+            if self.runtime_id == "antigravity":
+                self._compact_interactive = interactive_user
             if automatic and getattr(self.session, "usage_limit_active", False):
                 logger.info(f"Chat {self.chat_id}: automatic compact skipped (usage limit)")
                 return True
@@ -895,8 +930,12 @@ class ChatState:
         await self._do_compact(automatic=automatic)
         return True
 
-    async def run_urgent_prompt(self, prompt: str) -> None:
+    async def run_urgent_prompt(self, prompt: str, *, reminder=None) -> None:
         """Run an urgent reminder now when idle, otherwise defer it safely."""
+        if self.runtime_id == "antigravity":
+            from reminders import OwnedReminder
+            if not isinstance(reminder, OwnedReminder):
+                raise ValueError("antigravity_interactive_only")
         self._activity_store.begin_activity(self.chat_id)
         entry = PendingEntry(
             prompt=prompt,
@@ -904,11 +943,15 @@ class ChatState:
             message=None,
             source="reminder",
             reply_target=self.chat_id,
+            reminder=reminder,
         )
         start_now = False
         async with self._lock:
             if self._shutdown:
                 raise RuntimeError("chat is shutting down")
+            if reminder is not None and self.phase != ChatPhase.IDLE:
+                reminder.finish(False)
+                return
             if self.phase in (
                 ChatPhase.PROCESSING,
                 ChatPhase.STOPPING,
@@ -1102,13 +1145,42 @@ class ChatState:
             ]
 
         turn_ran = False
+        owned = [entry.reminder for entry in batch if entry.reminder is not None]
+        selected_reminder = None
         try:
+            agy = self.runtime_id == "antigravity"
+            interactive = any(entry.interactive_user for entry in batch)
+            if agy:
+                from reminders import OwnedReminder
+                allowed = [entry for entry in batch if entry.interactive_user]
+                for entry in batch:
+                    if isinstance(entry.reminder, OwnedReminder):
+                        if not interactive and not allowed:
+                            allowed.append(entry)
+                            selected_reminder = entry.reminder
+                        else:
+                            entry.reminder.finish(False)
+                batch = allowed
+                if not batch:
+                    return
+            else:
+                batch = [entry for entry in batch if entry.reminder is None]
+                if not batch:
+                    return
             combined = self._compose(batch)
+            pending_handoff = None
+            pending = getattr(self._activity_store, "pending_handoff", None)
+            if interactive and callable(pending):
+                pending_handoff = pending(self.chat_id, self.runtime_id)
+                if pending_handoff:
+                    combined = pending_handoff[1] + "\n\n" + combined
 
             lazy_ids = []
             lazy_reschedule = []
             try:
-                lazy_block, lazy_ids, lazy_reschedule = self._get_lazy_block(self.chat_id)
+                lazy_block = ""
+                if not agy or interactive:
+                    lazy_block, lazy_ids, lazy_reschedule = self._get_lazy_block(self.chat_id)
                 if lazy_block:
                     combined = lazy_block + combined
                     logger.info(f"Chat {self.chat_id}: injected lazy reminders block ({len(lazy_block)} chars)")
@@ -1197,10 +1269,20 @@ class ChatState:
             except Exception as e:
                 logger.error(f"Chat {self.chat_id}: message_log user failed: {e}")
 
-            await self._ask_fn(reply_msg, combined, self.chat_id)
-            turn_ran = True
+            if agy:
+                turn_ran = await self._ask_fn(
+                    reply_msg, combined, self.chat_id,
+                    interactive_user=interactive, origin="telegram" if interactive else "owned_reminder",
+                    reminder=batch[0].reminder if not interactive else None,
+                    audio_paths=tuple(path for entry in batch for path in entry.audio_paths),
+                )
+            else:
+                await self._ask_fn(reply_msg, combined, self.chat_id)
+                turn_ran = True
 
-            if lazy_ids:
+            if pending_handoff and turn_ran:
+                self._activity_store.consume_handoff(self.chat_id, self.runtime_id, pending_handoff[0])
+            if lazy_ids and turn_ran:
                 try:
                     from reminders import mark_lazy_delivered
                     mark_lazy_delivered(lazy_ids, lazy_reschedule)
@@ -1214,6 +1296,8 @@ class ChatState:
             except Exception:
                 pass
         finally:
+            for reminder in owned:
+                reminder.finish(turn_ran if reminder is selected_reminder else False)
             await self._finish_processing(check_context=turn_ran)
 
     async def _finish_processing(self, *, check_context: bool = False) -> None:
@@ -1259,7 +1343,7 @@ class ChatState:
         the trigger and straight into the CLI's hard wall (25.09.2026, 88%→98%),
         after which even our summary request no longer fits. Measure again now.
         """
-        if self._shutdown or self._native_compact:
+        if self._shutdown or self._native_compact or self.runtime_id == "antigravity":
             return False
         if getattr(self.session, "usage_limit_active", False):
             return False
@@ -1386,8 +1470,15 @@ class ChatState:
             return {"ok": False, "reason": "usage_limit"}
         if self._native_compact:
             return await self._do_native_compact()
+        compact_options = {}
+        if self.runtime_id == "antigravity":
+            if automatic or not self._compact_interactive:
+                return {"ok": False, "reason": "antigravity_interactive_only"}
+            self._compact_interactive = False
+            compact_options = {"interactive_user": True}
         return await self._compact_session_fn(
             self.session,
+            **compact_options,
             notify=self._make_compact_notifier(),
             recent_rows=self._recent_user_rows(),
         )
@@ -1448,6 +1539,7 @@ class ChatState:
             async with self._lock:
                 self.compact_requested = False
                 self.compact_requested_automatic = False
+                self._compact_interactive = False
                 self._compact_started = False
             await self._drain_or_idle(record_activity=not automatic)
 
@@ -1540,18 +1632,23 @@ class ChatRegistry:
         self._activity_store = activity_store
         self._work_dir = work_dir
 
-    def build_session(self, runtime_id: str, chat_id: int):
+    def build_session(self, runtime_id: str, chat_id: int, *, selection=None):
         """Construct a backend for a chat. One path for both startup and switching."""
         from runtime_registry import RuntimeBuildContext, build_runtime
         # Session files are per runtime: each keeps its own thread/session id,
         # so switching back to a runtime resumes the history it already has.
         session_file = self._session_file(runtime_id, chat_id)
+        read_selection = getattr(self._activity_store, "get_model_selection", None)
+        if selection is None and callable(read_selection):
+            selection = read_selection(chat_id, runtime_id)
+        model, effort = selection or (self._model_for(runtime_id), None)
         return build_runtime(
             runtime_id,
             RuntimeBuildContext(
                 chat_id=chat_id,
                 cwd=self._work_dir,
-                model=self._model_for(runtime_id),
+                model=model,
+                reasoning_effort=effort,
                 system_prompt=self._system_prompt,
                 mcp_servers=self._mcp_config,
                 session_file=session_file,
@@ -1669,5 +1766,8 @@ class ChatRegistry:
         for chat in self._chats.values():
             await chat.wait_runtime_cleanups()
         for chat in self._chats.values():
-            await chat.session._safe_disconnect()
+            try:
+                await chat.session.safe_disconnect()
+            except Exception as exc:
+                logger.error("Runtime shutdown failed (%s)", type(exc).__name__)
         self._chats.clear()

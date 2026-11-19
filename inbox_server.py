@@ -52,7 +52,9 @@ async def handle_inbox(request: web.Request) -> web.Response:
     )
     try:
         state = _registry_ref.get(chat_id)
-        await state.accept_entry(entry)
+        native = state.runtime_id == "antigravity"
+        if not native:
+            await state.accept_entry(entry)
     except ActivityPersistenceError:
         logger.error(f"Inbox activity admission failed for chat {chat_id}")
         return web.json_response({"error": "message was not accepted; retry"}, status=503)
@@ -63,9 +65,16 @@ async def handle_inbox(request: web.Request) -> web.Response:
     label = f"📬 [{sender}]"
     tg_text = f"{label}\n{message}"
     try:
-        await _bot_ref.send_message(chat_id, tg_text)
+        if native:
+            from telegram_io import split_msg
+            for part in split_msg(tg_text):
+                await _bot_ref.send_message(chat_id, part, parse_mode=None)
+        else:
+            await _bot_ref.send_message(chat_id, tg_text)
     except Exception as e:
         logger.error(f"TG send failed: {e}")
+        if native:
+            return web.json_response({"error": "Telegram delivery failed; retry"}, status=503)
 
     logger.info(f"Inbox: {sender} → chat {chat_id} ({len(message)} chars)")
     return web.json_response({"ok": True})

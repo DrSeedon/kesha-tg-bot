@@ -121,6 +121,21 @@ def _acquire_singleton_lock():
 _singleton_lock_fp = None
 
 
+async def _greet_after_restart(bot, allowed, greet_llm, runtime_for_chat, urgent_handler):
+    for chat_id in allowed:
+        try:
+            await bot.send_message(chat_id, STRINGS["ru"]["started"])
+        except Exception:
+            pass
+        if greet_llm and runtime_for_chat(chat_id) != "antigravity":
+            asyncio.create_task(urgent_handler(
+                chat_id,
+                "[BOT RESTARTED] You just restarted after applying code changes. "
+                "Write a brief in-character message — confirm you're back and what was updated. "
+                "1-2 sentences max.",
+            ))
+
+
 async def main():
     global BOT_START_TIME, _singleton_lock_fp, registry
 
@@ -166,13 +181,25 @@ async def main():
     logger.info(f"Kesha bot | CWD={WORK_DIR} | Model={MODEL}")
     logger.info(f"Allowed: {ALLOWED or 'all'}")
 
-    async def _urgent_llm_handler(chat_id: int, prompt: str):
+    async def _urgent_llm_handler(chat_id: int, prompt: str, *, reminder=None):
         from datetime import datetime as dt, timezone as tz, timedelta as td
         krsk = tz(td(hours=7))
         now_str = dt.now(tz=krsk).strftime("%Y-%m-%d %H:%M %z")
         full_prompt = f"[{now_str}] " + prompt
-        await registry.get(chat_id).run_urgent_prompt(full_prompt)
+        state = registry.get(chat_id)
+        if reminder is not None:
+            if state.runtime_id != "antigravity":
+                return False
+            await state.run_urgent_prompt(full_prompt, reminder=reminder)
+            return await reminder.done
+        if state.runtime_id == "antigravity":
+            return False
+        await state.run_urgent_prompt(full_prompt)
 
+    def runtime_for_chat(chat_id):
+        return activity_store.get_runtime(chat_id) or RUNTIME
+
+    _reminders.set_runtime_lookup(runtime_for_chat)
     _reminders.set_urgent_llm_handler(_urgent_llm_handler)
 
     try:
@@ -184,14 +211,9 @@ async def main():
     should_greet_llm = GREET_FLAG.exists()
     if should_greet_llm:
         GREET_FLAG.unlink(missing_ok=True)
-    for uid in ALLOWED:
-        try:
-            await bot.send_message(uid, STRINGS["ru"]["started"])
-        except Exception:
-            pass
-        if should_greet_llm:
-            asyncio.create_task(_urgent_llm_handler(uid,
-                "[BOT RESTARTED] You just restarted after applying code changes. Write a brief in-character message — confirm you're back and what was updated. 1-2 sentences max."))
+    await _greet_after_restart(
+        bot, ALLOWED, should_greet_llm, runtime_for_chat, _urgent_llm_handler,
+    )
 
     try:
         await dp.start_polling(bot)

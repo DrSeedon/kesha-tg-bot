@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,20 @@ class MessageLog:
                 active_runtime TEXT NOT NULL,
                 history_floor_message_id INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+            );
+            CREATE TABLE IF NOT EXISTS chat_model_selection (
+                chat_id INTEGER NOT NULL,
+                runtime TEXT NOT NULL,
+                model TEXT NOT NULL,
+                effort TEXT,
+                PRIMARY KEY(chat_id, runtime)
+            );
+            CREATE TABLE IF NOT EXISTS chat_runtime_handoffs (
+                chat_id INTEGER NOT NULL,
+                runtime TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                PRIMARY KEY(chat_id, runtime)
             );
             -- One row per answered response. NULL means the runtime does not
             -- report that number (Codex has no cost and no cache-write split);
@@ -177,6 +192,51 @@ class MessageLog:
                 "runtime selection write failed"
             ) from exc
 
+    def get_model_selection(self, chat_id: int, runtime: str) -> tuple | None:
+        row = self.conn.execute(
+            "SELECT model, effort FROM chat_model_selection WHERE chat_id=? AND runtime=?",
+            (chat_id, runtime),
+        ).fetchone()
+        return tuple(row) if row else None
+
+    def select_model(self, chat_id: int, runtime: str, model: str, effort: str | None) -> None:
+        self.adopt_runtime(chat_id, runtime, selection=(model, effort))
+
+    def adopt_runtime(self, chat_id, runtime, *, selection=None, handoff=None):
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if selection is not None:
+                self.conn.execute(
+                    """INSERT INTO chat_model_selection VALUES (?, ?, ?, ?)
+                       ON CONFLICT(chat_id, runtime) DO UPDATE SET model=excluded.model, effort=excluded.effort""",
+                    (chat_id, runtime, *selection),
+                )
+            self.set_runtime(chat_id, runtime)
+            if handoff:
+                self.conn.execute(
+                    """INSERT INTO chat_runtime_handoffs VALUES (?, ?, ?, ?)
+                       ON CONFLICT(chat_id, runtime) DO UPDATE SET
+                         operation=excluded.operation, transcript=excluded.transcript""",
+                    (chat_id, runtime, uuid.uuid4().hex, handoff),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+
+    def pending_handoff(self, chat_id, runtime):
+        row = self.conn.execute(
+            "SELECT operation, transcript FROM chat_runtime_handoffs WHERE chat_id=? AND runtime=?",
+            (chat_id, runtime),
+        ).fetchone()
+        return tuple(row) if row else None
+
+    def consume_handoff(self, chat_id, runtime, operation):
+        self.conn.execute(
+            "DELETE FROM chat_runtime_handoffs WHERE chat_id=? AND runtime=? AND operation=?",
+            (chat_id, runtime, operation),
+        )
+
     def get_history_floor(self, chat_id: int) -> int:
         row = self.conn.execute(
             "SELECT history_floor_message_id FROM chat_runtime_state WHERE chat_id=?",
@@ -187,6 +247,8 @@ class MessageLog:
     def mark_history_cleared(self, chat_id: int, runtime_id: str) -> int:
         """Move the handoff floor without deleting the durable audit log."""
         try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute("DELETE FROM chat_runtime_handoffs WHERE chat_id=?", (chat_id,))
             self.conn.execute(
                 """
                 INSERT INTO chat_runtime_state(
@@ -202,7 +264,9 @@ class MessageLog:
                 """,
                 (chat_id, runtime_id, chat_id),
             )
+            self.conn.commit()
         except sqlite3.Error as exc:
+            self.conn.rollback()
             raise RuntimeStatePersistenceError(
                 "history clear floor write failed"
             ) from exc

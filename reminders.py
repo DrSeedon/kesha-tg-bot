@@ -3,12 +3,13 @@
 import asyncio
 import logging
 import re
+import random
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger("kesha.reminders")
@@ -44,6 +45,8 @@ def parse_interval(s: str) -> relativedelta:
     if not m:
         raise ValueError(f"Invalid interval '{s}'. Use formats: 30m, 2h, 1d, 1w, 3mo")
     n, unit = int(m.group(1)), m.group(2)
+    if n == 0:
+        raise ValueError("Repeat interval must be positive")
     if unit == "m":
         return relativedelta(minutes=n)
     if unit == "h":
@@ -72,8 +75,9 @@ def next_occurrence(prev_due: datetime, interval: str, at_time: Optional[str]) -
     if at_time:
         candidate = align_to_time(candidate, at_time)
         while candidate <= now:
-            candidate = candidate + delta
-            candidate = align_to_time(candidate, at_time)
+            advanced = candidate + delta
+            aligned = align_to_time(advanced, at_time)
+            candidate = aligned if aligned > candidate else advanced
     return candidate
 
 
@@ -83,6 +87,8 @@ class ReminderDB:
         self.conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._agy_inflight = set()
+        self._startup_plain = set()
         self._init()
 
     def _init(self):
@@ -102,8 +108,34 @@ class ReminderDB:
             );
             CREATE INDEX IF NOT EXISTS idx_pending ON reminders(due_at, fired_at);
             CREATE INDEX IF NOT EXISTS idx_lazy ON reminders(type, fired_at, delivered);
+            CREATE TABLE IF NOT EXISTS reminder_delivery (
+              reminder_id INTEGER NOT NULL,
+              due_at TEXT NOT NULL,
+              next_part INTEGER NOT NULL DEFAULT 0,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              retry_at TEXT,
+              state TEXT NOT NULL DEFAULT 'ready',
+              PRIMARY KEY(reminder_id, due_at)
+            );
+            CREATE TABLE IF NOT EXISTS agy_reminder_wakes (
+              reminder_id INTEGER NOT NULL,
+              due_at TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              PRIMARY KEY(reminder_id, due_at)
+            );
         """)
         self._migrate_cycle()
+
+    def reserve_agy_wake(self, row) -> bool:
+        now = utc_now()
+        cutoff = utc_iso(now - timedelta(hours=24))
+        self.conn.execute("DELETE FROM agy_reminder_wakes WHERE started_at<=?", (cutoff,))
+        return self.conn.execute(
+            """INSERT OR IGNORE INTO agy_reminder_wakes
+               SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM agy_reminder_wakes) < 8
+               AND NOT EXISTS (SELECT 1 FROM agy_reminder_wakes WHERE reminder_id=? AND started_at>?)""",
+            (row["id"], row["due_at"], utc_iso(now), row["id"], utc_iso(now - timedelta(hours=1))),
+        ).rowcount == 1
 
     def _migrate_cycle(self):
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(reminders)").fetchall()}
@@ -210,11 +242,39 @@ class ReminderDB:
         qs = ",".join("?" * len(ids))
         self.conn.execute(f"UPDATE reminders SET delivered=1 WHERE id IN ({qs})", tuple(ids))
 
-    def reschedule(self, id_: int, new_due: datetime):
+    def finish_occurrence(self, row, *, delivered=True):
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.get(row["id"])
+            if current is not None and current["due_at"] == row["due_at"]:
+                self.mark_fired(row["id"], delivered=delivered)
+                _reschedule_after_fire(self, row)
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+
+    def delivery(self, row):
+        key = (row["id"], row["due_at"])
+        self.conn.execute("INSERT OR IGNORE INTO reminder_delivery(reminder_id,due_at) VALUES (?,?)", key)
+        return self.conn.execute(
+            "SELECT * FROM reminder_delivery WHERE reminder_id=? AND due_at=?", key,
+        ).fetchone()
+
+    def record_delivery(self, row, *, part, state, attempts=0, retry_at=None):
+        self.conn.execute(
+            """UPDATE reminder_delivery SET next_part=?, state=?, attempts=?, retry_at=?
+               WHERE reminder_id=? AND due_at=?""",
+            (part, state, attempts, retry_at, row["id"], row["due_at"]),
+        )
+
+    def reschedule(self, id_: int, new_due: datetime, *, cycle_phase=None):
         due_str = utc_iso(new_due)
         self.conn.execute(
-            "UPDATE reminders SET due_at=?, fired_at=NULL, delivered=0 WHERE id=?",
-            (due_str, id_),
+            """UPDATE reminders SET due_at=?, fired_at=NULL, delivered=0,
+               type=CASE WHEN promoted=1 THEN 'lazy_llm' ELSE type END, promoted=0,
+               cycle_phase=COALESCE(?, cycle_phase) WHERE id=?""",
+            (due_str, cycle_phase, id_),
         )
 
 
@@ -266,6 +326,128 @@ async def reminder_loop(bot, claude, allowed_chat_ids: set):
         await asyncio.sleep(TICK_SECONDS)
 
 
+_runtime_for_chat = lambda chat_id: None
+
+
+def set_runtime_lookup(lookup):
+    global _runtime_for_chat
+    _runtime_for_chat = lookup
+
+
+def _reminder_text(row):
+    if row["cycle_on_days"] and row["cycle_phase"] == "off":
+        return row["text_off"] or row["text"]
+    return row["text"]
+
+
+class OwnedReminder:
+    """One scheduler occurrence. Admission rechecks the current DB row and allowlist."""
+
+    def __init__(self, db, row):
+        self.db = db
+        self.row = row
+        self.text = _reminder_text(row)
+        self.done = asyncio.get_running_loop().create_future()
+        self._admitted = False
+        self._consumed = False
+
+    def current(self):
+        row = self.db.get(self.row["id"])
+        return row is not None and dict(row) == dict(self.row) and row["fired_at"] is None
+
+    def eligible(self, chat_id):
+        from config import ALLOWED
+
+        if chat_id not in ALLOWED or chat_id != self.row["chat_id"] or not self.current():
+            return False
+        if self.row["type"] != "urgent_llm" or parse_iso(self.row["due_at"]) > utc_now():
+            return False
+        interval = self.row["repeat_interval"]
+        if interval:
+            due = parse_iso(self.row["due_at"])
+            try:
+                return due + parse_interval(interval) >= due + timedelta(hours=1)
+            except ValueError:
+                return False
+        return True
+
+    def admit(self, chat_id):
+        if self._admitted or not self.eligible(chat_id):
+            return False
+        self._admitted = self.db.reserve_agy_wake(self.row)
+        return self._admitted
+
+    def consume(self, chat_id):
+        if not self._admitted or self._consumed or not self.eligible(chat_id):
+            return False
+        self._consumed = True
+        return True
+
+    def finish(self, delivered):
+        if not self.done.done():
+            self.done.set_result(delivered)
+
+
+async def _send_plain(bot, chat_id, text):
+    from telegram_io import split_msg
+    for part in split_msg(text):
+        await bot.send_message(chat_id, part, parse_mode=None)
+
+
+async def _send_occurrence(bot, db, row, text):
+    """Record each confirmed send. Preserve an ambiguous outcome for inspection."""
+    from telegram_io import split_msg
+
+    progress = db.delivery(row)
+    state = progress["state"]
+    index = progress["next_part"]
+    if state in ("sending", "uncertain"):
+        db.record_delivery(row, part=index, state="uncertain")
+        return False
+    if progress["retry_at"] and progress["retry_at"] > utc_iso(utc_now()):
+        return None
+    if state == "failed":
+        return False
+    for index, part in enumerate(split_msg(text), start=0):
+        if index < progress["next_part"]:
+            continue
+        db.record_delivery(row, part=index, state="sending", attempts=progress["attempts"])
+        try:
+            await bot.send_message(row["chat_id"], part, parse_mode=None)
+        except (TelegramRetryAfter, TelegramBadRequest) as exc:
+            attempts = progress["attempts"] + 1
+            if attempts >= 5:
+                db.record_delivery(row, part=index, state="failed", attempts=attempts)
+                return False
+            delay = max(getattr(exc, "retry_after", 0), min(1800, 30 * 2 ** attempts))
+            db.record_delivery(row, part=index, state="retry", attempts=attempts,
+                               retry_at=utc_iso(utc_now() + timedelta(seconds=delay)))
+            return None
+        except Exception:
+            db.record_delivery(row, part=index, state="uncertain")
+            logger.warning("Telegram outcome unknown for reminder occurrence")
+            return False
+        db.record_delivery(row, part=index + 1, state="ready")
+    return True
+
+
+async def _deliver_owned(reminder, payload, bot, claude, db):
+    row = reminder.row
+    try:
+        chat_id = row["chat_id"]
+        if reminder.eligible(chat_id):
+            await asyncio.sleep(random.uniform(4.0, 23.0))
+        if not reminder.current():
+            return
+        delivered = await _run_urgent_llm(payload, chat_id, claude, bot, reminder=reminder)
+        if delivered is not None and reminder.current():
+            db.finish_occurrence(row, delivered=delivered)
+    except Exception:
+        logger.exception("Owned reminder delivery failed")
+    finally:
+        db._agy_inflight.discard(row["id"])
+
+
 async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
     rid = r["id"]
     chat_id = r["chat_id"]
@@ -281,21 +463,32 @@ async def _fire_reminder(r: sqlite3.Row, bot, claude, db: ReminderDB):
         else:
             msg_text = text
 
-        if rtype == "plain":
-            try:
-                await bot.send_message(chat_id, f"⏰ {msg_text}")
-            except TelegramBadRequest:
-                await bot.send_message(chat_id, f"⏰ {msg_text}", parse_mode=None)
-            db.mark_fired(rid, delivered=True)
-            logger.info(f"Reminder #{rid} plain delivered to {chat_id}")
+        startup_key = (rid, r["due_at"])
+        if startup_key in db._startup_plain:
+            delivered = await _send_occurrence(bot, db, r, f"⏰ {msg_text}")
+            if delivered is not None:
+                db.finish_occurrence(r, delivered=delivered)
+                db._startup_plain.discard(startup_key)
+            return
+        elif rtype == "plain":
+            delivered = await _send_occurrence(bot, db, r, f"⏰ {msg_text}")
+            if delivered is not None:
+                db.finish_occurrence(r, delivered=delivered)
+            return
         elif rtype == "urgent_llm":
             payload = (
                 f"[REMINDER FIRED at {due_local}, type=urgent_llm, id={rid}]\n"
                 f"Text: {msg_text}\n"
                 f"Action: deliver this reminder to the user in your style. Be brief."
             )
+            if _runtime_for_chat(chat_id) == "antigravity":
+                if rid not in db._agy_inflight:
+                    reminder = OwnedReminder(db, r)
+                    db._agy_inflight.add(rid)
+                    asyncio.create_task(_deliver_owned(reminder, payload, bot, claude, db))
+                return
             db.mark_fired(rid, delivered=False)
-            asyncio.create_task(_run_urgent_llm_and_mark(rid, payload, chat_id, claude, bot, db))
+            asyncio.create_task(_run_urgent_llm_and_mark(rid, payload, chat_id, claude, bot, db, text=msg_text))
             logger.info(f"Reminder #{rid} urgent_llm dispatched via run_urgent_prompt")
         elif rtype == "lazy_llm":
             db.mark_fired(rid, delivered=False)
@@ -317,9 +510,10 @@ def set_urgent_llm_handler(handler):
     _urgent_llm_handler = handler
 
 
-async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude, bot, db: ReminderDB):
+async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude, bot, db: ReminderDB,
+                                   *, text=None):
     try:
-        await _run_urgent_llm(payload, chat_id, claude, bot)
+        await _run_urgent_llm(payload, chat_id, claude, bot, text=text)
         db.update(rid, delivered=1)
         logger.info(f"Reminder #{rid} urgent_llm delivered ok")
     except Exception as e:
@@ -329,7 +523,8 @@ async def _run_urgent_llm_and_mark(rid: int, payload: str, chat_id: int, claude,
 async def _run_urgent_batch_and_mark(rids: list[int], payload: str, chat_id: int, claude, bot, db: ReminderDB,
                                      rows: list | None = None):
     try:
-        await _run_urgent_llm(payload, chat_id, claude, bot)
+        text = "\n".join(_reminder_text(row) for row in rows or ())
+        await _run_urgent_llm(payload, chat_id, claude, bot, text=text)
         db.mark_delivered_batch(rids)
         if rows:
             for r in rows:
@@ -339,17 +534,34 @@ async def _run_urgent_batch_and_mark(rids: list[int], payload: str, chat_id: int
         logger.error(f"Missed urgent_llm batch delivery failed: {e}")
 
 
-async def _run_urgent_llm(payload: str, chat_id: int, claude, bot):
+async def _run_urgent_llm(payload: str, chat_id: int, claude, bot, *, reminder=None, text=None):
     """Trigger Claude via normal bot pipeline (enqueue-like) so response goes to TG."""
+    if reminder is not None:
+        if (_urgent_llm_handler and _runtime_for_chat(chat_id) == "antigravity"
+                and reminder.admit(chat_id)):
+            try:
+                if await _urgent_llm_handler(chat_id, payload, reminder=reminder):
+                    return True
+            except Exception:
+                logger.exception("Falling back to plain reminder delivery")
+        if reminder.current():
+            return await _send_occurrence(bot, reminder.db, reminder.row, f"⏰ {reminder.text}")
+        return None
+    if _runtime_for_chat(chat_id) == "antigravity":
+        if text is not None:
+            await _send_plain(bot, chat_id, f"⏰ {text}")
+        return
     if _urgent_llm_handler:
         try:
-            await _urgent_llm_handler(chat_id, payload)
+            result = await _urgent_llm_handler(chat_id, payload)
+            if result is False and text:
+                await _send_plain(bot, chat_id, f"⏰ {text}")
             return
         except Exception as e:
             logger.error(f"urgent_llm handler failed, falling back to plain: {e}")
     # Fallback: send raw text
     try:
-        await bot.send_message(chat_id, f"⏰ {payload}")
+        await bot.send_message(chat_id, f"⏰ {text or payload}")
     except Exception:
         pass
 
@@ -394,8 +606,7 @@ def _reschedule_after_fire(db: ReminderDB, r: sqlite3.Row):
             else:
                 new_due += timedelta(days=on_days)
                 new_phase = "off"
-        db.reschedule(r["id"], new_due)
-        db.update(r["id"], cycle_phase=new_phase)
+        db.reschedule(r["id"], new_due, cycle_phase=new_phase)
         logger.info(f"Reminder #{r['id']} cycle→{new_phase}, next {utc_iso(new_due)}")
     elif r["repeat_interval"]:
         new_due = next_occurrence(parse_iso(r["due_at"]), r["repeat_interval"], r["repeat_at_time"])
@@ -420,14 +631,23 @@ async def deliver_missed_on_startup(bot, claude, allowed: set):
         urgent_missed = [r for r in chat_missed if r["type"] == "urgent_llm"]
         lazy_missed = [r for r in chat_missed if r["type"] == "lazy_llm"]
 
+        native = _runtime_for_chat(chat_id) == "antigravity"
+        if native:
+            db._startup_plain.update((row["id"], row["due_at"]) for row in urgent_missed)
+            plain_missed.extend(urgent_missed)
+            urgent_missed = []
         if plain_missed:
             try:
-                lines = [f"⏰ {r['text']}" for r in plain_missed]
-                msg = "📋 *Пропущенные напоминания (plain):*\n" + "\n".join(lines)
-                await bot.send_message(chat_id, msg[:4000])
+                if native:
+                    lines = ["📋 Пропущенные напоминания"] + [f"⏰ {_reminder_text(r)}" for r in plain_missed]
+                    await _send_plain(bot, chat_id, "\n".join(lines))
+                else:
+                    lines = [f"⏰ {r['text']}" for r in plain_missed]
+                    msg = "📋 *Пропущенные напоминания (plain):*\n" + "\n".join(lines)
+                    await bot.send_message(chat_id, msg[:4000])
                 for r in plain_missed:
-                    db.mark_fired(r["id"], delivered=True)
-                    _reschedule_after_fire(db, r)
+                    db.finish_occurrence(r)
+                    db._startup_plain.discard((r["id"], r["due_at"]))
                 logger.info(f"Delivered {len(plain_missed)} missed plain reminders to {chat_id}")
             except Exception as e:
                 logger.error(f"Failed missed plain digest: {e}")

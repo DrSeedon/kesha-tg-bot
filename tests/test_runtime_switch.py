@@ -644,7 +644,7 @@ def test_registry_shutdown_waits_for_terminal_runtime_cleanup(tmp_path, monkeypa
 
     new.inject_context = broken_inject
     new.safe_disconnect = slow_candidate_disconnect
-    chat.session._safe_disconnect = current_disconnect
+    chat.session.safe_disconnect = current_disconnect
     monkeypatch.setattr("chat_state.SWITCH_CLEANUP_TIMEOUT_SECONDS", 0.01)
 
     registry = ChatRegistry.__new__(ChatRegistry)

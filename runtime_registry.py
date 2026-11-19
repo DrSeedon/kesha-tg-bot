@@ -22,6 +22,7 @@ class RuntimeBuildContext:
     mcp_servers: dict
     session_file: Path
     on_connecting: Callable[[], None] | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,14 +123,19 @@ def _codex_factory(context: RuntimeBuildContext) -> ChatRuntime:
         mcp_servers=context.mcp_servers,
         session_file=context.session_file,
         on_connecting=context.on_connecting,
-        reasoning_effort=CODEX_REASONING_EFFORT,
+        reasoning_effort=context.reasoning_effort or CODEX_REASONING_EFFORT,
     )
 
 
 def _register_builtins() -> None:
     from claude_session import ClaudeSession
     from codex_session import CodexSession
+    from antigravity_session import AntigravitySession
 
+    register_runtime(
+        RuntimeDefinition("antigravity", AntigravitySession.CAPABILITIES, AntigravitySession),
+        replace=True,
+    )
     register_runtime(
         RuntimeDefinition(
             id="claude",
