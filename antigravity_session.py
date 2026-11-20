@@ -244,16 +244,29 @@ class AntigravitySession:
 
     async def check_context_reserve(self, combined="", *, manual=False):
         from claude_session import MANUAL_COMPACT_FLOOR_TOKENS
+        from config import ANTIGRAVITY_AUTO_COMPACT_TOKENS
+        from quota_gate import antigravity_cooldown_status
 
+        cooldown = antigravity_cooldown_status()
+        if cooldown is not None:
+            return {
+                "ok": False,
+                "reason": "usage_limit",
+                "message": cooldown["message"],
+                "should_compact": False,
+            }
         context = await self.get_context_usage()
         if context is None:
             return {"ok": True, "should_compact": False}
         used, maximum = context["totalTokens"], context["maxTokens"]
         remaining = maximum - used
         required = MANUAL_COMPACT_FLOOR_TOKENS if manual else 0
+        projected = used + (len(combined) // 4 if combined else 0)
+        should_compact = (not manual) and (used >= ANTIGRAVITY_AUTO_COMPACT_TOKENS or projected >= ANTIGRAVITY_AUTO_COMPACT_TOKENS)
         return {"ok": remaining >= required, "reason": "reserve" if remaining < required else None,
                 "required": required, "remaining": remaining, "usage": context,
-                "should_compact": False}
+                "should_compact": should_compact,
+                "compact_threshold_tokens": ANTIGRAVITY_AUTO_COMPACT_TOKENS}
 
     async def inject_context(self, text):
         self._state["handoff"] = text
@@ -456,18 +469,33 @@ class AntigravitySession:
                                           "percentage": round(used * 100 / size, 1), "model": self.model}
         # agent_thought_chunk is intentionally never emitted.
 
-    def _record_usage(self, result):
-        for key, value in (result.get("accounting") or {}).items():
+    def _record_usage(self, result, *, output_chars: int = 0, tool_calls: int = 0):
+        accounting = dict(result.get("accounting") or {})
+        context = self._state.get("context")
+        ctx_tokens = context["totalTokens"] if isinstance(context, dict) else None
+        if "cost_usd" not in accounting and ctx_tokens:
+            now_mono = asyncio.get_running_loop().time()
+            last_at = getattr(self, "_last_turn_completed_mono", None)
+            warm = last_at is not None and (now_mono - last_at) < 1800.0
+            api_calls = max(1, int(tool_calls or 0) + 1)
+            prompt_total = int(ctx_tokens) * api_calls
+            out_tok = max(1, int(output_chars or 0) // 4) if output_chars else 0
+            cost_usd = round((prompt_total * (0.50 if warm else 2.00) + out_tok * 12.00) / 1_000_000.0, 6)
+            accounting.setdefault("input_tokens", 0 if warm else prompt_total)
+            accounting.setdefault("cache_read_tokens", prompt_total if warm else 0)
+            accounting.setdefault("output_tokens", out_tok)
+            accounting.setdefault("cost_usd", cost_usd)
+        for key, value in accounting.items():
             if (key in ("input_tokens", "output_tokens", "cache_read_tokens", "cost_usd")
                     and type(value) in (int, float) and math.isfinite(value) and value >= 0):
                 self.last_response_usage[key] = self.last_response_usage.get(key, 0) + value
         self.last_response_usage["num_turns"] = self.last_response_usage.get("num_turns", 0) + 1
-        cost = (result.get("accounting") or {}).get("cost_usd")
+        cost = accounting.get("cost_usd")
         if type(cost) in (float, int) and math.isfinite(cost) and cost >= 0:
             self.total_cost_usd = (self.total_cost_usd or 0) + cost
+        self._last_turn_completed_mono = asyncio.get_running_loop().time()
         self.last_num_turns = self.last_response_usage["num_turns"]
         self.last_stop_reason = result.get("stopReason")
-        context = self._state.get("context")
         if context:
             self.last_response_usage["context_tokens"] = context["totalTokens"]
 
@@ -545,11 +573,15 @@ class AntigravitySession:
             client.attach = attach
             if client.session_id is not None:
                 attach(client.session_id)
+            turn_output_chars = 0
+            turn_tool_calls = 0
             pending_text = ""
             dropping_uri = False
             def filtered(chunk, *, flush=False):
-                nonlocal pending_text, dropping_uri
+                nonlocal pending_text, dropping_uri, turn_output_chars, turn_tool_calls
                 if chunk.get("type") != "text_delta":
+                    if chunk.get("type") == "tool":
+                        turn_tool_calls += 1
                     emit(chunk)
                     return
                 text = pending_text + chunk["content"]
@@ -574,6 +606,7 @@ class AntigravitySession:
                             pending_text, text = text[-length:], text[:-length]
                             break
                 if text:
+                    turn_output_chars += len(text)
                     emit({"type": "text_delta", "content": text})
             client.update = lambda update: self._update(update, filtered)
             self._accepting = True
@@ -624,7 +657,9 @@ class AntigravitySession:
                     await asyncio.gather(prompt, return_exceptions=True)
                 filtered({"type": "text_delta", "content": ""}, flush=True)
                 first = False
-                self._record_usage(result)
+                self._record_usage(result, output_chars=turn_output_chars, tool_calls=turn_tool_calls)
+                turn_output_chars = 0
+                turn_tool_calls = 0
                 self._save()
                 reason = result.get("stopReason")
                 steered_cancel = reason == "cancelled" and bool(self._steering) and not self._stopped
@@ -655,6 +690,12 @@ class AntigravitySession:
                     and isinstance(reminder, OwnedReminder) and reminder.consume(self.chat_id))):
             yield {"type": "error", "kind": "antigravity_interactive_only",
                    "content": "Antigravity принимает только разрешённые сообщения и напоминания."}
+            return
+        from quota_gate import antigravity_cooldown_status
+
+        cooldown = antigravity_cooldown_status()
+        if cooldown is not None:
+            yield {"type": "error", "kind": "usage_limit", "content": cooldown["message"]}
             return
         if self._task is not None:
             yield {"type": "error", "content": "Antigravity уже обрабатывает ход"}
@@ -691,13 +732,21 @@ class AntigravitySession:
             try:
                 await self._turn(text, audio_paths, emit, origin)
             except Exception as exc:
+                from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
+
                 if str(exc) == "uncertain_session":
                     for key in ("sessionId", "context", "framing"):
                         self._state.pop(key, None)
                     self._save()
                 if not self._stopped:
-                    await queue.put({"type": "error", "kind": "acp_turn_failed",
-                                     "content": "Ход Antigravity прерван или отклонён. Отправьте новое сообщение."})
+                    raw_exc = str(exc)
+                    is_quota, until_ts, _ = parse_antigravity_quota_cooldown(raw_exc)
+                    if is_quota or "антибан-стоп" in raw_exc:
+                        info = record_antigravity_cooldown(raw_exc, until_ts=until_ts) if is_quota else {"message": raw_exc}
+                        await queue.put({"type": "error", "kind": "usage_limit", "content": info["message"]})
+                    else:
+                        await queue.put({"type": "error", "kind": "acp_turn_failed",
+                                         "content": "Ход Antigravity прерван или отклонён. Отправьте новое сообщение."})
             finally:
                 flush_deltas()
                 self.last_duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)

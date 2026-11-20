@@ -1113,13 +1113,13 @@ class ChatState:
         await self._send_batch_terminal(batch, key, **fmt)
         return True
 
-    async def _compact_admitted_batch(self, batch: list[PendingEntry]) -> dict:
+    async def _compact_admitted_batch(self, batch: list[PendingEntry], *, interactive: bool = False) -> dict:
         """Run one compact while the caller retains ownership of `batch`."""
         async with self._lock:
             self.phase = ChatPhase.COMPACTING
             self._compact_started = True
         try:
-            return await self._compact_once(automatic=True)
+            return await self._compact_once(automatic=True, interactive_user=interactive)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1200,8 +1200,10 @@ class ChatState:
                     self.chat_id,
                     self.background_agents_open(),
                 )
+            elif reserve.get("should_compact") and agy and not interactive:
+                logger.info(f"Chat {self.chat_id}: non-interactive Antigravity compact skipped")
             elif reserve.get("should_compact"):
-                compact_result = await self._compact_admitted_batch(batch)
+                compact_result = await self._compact_admitted_batch(batch, interactive=interactive)
                 if compact_result.get("ok"):
                     reserve = await self._check_batch_context(combined)
                     if not reserve.get("ok"):
@@ -1461,7 +1463,7 @@ class ChatState:
         return {"ok": True, "before_pct": before_pct, "after_pct": after_pct,
                 "native": True, "measured_after": measured_after}
 
-    async def _compact_once(self, automatic: bool) -> dict:
+    async def _compact_once(self, automatic: bool, *, interactive_user: bool = False) -> dict:
         """Run one runtime-specific compact without changing chat ownership."""
         if automatic and getattr(self.session, "usage_limit_active", False):
             logger.info(
@@ -1472,7 +1474,7 @@ class ChatState:
             return await self._do_native_compact()
         compact_options = {}
         if self.runtime_id == "antigravity":
-            if automatic or not self._compact_interactive:
+            if not interactive_user and (automatic or not self._compact_interactive):
                 return {"ok": False, "reason": "antigravity_interactive_only"}
             self._compact_interactive = False
             compact_options = {"interactive_user": True}

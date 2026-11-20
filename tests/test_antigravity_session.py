@@ -157,12 +157,12 @@ def test_selection_and_active_runtime_persist_together(tmp_path):
 
     path = tmp_path / "chat.sqlite"
     db = MessageLog(path)
-    choice = resolve_choice("antigravity", 3, "xhigh")
+    choice = resolve_choice("antigravity", 3, "high")
     db.select_model(1, "antigravity", *choice)
     db.select_model(1, "codex", *resolve_choice("codex", 0, "medium"))
     restored = MessageLog(path)
     assert restored.get_runtime(1) == "codex"
-    assert restored.get_model_selection(1, "antigravity") == ("gemini-4-hydrogen-xhigh", None)
+    assert restored.get_model_selection(1, "antigravity") == ("gemini-4-hydrogen-high", None)
     assert restored.get_model_selection(1, "codex") == ("gpt-6.2-sol", "medium")
 
 

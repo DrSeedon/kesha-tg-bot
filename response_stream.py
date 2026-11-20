@@ -865,8 +865,12 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                             category=f" ({err})" if err else "",
                         )
                         break
+                    from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
+                    is_agy_quota, agy_until, _ = parse_antigravity_quota_cooldown(err)
                     reset = _session_limit_reset(err)
-                    if chunk.get("kind") == "usage_limit" or reset is not None:
+                    if chunk.get("kind") == "usage_limit" or reset is not None or is_agy_quota:
+                        if is_agy_quota:
+                            record_antigravity_cooldown(err, until_ts=agy_until)
                         # лимит сессии — НЕ ретраить (reconnect бесполезен), сообщить и выйти
                         logger.warning(f"Chat {cid}: session limit hit, NOT retrying: {err}")
                         await _handle_usage_limit(err)
@@ -915,8 +919,12 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
             raise
         except Exception as e:
             # session-limit может прилететь исключением (не yield) → тоже НЕ ретраить
+            from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
+            is_agy_quota, agy_until, _ = parse_antigravity_quota_cooldown(str(e))
             reset = _session_limit_reset(str(e))
-            if reset is not None:
+            if reset is not None or is_agy_quota:
+                if is_agy_quota:
+                    record_antigravity_cooldown(str(e), until_ts=agy_until)
                 logger.warning(f"Chat {cid}: session limit (exception), NOT retrying: {e}")
                 await _handle_usage_limit(str(e))
                 break

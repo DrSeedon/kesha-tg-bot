@@ -555,6 +555,9 @@ def _validate_laptop_cmd(cmd: str):
 
 @tool("run_on_laptop", "Execute a whitelisted command on the user's laptop via reverse SSH tunnel. For diagnostics: logs, status, restarts.", {"command": str, "timeout": int})
 async def run_on_laptop(args):
+    owner_err = _require_telegram_owner()
+    if owner_err is not None:
+        return owner_err
     chat_id = _require_chat()
     if isinstance(chat_id, dict):
         return chat_id

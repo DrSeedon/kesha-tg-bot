@@ -2,10 +2,10 @@
 
 MODELS = {
     "antigravity": (
-        ("Gemini 4 Neon", "gemini-4-neon", ("low", "medium", "high", "xhigh")),
+        ("Gemini 4 Neon", "gemini-4-neon", ("low", "medium", "high")),
         ("Gemini 4 Neon Orchestrator", "gemini-pro-orchestrator-neon", ("",)),
         ("Gemini 4 Carbon", "gemini-4-carbon", ("low", "high")),
-        ("Gemini 4 Hydrogen", "gemini-4-hydrogen", ("low", "medium", "high", "xhigh")),
+        ("Gemini 4 Hydrogen", "gemini-4-hydrogen", ("low", "medium", "high")),
     ),
     "claude": (
         ("Claude Opus 5.5", "claude-opus-5-5", ("",)),
