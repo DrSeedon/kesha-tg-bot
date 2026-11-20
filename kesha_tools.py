@@ -587,11 +587,55 @@ async def run_on_laptop(args):
         return {"content": [{"type": "text", "text": f"SSH error: {e}"}], "is_error": True}
 
 
+@tool(
+    "send_to_orchestrator",
+    "Deliver an authenticated Kesha handoff message to an Orchestra orchestrator (e.g. seedon-orchestrator)",
+    {"message": str, "orchestrator": str, "scope": str},
+)
+async def send_to_orchestrator(args):
+    import aiohttp
+    import limits
+
+    message = str(args.get("message") or "").strip()
+    orchestrator = str(args.get("orchestrator") or "").strip()
+    scope = str(args.get("scope") or "").strip()
+    if not message:
+        return {"content": [{"type": "text", "text": "message is required"}], "is_error": True}
+    if not orchestrator or not re.fullmatch(r"[A-Za-z0-9._-]+", orchestrator):
+        return {"content": [{"type": "text", "text": "valid orchestrator name is required"}], "is_error": True}
+
+    try:
+        token = limits.orchestra_token()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra token unavailable: {exc}"}], "is_error": True}
+
+    url = limits._orchestra_url(f"/api/sessions/{orchestrator}/send")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Orchestra-Kesha-Handoff": "1",
+    }
+    payload = {"message": message, "scope": scope, "channel": "kesha"}
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                body = await resp.text()
+                if resp.status >= 400:
+                    return {
+                        "content": [{"type": "text", "text": f"Orchestra send failed (HTTP {resp.status}): {body[:400]}"}],
+                        "is_error": True,
+                    }
+                return {"content": [{"type": "text", "text": f"Delivered to {orchestrator}: {body[:400]}"}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra request error: {exc}"}], "is_error": True}
+
+
 ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_photo, send_file, send_video, send_audio, send_voice, react,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
              search_memory, read_messages, telegram_list_dialogs,
-             telegram_read_dialog, telegram_search_messages, run_on_laptop]
+             telegram_read_dialog, telegram_search_messages,
+             send_to_orchestrator, run_on_laptop]
 
 # run_on_laptop shells out over SSH to the user's machine and still awaits its
 # own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.

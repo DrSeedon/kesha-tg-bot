@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("kesha")
@@ -21,20 +23,37 @@ TOOL_ICONS = {
     "Skill": "🧩",
     "TodoWrite": "📝",
     "NotebookEdit": "📓",
+    "run_command": "🖥",
+    "read_file": "📖",
+    "view_file": "📖",
+    "write_file": "✏️",
+    "edit_file": "✏️",
+    "replace_file_content": "✏️",
+    "multi_replace_file_content": "✏️",
+    "grep_search": "🔎",
+    "find_by_name": "🔎",
+    "list_dir": "🔎",
 }
 
-# Icons per MCP server name (extracted from mcp__<server>__<tool>)
+# Icons per MCP server name (extracted from mcp__<server>__<tool> or mcp_<server>_...)
 MCP_SERVER_ICONS = {
     "mailru": "📧",
+    "gmail": "📧",
     "websearch": "🌐",
     "kesha": "🦜",
+    "orchestra": "🎼",
     "yougile": "📋",
     "pandoc": "📄",
     "mcp-pandoc": "📄",
     "aperant": "🏠",
     "github": "🐙",
     "github-actions": "⚙️",
+    "gpb": "🏦",
+    "ozon": "🛒",
+    "hub-images": "🖼",
 }
+_ACP_MCP_HEX_RE = re.compile(r"^mcp_([a-z0-9-]+?)_[0-9a-f]{8}_(.+)$")
+_ACP_MCP_PLAIN_RE = re.compile(r"^mcp_([a-z0-9-]+?)_(.+)$")
 
 EDIT_INTERVAL = 1.0         # min seconds between message edits (TG limit ~1 edit/s per message)
 TICK_INTERVAL = 1.0         # how often the timer refreshes the display
@@ -44,29 +63,56 @@ MAX_VISIBLE_TOOLS = 20      # bubble lives the whole turn now — keep it under 
 MAX_BUBBLE_LEN = 3900
 
 
+def _parse_mcp_tool(name: str) -> tuple[str, str] | None:
+    clean = " ".join(str(name).split())
+    if clean.startswith("Run "):
+        clean = clean[4:].strip()
+    if clean.startswith("mcp__"):
+        parts = clean.split("__", 2)
+        if len(parts) >= 3:
+            return parts[1], parts[2]
+        if len(parts) == 2:
+            return parts[1], clean
+        return None
+    if clean.startswith("mcp_"):
+        m = _ACP_MCP_HEX_RE.match(clean) or _ACP_MCP_PLAIN_RE.match(clean)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
 def _tool_icon(name: str) -> str:
-    # MCP tool format: mcp__<server>__<action> — pick icon by server name,
-    # not by substring match on the action (avoids mail_read → 📖 Read false positive)
-    if name.startswith("mcp__"):
-        parts = name.split("__")
-        if len(parts) >= 2:
-            server = parts[1]
-            return MCP_SERVER_ICONS.get(server, "🔌")
-        return "🔌"
-    # Built-in tool: exact startswith match only
+    parsed = _parse_mcp_tool(name)
+    if parsed is not None:
+        return MCP_SERVER_ICONS.get(parsed[0], "🔌")
+    clean = " ".join(str(name).split())
+    if clean.startswith(("File ", "Read ", "View ")):
+        return "📖"
+    if clean.startswith(("Edit ", "Write ")):
+        return "✏️"
+    if clean.startswith(("Grep ", "Find ", "Search ")):
+        return "🔎"
+    if clean.startswith("Run "):
+        return "🖥"
     for key, icon in TOOL_ICONS.items():
-        if name == key or name.startswith(key):
+        if clean == key or clean.startswith(key):
             return icon
     return "🔧"
 
 
 def _tool_short_name(name: str) -> str:
-    """For MCP tools, strip the mcp__ prefix for readability: mcp__mailru__mail_read → mail_read"""
-    if name.startswith("mcp__"):
-        parts = name.split("__", 2)
-        if len(parts) >= 3:
-            return parts[2]
-    return name
+    """Format MCP and ACP tool titles concisely onto a single readable line."""
+    parsed = _parse_mcp_tool(name)
+    if parsed is not None:
+        return parsed[1]
+    clean = " ".join(str(name).split())
+    if clean.startswith("File "):
+        target = clean[5:].strip().split(" ", 1)[0]
+        return Path(target).name or clean
+    if clean.startswith("Run "):
+        cmd = clean[4:].strip()
+        return cmd if len(cmd) <= 60 else cmd[:59] + "…"
+    return clean
 
 
 def _escape_md(s: str) -> str:
@@ -114,7 +160,7 @@ class ToolStatusTracker:
         hint = _format_hint(tool_input)
         self.tools.append({"name": display_name, "icon": icon, "hint": hint, "start": now, "end": None})
         self._current_idx = len(self.tools) - 1
-        await self._render(force=True)
+        await self._render(force=False)
         if self._tick_task is None:
             self._tick_task = asyncio.create_task(self._ticker())
 
@@ -138,7 +184,7 @@ class ToolStatusTracker:
         if current["end"] is None:
             current["end"] = time.time()
         self._current_idx = None
-        await self._render(force=True)
+        await self._render(force=False)
 
     def _render_text(self, final: bool = False, failed: bool = False) -> str:
         now = time.time()
@@ -171,11 +217,10 @@ class ToolStatusTracker:
         if self._stopped:
             return
         now = time.time()
-        if not force:
-            if now < self._flood_until:
-                return
-            if (now - self._last_edit_ts) < EDIT_INTERVAL:
-                return
+        if now < self._flood_until:
+            return
+        if not force and (now - self._last_edit_ts) < EDIT_INTERVAL:
+            return
         text = self._render_text(final=False)
         if text == self._last_text and not force:
             return
@@ -188,7 +233,7 @@ class ToolStatusTracker:
                 self._last_text = text
                 self._last_edit_ts = now
             except Exception as e:
-                logger.debug(f"ToolStatus initial send error: {e}")
+                self._handle_tg_error(e, now, text, label="initial send")
             return
         try:
             await self.bot.edit_message_text(
@@ -197,18 +242,20 @@ class ToolStatusTracker:
             self._last_text = text
             self._last_edit_ts = now
         except Exception as e:
-            err = str(e)
-            if "Flood control" in err or "retry after" in err.lower():
-                import re
-                m = re.search(r"retry after (\d+)", err, re.IGNORECASE)
-                wait = int(m.group(1)) if m else 15
-                self._flood_until = now + wait + 1
-                logger.info(f"ToolStatus flood control, pausing edits for {wait}s")
-            elif "message is not modified" in err:
-                self._last_text = text
-                self._last_edit_ts = now
-            else:
-                logger.debug(f"ToolStatus edit error: {e}")
+            self._handle_tg_error(e, now, text, label="edit")
+
+    def _handle_tg_error(self, e: Exception, now: float, text: str, *, label: str) -> None:
+        err = str(e)
+        if "Flood control" in err or "retry after" in err.lower():
+            m = re.search(r"retry after (\d+)", err, re.IGNORECASE)
+            wait = int(m.group(1)) if m else 15
+            self._flood_until = now + wait + 1
+            logger.info(f"ToolStatus flood control, pausing edits for {wait}s")
+        elif "message is not modified" in err:
+            self._last_text = text
+            self._last_edit_ts = now
+        else:
+            logger.debug(f"ToolStatus {label} error: {e}")
 
     async def finalize(self) -> Optional[int]:
         """Stop ticker, mark all tools done, render final state. Returns status msg_id or None."""
@@ -229,15 +276,17 @@ class ToolStatusTracker:
         self._tick_task = None
         if not self.tools or self.status_msg is None:
             return self.status_msg.message_id if self.status_msg else None
+        if now < self._flood_until:
+            return self.status_msg.message_id
         final_text = self._render_text(final=True)
         if final_text != self._last_text:
             try:
                 await self.bot.edit_message_text(
                     final_text, chat_id=self.chat_id, message_id=self.status_msg.message_id, parse_mode="Markdown"
                 )
+                self._last_text = final_text
             except Exception as e:
-                if "message is not modified" not in str(e):
-                    logger.debug(f"ToolStatus finalize edit error: {e}")
+                self._handle_tg_error(e, now, final_text, label="finalize edit")
         return self.status_msg.message_id
 
     async def fail(self) -> Optional[int]:
@@ -258,6 +307,8 @@ class ToolStatusTracker:
         self._tick_task = None
         if not self.tools or self.status_msg is None:
             return self.status_msg.message_id if self.status_msg else None
+        if now < self._flood_until:
+            return self.status_msg.message_id
         final_text = self._render_text(failed=True)
         if final_text != self._last_text:
             try:
@@ -267,9 +318,9 @@ class ToolStatusTracker:
                     message_id=self.status_msg.message_id,
                     parse_mode="Markdown",
                 )
+                self._last_text = final_text
             except Exception as e:
-                if "message is not modified" not in str(e):
-                    logger.debug(f"ToolStatus fail edit error: {e}")
+                self._handle_tg_error(e, now, final_text, label="fail edit")
         return self.status_msg.message_id
 
     async def cancel_empty(self):

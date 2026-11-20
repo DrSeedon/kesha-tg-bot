@@ -501,8 +501,10 @@ class AntigravitySession:
             await asyncio.gather(submitted, return_exceptions=True)
         if prompt.done():
             return await prompt
-        async with asyncio.timeout(5):
-            await client.request("session/cancel", {"sessionId": self.session_id}, timeout=3)
+        cancel_sid = client.session_id or self.session_id
+        async with asyncio.timeout(30):
+            if cancel_sid:
+                await client.request("session/cancel", {"sessionId": cancel_sid}, timeout=3)
             return await asyncio.shield(prompt)
 
     async def _turn(self, text, audio_paths, emit, origin):
@@ -624,11 +626,13 @@ class AntigravitySession:
                 first = False
                 self._record_usage(result)
                 self._save()
-                emit({"type": "turn_done", "ours": True, "ok": result.get("stopReason") == "end_turn",
+                reason = result.get("stopReason")
+                steered_cancel = reason == "cancelled" and bool(self._steering) and not self._stopped
+                emit({"type": "turn_done", "ours": True,
+                      "ok": reason == "end_turn" or steered_cancel,
                       "usage": dict(self.last_response_usage)})
                 if self._stopped:
                     break
-                reason = result.get("stopReason")
                 if reason not in ("end_turn", "cancelled"):
                     raise MuxError("Antigravity завершил ход без ответа")
                 if not self._steering:

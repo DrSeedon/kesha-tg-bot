@@ -58,6 +58,7 @@ def test_dangerous_tools_are_not_exposed_yet():
         "create_reminder", "list_reminders", "cancel_reminder", "update_reminder",
         "search_memory", "read_messages", "telegram_list_dialogs",
         "telegram_read_dialog", "telegram_search_messages",
+        "send_to_orchestrator",
     }
 
 
@@ -78,7 +79,7 @@ def test_path_taking_tools_are_gated(tool_name):
 
 def test_all_tools_accounted_for():
     all_names = [tool.name for tool in ALL_TOOLS]
-    assert len(all_names) == len(set(all_names)) == 20
+    assert len(all_names) == len(set(all_names)) == 21
     assert set(all_names) == {tool.name for tool in bridge_tools()} | BRIDGE_EXCLUDED
 
 
