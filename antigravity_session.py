@@ -284,7 +284,26 @@ class AntigravitySession:
                 trace_handle = issue_session(self.chat_id, ttl=86400, runtime=runtime)
                 self._skillcache_trace_handle = trace_handle
 
-        launcher = str(Path(__file__).with_name("kesha_mcp_launcher.py"))
+        code_dir = Path(__file__).resolve().parent
+        stable_current = Path("/opt/kesha-bot/current")
+        if "/opt/kesha-bot/releases/" in str(code_dir) and stable_current.is_symlink():
+            code_dir = stable_current
+
+        if trace_handle:
+            trace_payload = {
+                "chat_id": self.chat_id,
+                "socket": str(SOCKET_PATH),
+                "handle": trace_handle,
+                "schema_dir": os.environ.get("KESHA_SKILLCACHE_SCHEMA_DIR", ""),
+            }
+            trace_file = self.session_file.with_name("skillcache-trace-antigravity.json")
+            try:
+                write_private_json(trace_file, trace_payload)
+            except OSError:
+                pass
+
+        launcher = str(code_dir / "kesha_mcp_launcher.py")
+        proxy_path = str(code_dir / "kesha_mcp_proxy.py")
         servers = []
         for name, config in self.mcp_servers.items():
             if not isinstance(config, dict):
@@ -302,7 +321,7 @@ class AntigravitySession:
                                               "socket": str(SOCKET_PATH)})
                 servers.append({
                     "name": name, "command": sys.executable,
-                    "args": [str(Path(__file__).with_name("kesha_mcp_proxy.py"))],
+                    "args": [proxy_path],
                     "env": {"KESHA_BRIDGE_AUTH_FILE": str(auth_file)},
                 })
             elif config.get("command"):
@@ -310,10 +329,7 @@ class AntigravitySession:
                     "name": name,
                     "command": sys.executable,
                     "args": [launcher, name],
-                    "env": {"KESHA_SKILLCACHE_TRACE_SOCKET": str(SOCKET_PATH),
-                            "KESHA_SKILLCACHE_TRACE_HANDLE": trace_handle,
-                            "KESHA_SKILLCACHE_SCHEMA_DIR": os.environ.get("KESHA_SKILLCACHE_SCHEMA_DIR", "")
-                            } if trace_handle else {},
+                    "env": {},
                 })
         # The server wraps every command in agy-clean-exec and validates the env.
         return servers
@@ -683,7 +699,7 @@ class AntigravitySession:
 
         cooldown = antigravity_cooldown_status()
         if cooldown is not None:
-            yield {"type": "error", "kind": "usage_limit", "failover": True, "content": cooldown["message"]}
+            yield {"type": "error", "kind": "usage_limit", "content": cooldown["message"]}
             return
         if self._task is not None:
             yield {"type": "error", "content": "Antigravity уже обрабатывает ход"}
@@ -731,9 +747,9 @@ class AntigravitySession:
                     is_quota, until_ts, _ = parse_antigravity_quota_cooldown(raw_exc)
                     if is_quota or "антибан-стоп" in raw_exc:
                         info = record_antigravity_cooldown(raw_exc, until_ts=until_ts) if is_quota else {"message": raw_exc}
-                        await queue.put({"type": "error", "kind": "usage_limit", "failover": True, "content": info["message"]})
+                        await queue.put({"type": "error", "kind": "usage_limit", "content": info["message"]})
                     elif isinstance(exc, MuxError) or "ACP mux" in raw_exc:
-                        await queue.put({"type": "error", "kind": "antigravity_failover", "failover": True, "content": raw_exc or "ACP mux offline"})
+                        await queue.put({"type": "error", "kind": "acp_mux_offline", "content": raw_exc or "ACP mux offline"})
                     else:
                         await queue.put({"type": "error", "kind": "acp_turn_failed",
                                          "content": "Ход Antigravity прерван или отклонён. Отправьте новое сообщение."})

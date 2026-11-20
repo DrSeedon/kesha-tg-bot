@@ -112,22 +112,15 @@ async def test_antigravity_offline_mux_fails_fast_and_auto_failovers_to_codex_so
         model = "gemini-4-neon-medium"
         def __init__(self):
             self.safe_disconnect = AsyncMock()
-            self.check_context_reserve = AsyncMock(return_value={"ok": True, "should_compact": False})
+            self.check_context_reserve = AsyncMock(return_value={"ok": True, "should_compact": True})
 
     bot = AsyncMock()
     agy_sess = AntigravitySession()
-    codex_sess = SimpleNamespace(
-        model="gpt-6.2-sol",
-        probe_readiness=AsyncMock(return_value={"ok": True}),
-        inject_context=AsyncMock(),
-        safe_disconnect=AsyncMock(),
-        check_context_reserve=AsyncMock(return_value={"ok": True, "should_compact": False}),
-    )
     asked = []
 
     async def fake_ask(msg, prompt, cid, **kwargs):
         asked.append((state.runtime_id, getattr(state.session, "model", None), prompt))
-        return True
+        return False
 
     state = ChatState(
         chat_id=720740564,
@@ -136,28 +129,29 @@ async def test_antigravity_offline_mux_fails_fast_and_auto_failovers_to_codex_so
         debounce_sec=0,
         ask_fn=fake_ask,
         set_current_chat_fn=lambda _c: None,
-        get_lazy_block_fn=lambda _c: "",
-        compact_session_fn=AsyncMock(return_value={"ok": True}),
+        get_lazy_block_fn=lambda _c: ("", [], []),
+        compact_session_fn=AsyncMock(return_value={"ok": False, "reason": "summarizer_transient"}),
         activity_store=store,
         work_dir=str(tmp_path),
         runtime_id="antigravity",
-        build_runtime_fn=lambda target, _cid, selection=None: codex_sess,
+        build_runtime_fn=lambda target, _cid, selection=None: pytest.fail("must not auto-failover to codex"),
     )
 
     from chat_state import PendingEntry
     batch = [PendingEntry(prompt="[user]: сделай дело", message_id=2, message=None, interactive_user=True)]
-    monkeypatch.setattr(agy, "is_acp_mux_socket_present", lambda: False)
-    state._check_batch_context = AsyncMock(return_value={"ok": True, "should_compact": False})
+    state._check_batch_context = AsyncMock(return_value={
+        "ok": True,
+        "should_compact": True,
+        "compact_threshold_tokens": 180_000,
+        "usage": {"totalTokens": 274_000, "maxTokens": 1_000_000},
+    })
+    state._compact_admitted_batch = AsyncMock(return_value={"ok": False, "reason": "summarizer_transient"})
     await state._run_batch(batch)
 
-    assert state.runtime_id == "codex"
-    assert state.session is codex_sess
-    assert store.get_runtime(720740564) == "codex"
-    assert store.get_model_selection(720740564, "codex") == ("gpt-6.2-sol", "medium")
-    handoff = store.pending_handoff(720740564, "codex")
-    assert handoff is not None and "Предыдущий вопрос" in handoff[1]
-    assert any("⚡ Antigravity недоступен — переключил чат на GPT-6.2-Sol" in str(c) for c in bot.send_message.call_args_list)
-    assert len(asked) == 1 and asked[0][0] == "codex" and "сделай дело" in asked[0][2]
+    assert state.runtime_id == "antigravity"
+    assert state.session is agy_sess
+    assert not any("GPT-6.2-Sol" in str(c) for c in bot.send_message.call_args_list)
+    assert len(asked) == 1 and asked[0][0] == "antigravity" and "сделай дело" in asked[0][2]
 
 
 @pytest.mark.asyncio

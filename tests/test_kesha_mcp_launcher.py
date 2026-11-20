@@ -315,3 +315,43 @@ def test_sanitize_compacts_oversized_gmail_send_schema_below_eager_threshold():
     assert len(json.dumps(out, ensure_ascii=False)) <= 1600
     assert set(out["inputSchema"]["properties"]) == set(big_props)
     assert out["inputSchema"]["properties"]["attachments"]["type"] == "array"
+
+
+def test_acp_mcp_servers_keeps_empty_env_with_trace_db_and_proxy_reads_private_file(tmp_path, monkeypatch):
+    import antigravity_session as agy
+    import skillcache_trace as st
+    from runtime_registry import RuntimeBuildContext
+
+    trace_db = tmp_path / "trace.db"
+    schema_dir = tmp_path / "schemas"
+    schema_dir.mkdir()
+    monkeypatch.setenv("KESHA_SKILLCACHE_TRACE_DB", str(trace_db))
+    monkeypatch.setenv("KESHA_SKILLCACHE_SCHEMA_DIR", str(schema_dir))
+    monkeypatch.setenv("KESHA_TOOL_BRIDGE_TOKEN", "test-bridge-token-123")
+
+    ctx = RuntimeBuildContext(
+        chat_id=12345,
+        cwd=str(tmp_path),
+        model="gemini-4-neon-medium",
+        system_prompt="test",
+        mcp_servers={
+            "gmail": {"command": "uv", "args": ["run", "gmail"]},
+            "mailru": {"command": "python3", "args": ["mail.py"]},
+        },
+        session_file=tmp_path / "12345.antigravity",
+    )
+    sess = agy.AntigravitySession(ctx)
+    acp_list = sess._acp_mcp_servers()
+    assert len(acp_list) == 2
+    for item in acp_list:
+        assert item["env"] == {}
+
+    trace_file = tmp_path / "skillcache-trace-antigravity.json"
+    assert trace_file.is_file()
+    assert (trace_file.stat().st_mode & 0o077) == 0
+    monkeypatch.delenv("KESHA_SKILLCACHE_TRACE_SOCKET", raising=False)
+    monkeypatch.delenv("KESHA_SKILLCACHE_TRACE_HANDLE", raising=False)
+    monkeypatch.setenv("KESHA_SKILLCACHE_TRACE_FILE", str(trace_file))
+    pt = st.ProxyTrace("gmail")
+    assert pt.token == sess._skillcache_trace_handle
+    assert pt.schema_dir == str(schema_dir)

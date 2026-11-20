@@ -178,12 +178,43 @@ class _UnixHTTP(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
+_DEFAULT_TRACE_FILE = Path("/opt/kesha-bot/storage/sessions/skillcache-trace-antigravity.json")
+
+
+def _load_private_trace_config():
+    cfg_path = Path(os.environ.get("KESHA_SKILLCACHE_TRACE_FILE") or _DEFAULT_TRACE_FILE)
+    try:
+        fd = os.open(cfg_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        from stat import S_ISREG
+        st = os.fstat(fd)
+        if not S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            return {}
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            data = json.loads(stream.read(4096))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 class ProxyTrace:
     def __init__(self, server):
         self.server = server if server in KNOWN_SERVERS else "unknown"
         self.path = os.environ.get("KESHA_SKILLCACHE_TRACE_SOCKET")
         self.token = os.environ.get("KESHA_SKILLCACHE_TRACE_HANDLE")
         self.schema_dir = os.environ.get("KESHA_SKILLCACHE_SCHEMA_DIR")
+        if not self.path or not self.token:
+            file_cfg = _load_private_trace_config()
+            self.path = self.path or file_cfg.get("socket") or None
+            self.token = self.token or file_cfg.get("handle") or None
+            if not self.schema_dir and file_cfg.get("schema_dir"):
+                self.schema_dir = str(file_cfg["schema_dir"])
         self.schemas = {}
 
     def _send(self, payload):

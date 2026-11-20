@@ -873,24 +873,6 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                     from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
                     is_agy_quota, agy_until, _ = parse_antigravity_quota_cooldown(err)
                     reset = _session_limit_reset(err)
-                    state_obj = _registry.get(cid) if _registry is not None else None
-                    can_agy_failover = (
-                        no_replay
-                        and getattr(state_obj, "runtime_id", "") == "antigravity"
-                        and not finalized
-                        and not completed_text_blocks
-                        and (chunk.get("failover") or chunk.get("kind") in {"antigravity_failover", "usage_limit"} or is_agy_quota)
-                    )
-                    if can_agy_failover and state_obj is not None:
-                        if is_agy_quota:
-                            record_antigravity_cooldown(err, until_ts=agy_until)
-                        logger.warning(f"Chat {cid}: Antigravity unavailable ({err}), triggering inline failover to GPT-6.2-Sol")
-                        state_obj._pending_agy_failover = err or "Antigravity unavailable"
-                        if status is not None:
-                            await status.cancel_empty()
-                            status = None
-                        terminal_handled = True
-                        break
                     if chunk.get("kind") == "usage_limit" or reset is not None or is_agy_quota:
                         if is_agy_quota:
                             record_antigravity_cooldown(err, until_ts=agy_until)
