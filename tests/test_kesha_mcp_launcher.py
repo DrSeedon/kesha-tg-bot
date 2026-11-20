@@ -285,3 +285,33 @@ def test_antigravity_session_rotates_on_mcp_signature_change_with_handoff(tmp_pa
     assert closed == ["old-sid-3mcp"]
     assert seen_open and seen_open[0]["sessionId"] is None
     assert sess._state["mcpSignature"] == sess._mcp_signature(sess._acp_mcp_servers())
+
+
+def test_sanitize_compacts_oversized_gmail_send_schema_below_eager_threshold():
+    big_props = {
+        "user_google_email": {"type": "string", "description": "The user email address."},
+        "to": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "description": "Recipient email address. " * 10},
+        "subject": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "description": "Email subject. " * 10},
+        "body": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "description": "Email body content. " * 12},
+        "attachments": {
+            "anyOf": [{"type": "array", "items": {"type": "object", "additionalProperties": True}}, {"type": "null"}],
+            "default": None,
+            "description": "Optional list of attachments. " * 30,
+        },
+    }
+    for i in range(12):
+        big_props[f"opt_{i}"] = {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "description": "Extra long option description " * 6}
+    tool = {
+        "name": "send_gmail_message",
+        "description": "Sends an email using Gmail.\n" + ("Long doc line. " * 30),
+        "inputSchema": {"type": "object", "properties": big_props, "required": ["user_google_email"], "additionalProperties": False},
+        "outputSchema": {"type": "object"},
+        "_meta": {"fastmcp": {"tags": []}},
+    }
+    msg = {"jsonrpc": "2.0", "id": 10, "result": {"tools": [tool]}}
+    out = launcher.sanitize_mcp_message(msg, "tools/list")["result"]["tools"][0]
+    assert "outputSchema" not in out
+    assert "_meta" not in out
+    assert len(json.dumps(out, ensure_ascii=False)) <= 1600
+    assert set(out["inputSchema"]["properties"]) == set(big_props)
+    assert out["inputSchema"]["properties"]["attachments"]["type"] == "array"

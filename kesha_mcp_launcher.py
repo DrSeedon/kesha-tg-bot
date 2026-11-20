@@ -157,6 +157,60 @@ def build_child_env(cfg: dict, *, home: Path | None = None) -> dict[str, str]:
     return env
 
 
+def _simplify_json_schema_node(node: object) -> None:
+    if not isinstance(node, dict):
+        return
+    if "anyOf" in node and isinstance(node["anyOf"], list):
+        non_null = [x for x in node["anyOf"] if not (isinstance(x, dict) and x.get("type") == "null")]
+        if len(non_null) == 1 and isinstance(non_null[0], dict):
+            desc = node.get("description")
+            node.pop("anyOf", None)
+            node.pop("default", None)
+            for k, v in non_null[0].items():
+                node.setdefault(k, v)
+            if desc is not None:
+                node["description"] = desc
+    props = node.get("properties")
+    if isinstance(props, dict):
+        for prop in props.values():
+            _simplify_json_schema_node(prop)
+    items = node.get("items")
+    if isinstance(items, dict):
+        _simplify_json_schema_node(items)
+
+
+def _compact_tool_if_oversized(tool: dict, *, limit: int = 1600) -> None:
+    if len(json.dumps(tool, ensure_ascii=False)) <= limit:
+        return
+    schema = tool.get("inputSchema")
+    if isinstance(schema, dict):
+        _simplify_json_schema_node(schema)
+        schema.pop("additionalProperties", None)
+    desc = tool.get("description")
+    if isinstance(desc, str) and len(desc) > 160:
+        tool["description"] = desc.split("\n", 1)[0][:157].rstrip() + "..."
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if isinstance(props, dict):
+        for p in props.values():
+            if isinstance(p, dict):
+                if p.get("default") is None:
+                    p.pop("default", None)
+                pdesc = p.get("description")
+                if isinstance(pdesc, str) and len(pdesc) > 64:
+                    p["description"] = pdesc.split("\n", 1)[0][:61].rstrip() + "..."
+    if len(json.dumps(tool, ensure_ascii=False)) > limit and isinstance(props, dict):
+        for p in props.values():
+            if isinstance(p, dict) and isinstance(p.get("description"), str) and len(p["description"]) > 28:
+                p["description"] = p["description"][:25].rstrip() + "..."
+    if len(json.dumps(tool, ensure_ascii=False)) > limit:
+        if isinstance(tool.get("description"), str) and len(tool["description"]) > 80:
+            tool["description"] = tool["description"][:77].rstrip() + "..."
+        if isinstance(props, dict):
+            for p in props.values():
+                if isinstance(p, dict):
+                    p.pop("description", None)
+
+
 def sanitize_mcp_message(msg: object, method: str | None = None) -> object:
     if not isinstance(msg, dict):
         return msg
@@ -182,6 +236,7 @@ def sanitize_mcp_message(msg: object, method: str | None = None) -> object:
                 if isinstance(tool, dict):
                     tool.pop("outputSchema", None)
                     tool.pop("_meta", None)
+                    _compact_tool_if_oversized(tool)
         return msg
 
     is_tool_call = (
