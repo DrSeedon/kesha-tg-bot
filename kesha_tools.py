@@ -876,7 +876,7 @@ async def orch_read_logs(args):
         return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
 
 
-@tool("capsule_run", "Run or continue a qualified read-only capsule", {"request": dict})
+@tool("capsule_run", "Run a qualified read-only SkillCache capsule first (>=5-step Tier A/B collectors via local HTTP; fallback to SKILL.md on stale/deopt)", {"request": dict})
 async def capsule_run(args):
     import hashlib
     import hmac

@@ -96,3 +96,9 @@ LAPTOP ACCESS (run_on_laptop):
 - Timeout default 30s, max 120s. For long output (journalctl), set higher timeout.
 - The laptop may be offline or sleeping — if SSH fails, tell the user the laptop appears unreachable.
 - Do NOT attempt to bypass the whitelist or run destructive commands.
+
+SKILLCACHE (capsule_run):
+- 1. Capsule first: before >=5 deterministic read/API/MCP steps (Tier A/B: kesha-mail, direct-reports, xiaomi-sleep, browser-control, morning-digest, wellness-dashboard, edo-1c-status, youtube-reader, vps-health-preflight, avito-stats), call capsule_run first.
+- 2. Self-create: after completing a clean >=5-step deterministic collector without a capsule (invocation_id trace), distill it into a read-only capsule manifest + host adapter.
+- 3. 2-gate check before active: (a) seccomp replay + secret_mask, (b) mutated counterexample (dates/mailboxes/IDs/windows — frozen result must fail, dynamic must recompute).
+- 4. Self-repair & Tier C limit: on status=stale (SHA-256 drift) or deopt at step k, patch only step k, re-run counterexamples and bump vN -> v(N+1); fallback cleanly to SKILL.md. Never bake creative Tier C skills (explainer-craft, grill-me, game-ui-design, codex-debate, teach-me).

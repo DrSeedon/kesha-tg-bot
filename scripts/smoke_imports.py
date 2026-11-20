@@ -12,6 +12,14 @@ if str(ROOT) not in sys.path:
 
 # Ensure dry import checks never require network or touch Google CLI.
 os.environ.setdefault("KESHA_SMOKE_CHECK", "1")
+try:
+    from dotenv import load_dotenv
+    if (ROOT / ".env").exists():
+        load_dotenv(ROOT / ".env")
+except Exception:
+    pass
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    os.environ["TELEGRAM_BOT_TOKEN"] = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 
 MODULES = (
     "config",
@@ -25,6 +33,7 @@ MODULES = (
     "chat_state",
     "inbox_server",
     "orch_ops",
+    "skillcache_trace",
     "handlers",
     "kesha_tools",
     "bot",
