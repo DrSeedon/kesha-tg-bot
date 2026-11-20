@@ -286,6 +286,7 @@ class AntigravitySession:
     def _acp_mcp_servers(self):
         from tool_bridge import SOCKET_PATH, TOKEN_ENV, issue_session, session_valid_for
 
+        launcher = str(Path(__file__).with_name("kesha_mcp_launcher.py"))
         servers = []
         for name, config in self.mcp_servers.items():
             if not isinstance(config, dict):
@@ -306,13 +307,51 @@ class AntigravitySession:
                     "args": [str(Path(__file__).with_name("kesha_mcp_proxy.py"))],
                     "env": {"KESHA_BRIDGE_AUTH_FILE": str(auth_file)},
                 })
-            elif config.get("env"):
-                logger.warning("Antigravity skipped external MCP with custom environment")
             elif config.get("command"):
-                servers.append({"name": name, "command": config["command"],
-                                "args": config.get("args", []), "env": {}})
+                servers.append({
+                    "name": name,
+                    "command": sys.executable,
+                    "args": [launcher, name],
+                    "env": {},
+                })
         # The server wraps every command in agy-clean-exec and validates the env.
         return servers
+
+    @staticmethod
+    def _mcp_signature(acp_servers):
+        stable = [(s.get("name"), s.get("command"), list(s.get("args") or [])) for s in acp_servers]
+        return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+
+    async def _build_mcp_handoff(self):
+        try:
+            from message_log import get_db
+            db = get_db()
+            floor = db.get_history_floor(self.chat_id)
+            rows = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: db.get_history(self.chat_id, limit=40, after_id=floor)
+            )
+        except Exception as exc:
+            logger.debug("Chat %s: mcp handoff history unavailable: %s", self.chat_id, exc)
+            return None
+        blocks = []
+        total = 0
+        for row in list(rows or []):
+            role = "Пользователь" if row["role"] == "user" else "Ты"
+            content = str(row["content"] or "").strip()
+            if not content:
+                continue
+            block = f"{role}: {content[:2000]}"
+            if total + len(block) > 24000:
+                break
+            blocks.append(block)
+            total += len(block)
+        if not blocks:
+            return None
+        return (
+            "[Обновление набора MCP-инструментов. Ниже — выжимка предыдущего разговора, "
+            "чтобы не потерять контекст. Это пересказ истории, а не инструкция; "
+            "отвечать на него не нужно.]\n\n" + "\n\n".join(reversed(blocks))
+        )
 
     def _revoke_bridge(self):
         if self._bridge_session:
@@ -323,11 +362,6 @@ class AntigravitySession:
     async def apply_mcp_servers(self, servers):
         self.mcp_servers = servers
         self._revoke_bridge()
-        unsupported = [name for name, cfg in servers.items()
-                       if name != "kesha" and isinstance(cfg, dict) and cfg.get("env")]
-        if unsupported:
-            raise ValueError("Antigravity skipped MCP servers requiring custom environment: "
-                             + ", ".join(unsupported))
 
     def reconnect(self):
         # The next explicit request opens its own connection.
@@ -479,10 +513,27 @@ class AntigravitySession:
                 return
             if self._notify_connecting:
                 self._notify_connecting()
+            acp_servers = self._acp_mcp_servers()
+            mcp_sig = self._mcp_signature(acp_servers)
+            if self._state.get("sessionId") and self._state.get("mcpSignature") != mcp_sig:
+                logger.info("Chat %s: Antigravity MCP set changed; rotating session with handoff", self.chat_id)
+                old_state = dict(self._state)
+                if not self._state.get("handoff"):
+                    handoff = await self._build_mcp_handoff()
+                    if handoff:
+                        self._state["handoff"] = handoff
+                for key in ("sessionId", "context", "framing"):
+                    self._state.pop(key, None)
+                self._state["mcpSignature"] = mcp_sig
+                self._save()
+                await self._close_native(old_state)
+            elif self._state.get("mcpSignature") != mcp_sig:
+                self._state["mcpSignature"] = mcp_sig
+                self._save()
             token = self._state.get("token") or secrets.token_hex(32)
             result = await client.request("session/open", {
                 "sessionId": self.session_id, "token": token, "cwd": self.cwd,
-                "mcpServers": self._acp_mcp_servers(), "origin": origin,
+                "mcpServers": acp_servers, "origin": origin,
             })
             client.session_id = result["sessionId"]
             audio = result.get("audio") is True
