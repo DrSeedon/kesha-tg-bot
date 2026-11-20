@@ -1272,12 +1272,52 @@ class ChatState:
                 logger.error(f"Chat {self.chat_id}: message_log user failed: {e}")
 
             if agy:
-                turn_ran = await self._ask_fn(
-                    reply_msg, combined, self.chat_id,
-                    interactive_user=interactive, origin="telegram" if interactive else "owned_reminder",
-                    reminder=batch[0].reminder if not interactive else None,
-                    audio_paths=tuple(path for entry in batch for path in entry.audio_paths),
-                )
+                self._pending_agy_failover = None
+                pre_failover_reason = None
+                if getattr(type(self.session), "__name__", "") == "AntigravitySession":
+                    from antigravity_session import is_acp_mux_socket_present
+                    from quota_gate import antigravity_cooldown_status
+                    if antigravity_cooldown_status() is not None:
+                        pre_failover_reason = "antigravity_cooldown"
+                    elif not is_acp_mux_socket_present():
+                        pre_failover_reason = "acp_mux_socket_missing"
+
+                if pre_failover_reason is None:
+                    turn_ran = await self._ask_fn(
+                        reply_msg, combined, self.chat_id,
+                        interactive_user=interactive, origin="telegram" if interactive else "owned_reminder",
+                        reminder=batch[0].reminder if not interactive else None,
+                        audio_paths=tuple(path for entry in batch for path in entry.audio_paths),
+                    )
+                    failover_reason = getattr(self, "_pending_agy_failover", None)
+                else:
+                    turn_ran = False
+                    failover_reason = pre_failover_reason
+
+                if not turn_ran and failover_reason:
+                    self._pending_agy_failover = None
+                    switched = await self._failover_antigravity_to_codex(reason=str(failover_reason))
+                    if switched.get("ok"):
+                        agy = False
+                        try:
+                            await self.bot.send_message(
+                                self.chat_id,
+                                "⚡ Antigravity недоступен — переключил чат на GPT-6.2-Sol",
+                                parse_mode=None,
+                            )
+                        except Exception:
+                            pass
+                        await self._ask_fn(reply_msg, combined, self.chat_id)
+                        turn_ran = True
+                    else:
+                        try:
+                            await self.bot.send_message(
+                                self.chat_id,
+                                f"⛔ Antigravity недоступен ({failover_reason}), авто-переход на GPT-6.2-Sol не удался.",
+                                parse_mode=None,
+                            )
+                        except Exception:
+                            pass
             else:
                 await self._ask_fn(reply_msg, combined, self.chat_id)
                 turn_ran = True
@@ -1301,6 +1341,38 @@ class ChatState:
             for reminder in owned:
                 reminder.finish(turn_ran if reminder is selected_reminder else False)
             await self._finish_processing(check_context=turn_ran)
+
+    async def _failover_antigravity_to_codex(self, *, reason: str = "") -> dict:
+        """Inline ~1s failover from unavailable Antigravity to GPT-6.2-Sol preserving dialogue tail."""
+        if not self._build_runtime:
+            return {"ok": False, "error": "runtime builder not wired"}
+        old_session = self.session
+        target = "codex"
+        selection = ("gpt-6.2-sol", "medium")
+        try:
+            new_session = self._build_runtime(target, self.chat_id, selection=selection)
+            probe = await asyncio.wait_for(self._probe_runtime(new_session), 3.0)
+            if not probe.get("ok"):
+                await self._abort_runtime_switch(new_session, target)
+                return {"ok": False, "error": probe.get("error") or "codex probe failed"}
+            handoff_note = await asyncio.wait_for(self._handoff_transcript(), 4.0)
+            self._activity_store.adopt_runtime(
+                self.chat_id, target, selection=selection, handoff=handoff_note,
+            )
+            self.session = new_session
+            self.runtime_id = target
+            self._listen_for_background_turns(new_session)
+            logger.warning(f"Chat {self.chat_id}: inline failover antigravity -> codex/gpt-6.2-sol ({reason})")
+            await self._disconnect_runtime_terminal(old_session, "old runtime antigravity")
+            try:
+                from tool_bridge import revoke_chat_sessions
+                revoke_chat_sessions(self.chat_id, "antigravity")
+            except Exception:
+                pass
+            return {"ok": True, "runtime": target, "selection": selection}
+        except Exception as exc:
+            logger.error(f"Chat {self.chat_id}: inline failover failed: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     async def _finish_processing(self, *, check_context: bool = False) -> None:
         """Finalize: run deferred compact, transition to IDLE, drain deferred."""

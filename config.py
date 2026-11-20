@@ -55,6 +55,7 @@ MEDIA_MAX_AGE_H = 24
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", "100"))
 
 NOTIFY_CHAT = int(os.getenv("NOTIFY_CHAT", "0")) or (list(ALLOWED)[0] if ALLOWED else 0)
+OWNER_ID = int(os.getenv("OWNER_ID") or NOTIFY_CHAT or "720740564")
 
 # --- Logging ---
 

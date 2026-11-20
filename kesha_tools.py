@@ -633,12 +633,253 @@ async def send_to_orchestrator(args):
         return {"content": [{"type": "text", "text": f"Orchestra request error: {exc}"}], "is_error": True}
 
 
+@tool(
+    "orch_list_sessions",
+    "List Orchestra sessions and background workers via local HTTP API",
+    {"scope": str, "include_archived": bool},
+)
+async def orch_list_sessions(args):
+    owner_err = _require_telegram_owner()
+    if owner_err is not None:
+        return owner_err
+    import aiohttp
+    import limits
+
+    scope = str(args.get("scope") or "").strip()
+    include_archived = bool(args.get("include_archived", False))
+    try:
+        token = limits.orchestra_token()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra token unavailable: {exc}"}], "is_error": True}
+
+    params = {}
+    if scope:
+        params["scope"] = scope
+    if include_archived:
+        params["include_archived"] = "1"
+    url = limits._orchestra_url("/api/sessions")
+    timeout = aiohttp.ClientTimeout(total=12)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params, headers={"Authorization": f"Bearer {token}"}) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return {"content": [{"type": "text", "text": f"Orchestra HTTP {resp.status}: {body[:200]}"}], "is_error": True}
+                rows = await resp.json()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
+
+    if not isinstance(rows, list):
+        return {"content": [{"type": "text", "text": "Unexpected /api/sessions response"}], "is_error": True}
+    slim = [
+        {
+            "name": r.get("name"),
+            "scope": r.get("scope"),
+            "role": r.get("role"),
+            "model": r.get("model"),
+            "status": r.get("status"),
+            "task_id": r.get("task_id"),
+        }
+        for r in rows
+    ]
+    return {"content": [{"type": "text", "text": json.dumps(slim, ensure_ascii=False, indent=2)}]}
+
+
+@tool(
+    "orch_spawn_worker",
+    "Idempotently spawn and start a background worker in Orchestra (notifies Kesha on completion)",
+    {"scope": str, "name": str, "task": str, "model": str, "role": str, "idempotency_key": str},
+)
+async def orch_spawn_worker(args):
+    owner_err = _require_telegram_owner()
+    if owner_err is not None:
+        return owner_err
+    import aiohttp
+    import limits
+
+    scope = str(args.get("scope") or "").strip()
+    name = str(args.get("name") or "").strip()
+    task = str(args.get("task") or "").strip()
+    model = str(args.get("model") or "gpt-6.2-sol").strip()
+    role = str(args.get("role") or "worker").strip()
+    ikey = str(args.get("idempotency_key") or "").strip()
+    if not scope or not name or not task:
+        return {"content": [{"type": "text", "text": "scope, name, and task are required"}], "is_error": True}
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,49}", name):
+        return {"content": [{"type": "text", "text": "invalid worker name"}], "is_error": True}
+
+    try:
+        token = limits.orchestra_token()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra token unavailable: {exc}"}], "is_error": True}
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Orchestra-Kesha-Worker": "1",
+    }
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                limits._orchestra_url("/api/sessions"),
+                params={"scope": scope},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                existing_rows = await resp.json() if resp.status == 200 else []
+            existing = next(
+                (r for r in (existing_rows if isinstance(existing_rows, list) else []) if r.get("name") == name),
+                None,
+            )
+            marker = f"[ikey:{ikey}]" if ikey else ""
+            if existing is not None:
+                if ikey and marker in str(existing.get("description") or ""):
+                    return {"content": [{"type": "text", "text": json.dumps({"ok": True, "deduplicated": True, "name": name, "scope": scope, "status": existing.get("status")}, ensure_ascii=False)}]}
+                return {"content": [{"type": "text", "text": json.dumps({"ok": True, "already_exists": True, "name": name, "scope": scope, "status": existing.get("status")}, ensure_ascii=False)}]}
+
+            create_payload = {
+                "name": name,
+                "cwd": scope,
+                "scope": scope,
+                "model": model,
+                "role": role,
+                "standalone": True,
+                "description": marker,
+                "kesha_worker": True,
+            }
+            async with session.post(limits._orchestra_url("/api/sessions"), json=create_payload, headers=headers) as c_resp:
+                c_body = await c_resp.text()
+                if c_resp.status >= 400:
+                    return {"content": [{"type": "text", "text": f"Spawn rejected HTTP {c_resp.status}: {c_body[:250]}"}], "is_error": True}
+
+            send_payload = {
+                "message": task,
+                "scope": scope,
+                "channel": "kesha_worker",
+                "delivery_id": ikey or f"kesha-spawn-{name}",
+            }
+            async with session.post(
+                limits._orchestra_url(f"/api/sessions/{name}/send"),
+                json=send_payload,
+                headers=headers,
+            ) as s_resp:
+                s_body = await s_resp.text()
+                if s_resp.status >= 400:
+                    return {"content": [{"type": "text", "text": f"Created '{name}', send HTTP {s_resp.status}: {s_body[:250]}"}], "is_error": True}
+        return {"content": [{"type": "text", "text": json.dumps({"ok": True, "spawned": True, "name": name, "scope": scope, "model": model}, ensure_ascii=False)}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
+
+
+@tool(
+    "orch_task_status",
+    "Check status and latest assistant response of an Orchestra session/worker",
+    {"name": str, "scope": str},
+)
+async def orch_task_status(args):
+    owner_err = _require_telegram_owner()
+    if owner_err is not None:
+        return owner_err
+    import aiohttp
+    import limits
+
+    name = str(args.get("name") or "").strip()
+    scope = str(args.get("scope") or "").strip()
+    if not name or not scope or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        return {"content": [{"type": "text", "text": "valid name and scope are required"}], "is_error": True}
+    try:
+        token = limits.orchestra_token()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra token unavailable: {exc}"}], "is_error": True}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = aiohttp.ClientTimeout(total=12)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(limits._orchestra_url("/api/sessions"), params={"scope": scope}, headers=headers) as resp:
+                if resp.status >= 400:
+                    return {"content": [{"type": "text", "text": f"Orchestra HTTP {resp.status}"}], "is_error": True}
+                rows = await resp.json()
+            row = next((r for r in (rows if isinstance(rows, list) else []) if r.get("name") == name), None)
+            if not row:
+                return {"content": [{"type": "text", "text": f"Session '{name}' not found in scope {scope}"}], "is_error": True}
+            async with session.get(
+                limits._orchestra_url(f"/api/sessions/{name}/logs"),
+                params={"scope": scope, "limit": 20},
+                headers=headers,
+            ) as l_resp:
+                logs_data = await l_resp.json() if l_resp.status == 200 else []
+        last_reply = ""
+        if isinstance(logs_data, list):
+            for entry in reversed(logs_data):
+                if isinstance(entry, dict) and entry.get("type") == "assistant" and entry.get("content"):
+                    last_reply = str(entry["content"])[:600]
+                    break
+        result = {
+            "name": row.get("name"),
+            "scope": row.get("scope"),
+            "role": row.get("role"),
+            "model": row.get("model"),
+            "status": row.get("status"),
+            "task_id": row.get("task_id"),
+            "last_reply": last_reply,
+        }
+        return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
+
+
+@tool(
+    "orch_read_logs",
+    "Read secret-redacted recent log lines of an Orchestra session/worker",
+    {"name": str, "scope": str, "limit": int},
+)
+async def orch_read_logs(args):
+    owner_err = _require_telegram_owner()
+    if owner_err is not None:
+        return owner_err
+    import aiohttp
+    import limits
+    from orch_ops import mask_secrets
+
+    name = str(args.get("name") or "").strip()
+    scope = str(args.get("scope") or "").strip()
+    limit = max(1, min(100, int(args.get("limit") or 25)))
+    if not name or not scope or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        return {"content": [{"type": "text", "text": "valid name and scope are required"}], "is_error": True}
+    try:
+        token = limits.orchestra_token()
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra token unavailable: {exc}"}], "is_error": True}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = aiohttp.ClientTimeout(total=12)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                limits._orchestra_url(f"/api/sessions/{name}/logs"),
+                params={"scope": scope, "limit": limit},
+                headers=headers,
+            ) as resp:
+                if resp.status >= 400:
+                    return {"content": [{"type": "text", "text": f"Orchestra HTTP {resp.status}"}], "is_error": True}
+                logs_data = await resp.json()
+        lines = []
+        if isinstance(logs_data, list):
+            for row in logs_data[-limit:]:
+                if isinstance(row, dict):
+                    lines.append(f"[{row.get('type', '?')}] {mask_secrets(str(row.get('content') or ''))[:400]}")
+        return {"content": [{"type": "text", "text": "\n".join(lines) or "(no logs)"}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
+
+
 ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_photo, send_file, send_video, send_audio, send_voice, react,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
              search_memory, read_messages, telegram_list_dialogs,
              telegram_read_dialog, telegram_search_messages,
-             send_to_orchestrator, run_on_laptop]
+             send_to_orchestrator, orch_list_sessions, orch_spawn_worker,
+             orch_task_status, orch_read_logs, run_on_laptop]
 
 # run_on_laptop shells out over SSH to the user's machine and still awaits its
 # own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.

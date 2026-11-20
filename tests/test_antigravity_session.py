@@ -185,9 +185,10 @@ async def test_http_inbox_delivers_directly_for_antigravity(monkeypatch):
     state = SimpleNamespace(runtime_id="antigravity", accept_entry=AsyncMock())
     tg = AsyncMock()
     monkeypatch.setattr(inbox_server, "ALLOWED", {1})
+    monkeypatch.setattr(inbox_server, "_expected_inbox_token", lambda: "secret-tok")
     monkeypatch.setattr(inbox_server, "_bot_ref", tg)
     monkeypatch.setattr(inbox_server, "_registry_ref", SimpleNamespace(get=lambda _: state))
-    request = SimpleNamespace(json=AsyncMock(return_value={"chat_id": 1, "message": "notice"}))
+    request = SimpleNamespace(headers={"Authorization": "Bearer secret-tok"}, json=AsyncMock(return_value={"chat_id": 1, "message": "notice"}))
     response = await inbox_server.handle_inbox(request)
     assert response.status == 200
     assert "notice" in tg.send_message.await_args.args[1]

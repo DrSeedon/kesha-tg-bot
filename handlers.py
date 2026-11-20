@@ -22,6 +22,7 @@ import config as _cfg
 from config import (
     ALLOWED,
     BOT_SERVICE_UNIT,
+    OWNER_ID,
     LOG_DIR,
     STRINGS,
     WORK_DIR,
@@ -74,12 +75,16 @@ def set_uptime_fn(fn) -> None:
 
 
 def allowed(uid: int) -> bool:
-    return not ALLOWED or uid in ALLOWED
+    return bool(ALLOWED) and uid in ALLOWED
+
+
+def is_owner(uid: int | None) -> bool:
+    return uid is not None and bool(OWNER_ID) and uid == OWNER_ID
 
 
 def _interactive_sender(msg) -> bool:
     user = msg.from_user
-    return user is not None and not getattr(user, "is_bot", False) and user.id in ALLOWED
+    return user is not None and not getattr(user, "is_bot", False) and allowed(user.id)
 
 
 async def _deny_once(msg: types.Message):
@@ -546,12 +551,26 @@ async def h_reload(msg: types.Message):
 async def h_restart(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
+    if not is_owner(getattr(msg.from_user, "id", None)):
+        await _send_safe(msg, "⛔ Команда /restart доступна только владельцу")
+        return
     await _send_safe(msg, t(msg, "restarting"))
     p = await asyncio.create_subprocess_exec(
         "sudo", "systemctl", "restart", BOT_SERVICE_UNIT,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await p.communicate()
+
+
+async def h_orch(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    if not is_owner(getattr(msg.from_user, "id", None)):
+        await _send_safe(msg, "⛔ Команда /orch доступна только владельцу")
+        return
+    from orch_ops import handle_orch_command
+    out = await handle_orch_command(msg.text or "/orch status")
+    await _send_safe(msg, out)
 
 
 async def h_stop(msg: types.Message):
@@ -863,6 +882,7 @@ COMMANDS_RU = [
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
     BotCommand(command="reload", description="Перезапустить CLI: новые MCP-тулы, переписка сохраняется"),
+    BotCommand(command="orch", description="Пульт Orchestra (status/logs/restart/rollback)"),
     BotCommand(command="restart", description="Перезапустить бота"),
 ]
 
@@ -881,6 +901,7 @@ COMMANDS_EN = [
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
     BotCommand(command="reload", description="Restart CLI: new MCP tools, conversation kept"),
+    BotCommand(command="orch", description="Orchestra control panel"),
     BotCommand(command="restart", description="Restart bot"),
 ]
 
@@ -937,6 +958,7 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_debounce, Command("debounce"))
     dp.message.register(h_debug, Command("debug"))
     dp.message.register(h_reload, Command("reload"))
+    dp.message.register(h_orch, Command("orch"))
     dp.message.register(h_restart, Command("restart"))
     dp.message.register(h_stop, Command("stop"))
     # Media handlers — media_group BEFORE photo

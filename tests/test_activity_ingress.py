@@ -115,6 +115,7 @@ async def test_manual_compact_admission_failure_is_friendly(monkeypatch):
 @pytest.mark.asyncio
 async def test_inbox_failure_returns_generic_503_before_telegram_echo(monkeypatch):
     request = MagicMock()
+    request.headers = {"Authorization": "Bearer test-inbox-tok"}
     request.json = AsyncMock(
         return_value={"message": "hello", "sender": "test", "chat_id": 42}
     )
@@ -124,7 +125,8 @@ async def test_inbox_failure_returns_generic_503_before_telegram_echo(monkeypatc
     )
     bot = MagicMock()
     bot.send_message = AsyncMock()
-    monkeypatch.setattr(inbox_server, "ALLOWED", [])
+    monkeypatch.setattr(inbox_server, "ALLOWED", {42})
+    monkeypatch.setattr(inbox_server, "_expected_inbox_token", lambda: "test-inbox-tok")
     monkeypatch.setattr(inbox_server, "_bot_ref", bot)
     monkeypatch.setattr(
         inbox_server,

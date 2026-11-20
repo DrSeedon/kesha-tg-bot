@@ -1,6 +1,8 @@
-"""HTTP inbox — receives messages from Orchestra and injects into Kesha."""
+"""HTTP inbox — receives authenticated messages from Orchestra and injects into Kesha."""
 
+import hmac
 import logging
+import os
 from aiohttp import web
 
 from config import ALLOWED, NOTIFY_CHAT
@@ -19,7 +21,38 @@ def set_refs(bot, registry):
     _registry_ref = registry
 
 
+def _expected_inbox_token() -> str:
+    explicit = os.getenv("KESHA_INBOX_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    try:
+        import limits
+        return limits.orchestra_token()
+    except Exception:
+        return ""
+
+
+def _check_inbox_auth(request: web.Request) -> web.Response | None:
+    expected = _expected_inbox_token()
+    if not expected:
+        return web.json_response({"error": "inbox auth token not configured"}, status=401)
+    headers = getattr(request, "headers", None) or {}
+    auth = ""
+    if hasattr(headers, "get"):
+        auth = str(headers.get("Authorization") or headers.get("authorization") or "").strip()
+    if not auth.startswith("Bearer "):
+        return web.json_response({"error": "missing bearer token"}, status=401)
+    provided = auth[len("Bearer "):].strip()
+    if not provided or not hmac.compare_digest(provided.encode(), expected.encode()):
+        return web.json_response({"error": "invalid bearer token"}, status=403)
+    return None
+
+
 async def handle_inbox(request: web.Request) -> web.Response:
+    auth_err = _check_inbox_auth(request)
+    if auth_err is not None:
+        return auth_err
+
     try:
         data = await request.json()
     except Exception:
@@ -34,7 +67,7 @@ async def handle_inbox(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return web.json_response({"error": "invalid chat_id"}, status=400)
 
-    if ALLOWED and chat_id not in ALLOWED:
+    if not ALLOWED or chat_id not in ALLOWED:
         return web.json_response({"error": "chat_id not allowed"}, status=403)
 
     if not message:

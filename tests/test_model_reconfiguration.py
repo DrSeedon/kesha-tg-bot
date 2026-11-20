@@ -152,6 +152,7 @@ async def test_tool_and_command_restart_the_same_service(monkeypatch):
 
     monkeypatch.setattr(handlers.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(handlers, "ALLOWED", {1})
+    monkeypatch.setattr(handlers, "OWNER_ID", 1)
     monkeypatch.setattr(handlers, "_send_safe", AsyncMock())
     msg = SimpleNamespace(from_user=SimpleNamespace(id=1, language_code="en"))
     await handlers.h_restart(msg)

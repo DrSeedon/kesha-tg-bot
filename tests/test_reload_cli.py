@@ -390,6 +390,7 @@ async def test_restart_targets_the_unit_that_exists(monkeypatch):
 
     monkeypatch.setattr(handlers.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(handlers, "ALLOWED", {1})
+    monkeypatch.setattr(handlers, "OWNER_ID", 1)
 
     await handlers.h_restart(_msg("/restart"))
 

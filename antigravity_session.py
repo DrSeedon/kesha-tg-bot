@@ -25,9 +25,9 @@ from runtime_protocol import RuntimeCapabilities
 
 FRAME_LIMIT = 32 * 1024 * 1024
 AUDIO_LIMIT = 20 * 1024 * 1024
-ORCHESTRA_ROOT = Path(os.getenv("KESHA_ORCHESTRA_ROOT", str(Path.home() / "orchestra")))
 MUX_PATH = Path(os.getenv("KESHA_ACP_MUX_SOCKET",
-                          str(ORCHESTRA_ROOT / "data/antigravity-auth-home/.acp-mux.sock")))
+                          str(Path.home() / "orchestra/data/antigravity-auth-home/.acp-mux.sock")))
+ACP_CONNECT_TIMEOUT_SEC = float(os.getenv("KESHA_ACP_CONNECT_TIMEOUT_SEC", "0.8"))
 
 
 logger = logging.getLogger(__name__)
@@ -49,15 +49,16 @@ class MuxClient:
         self.reader_task = asyncio.create_task(self._read(reader))
 
     @classmethod
-    async def connect(cls, *, allow_fallback=True):
-        deadline = asyncio.get_running_loop().time() + 4
+    async def connect(cls, **_unused):
+        """Strict external UNIX socket client to ACP mux (zero fallback spawn of Orchestra code)."""
+        deadline = asyncio.get_running_loop().time() + max(0.05, float(ACP_CONNECT_TIMEOUT_SEC))
         while True:
             try:
                 info = MUX_PATH.lstat()
                 if (info.st_uid != os.getuid() or not stat.S_ISSOCK(info.st_mode)
                         or stat.S_IMODE(info.st_mode) != 0o600):
                     raise MuxError("Invalid ACP mux socket")
-                remaining = max(0.01, deadline - asyncio.get_running_loop().time())
+                remaining = max(0.05, deadline - asyncio.get_running_loop().time())
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_unix_connection(MUX_PATH, limit=FRAME_LIMIT), remaining)
                 try:
@@ -69,41 +70,13 @@ class MuxClient:
                     writer.close()
                     raise
                 return cls(reader, writer)
-            except OSError as error:
-                if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
-                    raise
+            except (OSError, TimeoutError) as error:
+                if isinstance(error, OSError) and error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                    raise MuxError(f"ACP mux socket error: {error}") from error
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
-                    if allow_fallback:
-                        return await cls._fallback()
                     raise MuxError("ACP mux offline")
-                await asyncio.sleep(min(0.2, remaining))
-
-    @classmethod
-    async def _fallback(cls):
-        # Reuse the exact same server admission, ACP watchdog, and profile flock.
-        # A private socketpair ties lifetime to this turn even if Kesha exits.
-        parent, child = socket.socketpair()
-        process = None
-        try:
-            env = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL")
-                   if key in os.environ}
-            env["PATH"] = os.defpath
-            process = await asyncio.create_subprocess_exec(
-                str(_orchestra_python()), "-m", "app.acp_mux", str(child.fileno()),
-                cwd=ORCHESTRA_ROOT, env=env, pass_fds=(child.fileno(),),
-                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            reader, writer = await asyncio.open_unix_connection(sock=parent, limit=FRAME_LIMIT)
-            return cls(reader, writer, process)
-        except BaseException:
-            parent.close()
-            if process is not None:
-                await process.wait()
-            raise
-        finally:
-            child.close()
+                await asyncio.sleep(min(0.15, remaining))
 
     async def _write(self, message, on_write=None):
         data = (json.dumps(message, ensure_ascii=False) + "\n").encode()
@@ -182,9 +155,13 @@ class MuxClient:
                 await self.process.wait()
 
 
-def _orchestra_python():
-    configured = Path(os.getenv("KESHA_ORCHESTRA_PYTHON", "/opt/orchestra/runtimes/20260817-b0b72d65-py312-rag-v2/bin/python"))
-    return configured if configured.is_file() else ORCHESTRA_ROOT / ".venv/bin/python"
+def is_acp_mux_socket_present() -> bool:
+    """Fast non-blocking check whether external ACP mux socket exists."""
+    try:
+        info = MUX_PATH.lstat()
+        return info.st_uid == os.getuid() and stat.S_ISSOCK(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+    except OSError:
+        return False
 
 
 @dataclass
@@ -391,7 +368,7 @@ class AntigravitySession:
             return
         try:
             async with asyncio.timeout(5):
-                client = await MuxClient.connect(allow_fallback=False)
+                client = await MuxClient.connect()
                 try:
                     await client.request("session/open", {
                         "sessionId": sid, "token": token, "cwd": self.cwd, "origin": "telegram",
@@ -695,7 +672,7 @@ class AntigravitySession:
 
         cooldown = antigravity_cooldown_status()
         if cooldown is not None:
-            yield {"type": "error", "kind": "usage_limit", "content": cooldown["message"]}
+            yield {"type": "error", "kind": "usage_limit", "failover": True, "content": cooldown["message"]}
             return
         if self._task is not None:
             yield {"type": "error", "content": "Antigravity уже обрабатывает ход"}
@@ -743,7 +720,9 @@ class AntigravitySession:
                     is_quota, until_ts, _ = parse_antigravity_quota_cooldown(raw_exc)
                     if is_quota or "антибан-стоп" in raw_exc:
                         info = record_antigravity_cooldown(raw_exc, until_ts=until_ts) if is_quota else {"message": raw_exc}
-                        await queue.put({"type": "error", "kind": "usage_limit", "content": info["message"]})
+                        await queue.put({"type": "error", "kind": "usage_limit", "failover": True, "content": info["message"]})
+                    elif isinstance(exc, MuxError) or "ACP mux" in raw_exc:
+                        await queue.put({"type": "error", "kind": "antigravity_failover", "failover": True, "content": raw_exc or "ACP mux offline"})
                     else:
                         await queue.put({"type": "error", "kind": "acp_turn_failed",
                                          "content": "Ход Antigravity прерван или отклонён. Отправьте новое сообщение."})
