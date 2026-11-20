@@ -4,6 +4,9 @@ import asyncio
 import contextvars
 import json
 import logging
+import os
+from dataclasses import replace
+from functools import wraps
 import re
 import shlex
 from datetime import datetime
@@ -873,6 +876,86 @@ async def orch_read_logs(args):
         return {"content": [{"type": "text", "text": f"Orchestra недоступна/перезапускается: {type(exc).__name__}: {exc}"}], "is_error": True}
 
 
+@tool("capsule_run", "Run or continue a qualified read-only capsule", {"request": dict})
+async def capsule_run(args):
+    import hashlib
+    import hmac
+    import time
+    from urllib.parse import urlsplit
+
+    import aiohttp
+    import skillcache_trace
+    from limits import _orchestra_url
+
+    def reply(result, *, error=False):
+        return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}], "is_error": error}
+
+    chat = get_current_chat()
+    turn = skillcache_trace.current_turn(chat)
+    key = os.environ.get("KESHA_SKILLCACHE_KEY", "")
+    if chat is None or not turn or turn.reason:
+        return reply({"status": "revoked"}, error=True)
+    if len(key) < 32:
+        return reply({"status": "unavailable"})
+    request = args.get("request")
+    if not isinstance(request, dict):
+        return reply({"status": "invalid_request"}, error=True)
+    try:
+        body = json.dumps(request, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    except (TypeError, ValueError, RecursionError):
+        return reply({"status": "invalid_request"}, error=True)
+    if len(body) > 524288:
+        return reply({"status": "invalid_request"}, error=True)
+    timestamp = str(int(time.time()))
+    signed = f"skillcache-v1:{chat}:{turn.id}:{timestamp}:".encode() + body
+    headers = {
+        "Content-Type": "application/json", "X-SkillCache-Chat": str(chat),
+        "X-SkillCache-Invocation": turn.id, "X-SkillCache-At": timestamp,
+        "X-SkillCache-Proof": hmac.new(key.encode(), signed, hashlib.sha256).hexdigest(),
+    }
+    endpoint = _orchestra_url("/api/skillcache/capsule-run")
+    address = urlsplit(endpoint)
+    if address.scheme != "http" or address.hostname not in {"127.0.0.1", "::1"} or address.username:
+        return reply({"status": "unavailable"})
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=75), trust_env=False) as session:
+            async with session.post(endpoint, headers=headers, data=body, allow_redirects=False) as response:
+                if response.status != 200:
+                    return reply({"status": "revoked" if response.status in {401, 403} else "unavailable"})
+                report = await response.json()
+                if skillcache_trace.current_turn(chat) is not turn or turn.reason:
+                    return reply({"status": "revoked"}, error=True)
+                return reply(report)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return reply({"status": "unavailable"})
+
+
+def _observe_sdk(tool_spec):
+    original = tool_spec.handler
+
+    @wraps(original)
+    async def observed(args):
+        import skillcache_trace
+
+        chat = get_current_chat()
+        # SDK tools outside the reviewed projection make an observation ineligible.
+        ids = skillcache_trace.begin_event(
+            chat, "kesha", tool_spec.name, skillcache_trace.arg_shape(args, tool_arg_names(tool_spec))
+        )
+        try:
+            result = await original(args)
+        except BaseException:
+            if ids:
+                skillcache_trace.finish_event(chat, *ids, blocks=0, error=True)
+            raise
+        if ids:
+            skillcache_trace.finish_event(chat, *ids, blocks=len(result.get("content", [])),
+                                          error=bool(result.get("is_error")))
+        return result
+
+    return replace(tool_spec, handler=observed) if tool_spec.name != "capsule_run" else tool_spec
+
+
 ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_photo, send_file, send_video, send_audio, send_voice, react,
              create_reminder, list_reminders, cancel_reminder, update_reminder,
@@ -881,19 +964,28 @@ ALL_TOOLS = [set_debounce, toggle_debug, get_bot_status, restart_bot,
              send_to_orchestrator, orch_list_sessions, orch_spawn_worker,
              orch_task_status, orch_read_logs, run_on_laptop]
 
+
+def _configured_tools():
+    tools = [*ALL_TOOLS]
+    if len(os.environ.get("KESHA_SKILLCACHE_KEY", "")) >= 32:
+        tools.append(capsule_run)
+    if os.environ.get("KESHA_SKILLCACHE_TRACE_DB"):
+        return [_observe_sdk(tool_spec) for tool_spec in tools]
+    return tools
+
 # run_on_laptop shells out over SSH to the user's machine and still awaits its
 # own hardening (task #16, T3c-3). Path-taking tools are gated by file_access.
 BRIDGE_EXCLUDED = frozenset({"run_on_laptop"})
 
 kesha_server = create_sdk_mcp_server(
     name="kesha",
-    tools=ALL_TOOLS,
+    tools=_configured_tools(),
 )
 
 
 def bridge_tools() -> list:
     """Tools that may be served over the out-of-process bridge."""
-    return [t for t in ALL_TOOLS if t.name not in BRIDGE_EXCLUDED]
+    return [t for t in _configured_tools() if t.name not in BRIDGE_EXCLUDED]
 
 
 def tool_arg_names(tool) -> frozenset[str]:

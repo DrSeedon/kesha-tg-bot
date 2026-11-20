@@ -272,7 +272,7 @@ def _is_banner_noise(line: str) -> bool:
     return False
 
 
-def run_proxy(server_name: str) -> int:
+def run_proxy(server_name: str, *, trace_only=False) -> int:
     home_dir = Path("/home/kesha")
     if not home_dir.is_dir():
         home_dir = Path.home()
@@ -290,8 +290,11 @@ def run_proxy(server_name: str) -> int:
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
+    from skillcache_trace import ProxyTrace
+
+    trace = ProxyTrace(server_name)
     pending_lock = threading.Lock()
-    pending_methods: dict[object, str] = {}
+    pending_methods: dict[object, tuple[str, str | None, bool]] = {}
 
     def pump_stdin() -> None:
         try:
@@ -307,10 +310,15 @@ def run_proxy(server_name: str) -> int:
                             req_id = req.get("id")
                             method = req.get("method")
                             if isinstance(req_id, (str, int)) and isinstance(method, str):
+                                ticket = None
+                                params = req.get("params")
+                                first_page = not isinstance(params, dict) or not params.get("cursor")
+                                if method == "tools/call" and isinstance(req.get("params"), dict):
+                                    ticket = trace.begin(req["params"])
                                 with pending_lock:
                                     if len(pending_methods) > 4096:
                                         pending_methods.clear()
-                                    pending_methods[req_id] = method
+                                    pending_methods[req_id] = method, ticket, first_page
                     except ValueError:
                         pass
                 try:
@@ -344,12 +352,26 @@ def run_proxy(server_name: str) -> int:
                 sys.stderr.flush()
                 continue
             if isinstance(msg, dict):
-                method = None
+                method = ticket = None
+                first_page = True
                 msg_id = msg.get("id")
-                if isinstance(msg_id, (str, int)) and "result" in msg:
+                if isinstance(msg_id, (str, int)) and ("result" in msg or "error" in msg):
                     with pending_lock:
-                        method = pending_methods.pop(msg_id, None)
-                msg = sanitize_mcp_message(msg, method)
+                        method, ticket, first_page = pending_methods.pop(msg_id, (None, None, True))
+                before = {}
+                if method == "tools/list" and trace.token:
+                    result = msg.get("result")
+                    if isinstance(result, dict) and isinstance(result.get("tools"), list):
+                        before = {tool["name"]: {"outputSchema": tool.get("outputSchema")} for tool in result["tools"]
+                                  if isinstance(tool, dict) and isinstance(tool.get("name"), str)}
+                if not trace_only:
+                    msg = sanitize_mcp_message(msg, method)
+                if method == "tools/list" and trace.token:
+                    result = msg.get("result")
+                    if isinstance(result, dict) and isinstance(result.get("tools"), list):
+                        trace.list_tools(before, result["tools"], first_page=first_page)
+                if ticket:
+                    trace.finish(ticket, msg)
                 out = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
             else:
                 out = raw if raw.endswith(b"\n") else raw + b"\n"
@@ -411,10 +433,12 @@ def run_proxy(server_name: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 1:
-        sys.stderr.write("usage: kesha_mcp_launcher.py <server_name>\n")
-        return 2
-    return run_proxy(args[0])
+    if len(args) == 1:
+        return run_proxy(args[0])
+    if len(args) == 2 and args[1] == "--trace-only":
+        return run_proxy(args[0], trace_only=True)
+    sys.stderr.write("usage: kesha_mcp_launcher.py <server_name> [--trace-only]\n")
+    return 2
 
 
 if __name__ == "__main__":

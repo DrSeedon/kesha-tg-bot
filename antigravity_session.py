@@ -276,6 +276,14 @@ class AntigravitySession:
     def _acp_mcp_servers(self):
         from tool_bridge import SOCKET_PATH, TOKEN_ENV, issue_session, session_valid_for
 
+        trace_handle = ""
+        if os.getenv("KESHA_SKILLCACHE_TRACE_DB"):
+            trace_handle = getattr(self, "_skillcache_trace_handle", "")
+            runtime = "skillcache-trace:antigravity"
+            if not session_valid_for(trace_handle, self.chat_id, runtime):
+                trace_handle = issue_session(self.chat_id, ttl=86400, runtime=runtime)
+                self._skillcache_trace_handle = trace_handle
+
         launcher = str(Path(__file__).with_name("kesha_mcp_launcher.py"))
         servers = []
         for name, config in self.mcp_servers.items():
@@ -302,7 +310,10 @@ class AntigravitySession:
                     "name": name,
                     "command": sys.executable,
                     "args": [launcher, name],
-                    "env": {},
+                    "env": {"KESHA_SKILLCACHE_TRACE_SOCKET": str(SOCKET_PATH),
+                            "KESHA_SKILLCACHE_TRACE_HANDLE": trace_handle,
+                            "KESHA_SKILLCACHE_SCHEMA_DIR": os.environ.get("KESHA_SKILLCACHE_SCHEMA_DIR", "")
+                            } if trace_handle else {},
                 })
         # The server wraps every command in agy-clean-exec and validates the env.
         return servers

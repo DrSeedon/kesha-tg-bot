@@ -71,13 +71,13 @@ def _runtime_limit_suffix(chat_id: int) -> Optional[str]:
     return f" (сброс {when})" if when else None
 
 
-def _log_response_usage(chat_id: int) -> None:
+def _log_response_usage(chat_id: int) -> int | None:
     """Write what this answer cost. Bookkeeping never breaks a delivered reply."""
     try:
         session = _get_session(chat_id)
         usage = getattr(session, "last_response_usage", None) or {}
         from message_log import get_db as _get_msg_db
-        _get_msg_db().log_response_usage(
+        return _get_msg_db().log_response_usage(
             chat_id,
             _runtime_label(chat_id) or "unknown",
             model=getattr(session, "last_response_model", None)
@@ -230,6 +230,8 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
     background = prompt is None
     no_replay = getattr(_get_session(cid), "no_prompt_replay", False) is True
     native_success = False
+    observation_completed = False
+    observation_error = False
     native_text_delivered = False
     native_text_failed = False
     if not background:
@@ -812,6 +814,8 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                         await status.complete_current()
                 elif ct == "turn_done":
                     native_success = chunk.get("ok", False) is True
+                    if chunk.get("ours", True):
+                        observation_completed = chunk.get("ok", not no_replay) is True
                     # A steered user message merged into the turn makes its
                     # text an answer: that one is pushed as a new message.
                     if progress_turn and not chunk.get("ours", False):
@@ -827,6 +831,7 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                     # turn's deltas must not mute the next turn's text block.
                     has_deltas = False
                 elif ct == "error":
+                    observation_error = True
                     err = chunk["content"]
                     if chunk.get("kind") == "prompt_lost":
                         logger.error(f"Chat {cid}: runtime never took the prompt, NOT retrying")
@@ -979,7 +984,7 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
             _get_msg_db().log_assistant(cid, text)
         except Exception:
             pass
-    _log_response_usage(cid)
+    usage_ref = _log_response_usage(cid)
     if _config.DEBUG:
         logger.debug(f"Chat {cid} full response: {text[:500]}")
 
@@ -1001,4 +1006,9 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
     answer_seen = answer_seen or turn_had_output
     if not no_replay and not background and not answer_seen and not terminal_handled:
         await _answer(STRINGS["ru"]["empty"] if message is None else _t_cfg(message, "empty"))
+    from skillcache_trace import terminal as skillcache_terminal
+
+    skillcache_terminal(
+        cid, usage_ref, observation_completed and not observation_error and not background and retries == 0
+    )
     return native_success and native_text_delivered and not native_text_failed if no_replay else None

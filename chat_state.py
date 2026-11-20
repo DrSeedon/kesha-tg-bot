@@ -17,6 +17,7 @@ from config import (
     t as _t_cfg,
 )
 from message_log import ActivityPersistenceError
+import skillcache_trace
 
 # A healthy control request answers in under 3.4 s (docs/tasks/20); the SDK's
 # own 60 s budget held the chat in PROCESSING for a minute (prod 14.10.2026).
@@ -275,6 +276,7 @@ class ChatState:
                 "interactive_user": all(e.interactive_user for e in batch),
                 "audio_paths": tuple(path for entry in batch for path in entry.audio_paths),
             }
+        skillcache_trace.mark(self.chat_id, "steered")
         if not await self.session.steer(combined, **steer_options):
             await self._requeue(batch)
             return
@@ -506,7 +508,10 @@ class ChatState:
         try:
             if not self._reload_mcp:
                 raise RuntimeError("MCP reload is not wired for this chat")
-            await self.session.apply_mcp_servers(self._reload_mcp())
+            refreshed = self._reload_mcp()
+            await self.session.apply_mcp_servers(skillcache_trace.wrap_stdio_servers(
+                refreshed, self.runtime_id, self.chat_id, getattr(self.session, "cwd", "")
+            ))
         except Exception as exc:
             logger.error(f"Chat {self.chat_id}: CLI reload failed: {exc}")
             return {"ok": False, "reason": "failed", "error": str(exc)}
@@ -1145,6 +1150,7 @@ class ChatState:
             ]
 
         turn_ran = False
+        trace = None
         owned = [entry.reminder for entry in batch if entry.reminder is not None]
         selected_reminder = None
         try:
@@ -1271,6 +1277,9 @@ class ChatState:
             except Exception as e:
                 logger.error(f"Chat {self.chat_id}: message_log user failed: {e}")
 
+            trace = skillcache_trace.begin_turn(self.chat_id)
+            if len(batch) != 1 or pending_handoff or lazy_ids or self.background_agents_open():
+                trace.reason = "combined_or_background"
             if agy:
                 self._pending_agy_failover = None
                 pre_failover_reason = None
@@ -1338,6 +1347,8 @@ class ChatState:
             except Exception:
                 pass
         finally:
+            if trace is not None:
+                skillcache_trace.finish_turn(self.chat_id, trace)
             for reminder in owned:
                 reminder.finish(turn_ran if reminder is selected_reminder else False)
             await self._finish_processing(check_context=turn_ran)
@@ -1724,7 +1735,9 @@ class ChatRegistry:
                 model=model,
                 reasoning_effort=effort,
                 system_prompt=self._system_prompt,
-                mcp_servers=self._mcp_config,
+                mcp_servers=skillcache_trace.wrap_stdio_servers(
+                    self._mcp_config, runtime_id, chat_id, self._work_dir
+                ),
                 session_file=session_file,
                 on_connecting=lambda: self._set_current_chat(chat_id),
             ),

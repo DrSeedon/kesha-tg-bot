@@ -85,7 +85,7 @@ def revoke_chat_sessions(chat_id: int, runtime: str = "") -> int:
     doomed = [
         handle
         for handle, (cid, _, owner) in _SESSIONS.items()
-        if cid == chat_id and (not runtime or owner == runtime)
+        if cid == chat_id and (not runtime or owner in {runtime, f"skillcache-trace:{runtime}"})
     ]
     for handle in doomed:
         del _SESSIONS[handle]
@@ -243,7 +243,7 @@ class ToolBridge:
         handle = request.headers.get(_SESSION_HEADER, "")
         if handle:
             chat_id = session_chat(handle)
-            if chat_id is None:
+            if chat_id is None or _SESSIONS[handle][2].startswith("skillcache-trace:"):
                 logger.warning("bridge: rejected unknown session for %s", name)
                 return web.json_response({"error": "unknown session"}, status=401)
         else:
@@ -277,9 +277,35 @@ class ToolBridge:
         context.run(kesha_tools.set_current_chat, chat_id)
         return await context.run(lambda: asyncio.ensure_future(handler(args)))
 
+    async def _trace(self, request: web.Request) -> web.Response:
+        from skillcache_trace import begin_event, finish_event
+
+        handle = request.headers.get("X-Kesha-SkillCache-Trace", "")
+        chat = session_chat(handle)
+        if chat is None or not _SESSIONS[handle][2].startswith("skillcache-trace:"):
+            return web.json_response({}, status=403)
+        if not request.content_length or request.content_length > 4096:
+            return web.json_response({}, status=400)
+        try:
+            value = await request.json()
+            if not isinstance(value, dict):
+                raise ValueError
+            if value.get("action") == "begin":
+                ids = begin_event(chat, value["server"], value["tool"], value["shape"],
+                                  schema_digest=value.get("schema_digest"))
+                return web.json_response({"ticket": ":".join(ids)} if ids else {})
+            if value.get("action") == "finish":
+                invocation, ticket = value["ticket"].split(":", 1)
+                finish_event(chat, invocation, ticket, blocks=value["blocks"], error=value["error"])
+                return web.json_response({})
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+        return web.json_response({}, status=400)
+
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post("/tool", self.handle)
+        app.router.add_post("/skillcache/trace", self._trace)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
 
