@@ -627,7 +627,7 @@ class AntigravitySession:
                     preamble = "\n\n".join(part for part in (context, handoff) if part)
                     if preamble:
                         blocks.insert(0, {"type": "text", "text": preamble})
-                if audio:
+                if audio and str(getattr(self, "model", "")).startswith("gemini-"):
                     blocks.extend(await asyncio.to_thread(
                         self._audio_blocks, tuple(path for _, paths, _ in batch for path in paths)))
                 if self._stopped:

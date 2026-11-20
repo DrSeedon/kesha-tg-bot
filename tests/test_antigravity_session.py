@@ -126,7 +126,7 @@ async def test_native_telegram_voice_paths_never_use_deepgram(tmp_path, monkeypa
     monkeypatch.setattr(handlers, "ALLOWED", {uid})
     monkeypatch.setattr(config, "DEEPGRAM", "")
     monkeypatch.setattr(handlers, "transcribe", AsyncMock(side_effect=AssertionError("Deepgram called")))
-    start = SimpleNamespace(runtime_id="antigravity")
+    start = SimpleNamespace(runtime_id="antigravity", session=SimpleNamespace(model="gemini-4-neon-medium"))
     monkeypatch.setattr(handlers, "_start_media", AsyncMock(return_value=(start, 0, 0)))
     download = AsyncMock(return_value=str(tmp_path / "incoming"))
     monkeypatch.setattr(handlers, "download_file", download)

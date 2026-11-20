@@ -73,7 +73,9 @@ async def test_opus_55_output_ceiling_does_not_latch_the_invariant(tmp_path):
     task = asyncio.create_task(collect(session))
     await asyncio.sleep(0)
     await client.events.put(AssistantMessage(content=[TextBlock("hi")], model="claude"))
-    await client.events.put(result(text="hi", max_output=128_000))
+    r1 = result(text="hi", max_output=128_000)
+    r1.model_usage = {"claude-opus-5-5[1m]": {"maxOutputTokens": 128_000}}
+    await client.events.put(r1)
     await task
     assert session._max_output_tokens_valid is True
 
@@ -81,7 +83,9 @@ async def test_opus_55_output_ceiling_does_not_latch_the_invariant(tmp_path):
     task = asyncio.create_task(collect(session))
     await asyncio.sleep(0)
     await client.events.put(AssistantMessage(content=[TextBlock("hi")], model="claude"))
-    await client.events.put(result(text="hi", max_output=64_000))
+    r2 = result(text="hi", max_output=64_000)
+    r2.model_usage = {"claude-opus-5-5[1m]": {"maxOutputTokens": 64_000}}
+    await client.events.put(r2)
     await task
     assert session._max_output_tokens_valid is False
 

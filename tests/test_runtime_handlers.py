@@ -39,12 +39,17 @@ def source(text="", uid=1, chat_id=42):
 
 
 def test_runtime_keyboard_marks_the_current_backend():
-    keyboard = handlers._runtime_keyboard("claude")
+    keyboard = handlers._runtime_keyboard(SimpleNamespace(runtime_id="antigravity", session=SimpleNamespace(model="claude-sonnet-5-5-medium")))
 
-    first_row = keyboard.inline_keyboard[0]
-    assert first_row[0].text == "✅ Claude"
-    assert first_row[0].callback_data == "runtime:claude"
-    assert first_row[1].callback_data == "runtime:codex"
+    row0 = keyboard.inline_keyboard[0]
+    row1 = keyboard.inline_keyboard[1]
+    row2 = keyboard.inline_keyboard[2]
+    assert row0[0].callback_data == "runtime:gemini"
+    assert row0[1].callback_data == "runtime:argon"
+    assert row1[0].text.startswith("✅ ")
+    assert row1[0].callback_data == "runtime:claude"
+    assert row1[1].callback_data == "runtime:opus"
+    assert row2[0].callback_data == "runtime:codex"
 
 
 def test_direct_runtime_commands_are_published():
@@ -95,4 +100,4 @@ async def test_callback_is_acknowledged_before_slow_switch(monkeypatch):
     assert order == ["ack", "switch"]
     message.edit_text.assert_awaited_once()
     markup = message.edit_text.await_args.kwargs["reply_markup"]
-    assert markup.inline_keyboard[0][1].text == "✅ Codex"
+    assert markup.inline_keyboard[2][0].text == "✅ Codex (Sol 6.2)"

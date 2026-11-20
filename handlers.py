@@ -296,11 +296,64 @@ async def h_runtime(msg: types.Message):
     await _switch_runtime_command(msg, argument, list_runtimes())
 
 
+_RUNTIME_PRESETS: dict[str, tuple[str, tuple[str, str | None] | None]] = {
+    "gemini": ("antigravity", ("gemini-4-neon-medium", None)),
+    "neon": ("antigravity", ("gemini-4-neon-medium", None)),
+    "argon": ("antigravity", ("gemini-4-argon-medium", None)),
+    "claude": ("antigravity", ("claude-sonnet-5-5-medium", None)),
+    "sonnet": ("antigravity", ("claude-sonnet-5-5-medium", None)),
+    "antigravity-3p": ("antigravity", ("claude-sonnet-5-5-medium", None)),
+    "opus": ("antigravity", ("claude-opus-5-5-medium", None)),
+}
+
+
+def _resolve_runtime_target(action: str) -> tuple[str, tuple[str, str | None] | None]:
+    key = (action or "").strip().lower()
+    if key in _RUNTIME_PRESETS:
+        return _RUNTIME_PRESETS[key]
+    return key, None
+
+
+def _uses_native_audio(cs) -> bool:
+    return (
+        getattr(cs, "runtime_id", None) == "antigravity"
+        and str(getattr(getattr(cs, "session", None), "model", "") or "").startswith("gemini-")
+    )
+
+
+async def h_gemini(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "gemini", list_runtimes())
+
+
+async def h_argon(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "argon", list_runtimes())
+
+
 async def h_claude(msg: types.Message):
     if not allowed(msg.from_user.id):
         return
     from runtime_registry import list_runtimes
     await _switch_runtime_command(msg, "claude", list_runtimes())
+
+
+async def h_sonnet(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "sonnet", list_runtimes())
+
+
+async def h_opus(msg: types.Message):
+    if not allowed(msg.from_user.id):
+        return
+    from runtime_registry import list_runtimes
+    await _switch_runtime_command(msg, "opus", list_runtimes())
 
 
 async def h_codex(msg: types.Message):
@@ -310,17 +363,53 @@ async def h_codex(msg: types.Message):
     await _switch_runtime_command(msg, "codex", list_runtimes())
 
 
-def _runtime_keyboard(current: str) -> InlineKeyboardMarkup:
-    def button(runtime_id: str, title: str) -> InlineKeyboardButton:
-        marker = "✅ " if runtime_id == current else ""
+def _runtime_keyboard_state(current) -> tuple[str, str]:
+    if isinstance(current, str):
+        return current, ""
+    return (
+        str(getattr(current, "runtime_id", "") or ""),
+        str(getattr(getattr(current, "session", None), "model", "") or ""),
+    )
+
+
+def _runtime_keyboard(current) -> InlineKeyboardMarkup:
+    runtime_id, model = _runtime_keyboard_state(current)
+
+    def _active(action: str) -> bool:
+        if action == "codex":
+            return runtime_id == "codex"
+        if runtime_id != "antigravity":
+            return runtime_id == action
+        if action == "argon":
+            return model.startswith("gemini-4-argon-") or model in (
+                "gemini-pro-orchestrator-g1-pro",
+                "gemini-pro-orchestrator-argon",
+            )
+        if action == "opus":
+            return model.startswith("claude-opus-")
+        if action == "claude":
+            return model.startswith("claude-sonnet-") or (
+                model.startswith("claude-") and not model.startswith("claude-opus-")
+            )
+        if action == "gemini":
+            return (not model) or (
+                model.startswith("gemini-")
+                and not model.startswith("gemini-4-argon-")
+                and model not in ("gemini-pro-orchestrator-g1-pro", "gemini-pro-orchestrator-argon")
+            )
+        return False
+
+    def button(action: str, title: str) -> InlineKeyboardButton:
+        marker = "✅ " if _active(action) else ""
         return InlineKeyboardButton(
-            text=f"{marker}{title}", callback_data=f"runtime:{runtime_id}"
+            text=f"{marker}{title}", callback_data=f"runtime:{action}"
         )
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button("claude", "Claude"), button("codex", "Codex")],
-        [button("antigravity", "Antigravity (Gemini)")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="runtime:refresh")],
+        [button("gemini", "Gemini (Neon)"), button("argon", "Argon (Med)")],
+        [button("claude", "Claude 3P (Sonnet 5.5)"), button("opus", "Opus 5.5 (3P)")],
+        [button("codex", "Codex (Sol 6.2)"),
+         InlineKeyboardButton(text="🔄 Обновить", callback_data="runtime:refresh")],
     ])
 
 
@@ -343,13 +432,20 @@ async def _send_runtime_panel(msg: types.Message) -> None:
     await _send_safe(
         msg,
         await _runtime_panel_text(msg, cs),
-        reply_markup=_runtime_keyboard(cs.runtime_id),
+        reply_markup=_runtime_keyboard(cs),
     )
 
 
 def _runtime_result_text(source, cs, target: str, available: list[str], result: dict) -> str:
     if result["ok"]:
-        if result.get("handoff_status") == "unsupported":
+        if result.get("handoff_status") == "same_runtime":
+            lang = (getattr(getattr(source, "from_user", None), "language_code", None) or "").lower()
+            handoff = (
+                "Контекст текущей Antigravity-сессии сохранён."
+                if lang.startswith("ru") or lang == ""
+                else "Current Antigravity session context preserved."
+            )
+        elif result.get("handoff_status") == "unsupported":
             handoff = t(source, "runtime_handoff_unsupported")
         else:
             handoff = t(source, "runtime_handoff_ok" if result.get("handoff")
@@ -383,14 +479,19 @@ async def _switch_runtime_command(
     target: str,
     available: list[str],
 ) -> None:
-    if target == "antigravity" and not _interactive_sender(msg):
+    runtime_target, selection = _resolve_runtime_target(target)
+    if runtime_target == "antigravity" and not _interactive_sender(msg):
         return
     cs = _registry.get(msg.chat.id)
-    result = await cs.switch_runtime(target)
+    result = (
+        await cs.switch_runtime(runtime_target, selection=selection)
+        if selection is not None
+        else await cs.switch_runtime(runtime_target)
+    )
     await _send_safe(
         msg,
-        _runtime_result_text(msg, cs, target, available, result),
-        reply_markup=_runtime_keyboard(cs.runtime_id),
+        _runtime_result_text(msg, cs, runtime_target, available, result),
+        reply_markup=_runtime_keyboard(cs),
     )
 
 
@@ -409,17 +510,22 @@ async def h_runtime_callback(query: types.CallbackQuery):
     action = query.data.removeprefix("runtime:")
     prefix = ""
     if action != "refresh":
-        if action == "antigravity" and not _interactive_sender(query):
+        runtime_target, selection = _resolve_runtime_target(action)
+        if runtime_target == "antigravity" and not _interactive_sender(query):
             return
         available = list_runtimes()
-        result = await cs.switch_runtime(action)
-        prefix = _runtime_result_text(query, cs, action, available, result) + "\n\n"
+        result = (
+            await cs.switch_runtime(runtime_target, selection=selection)
+            if selection is not None
+            else await cs.switch_runtime(runtime_target)
+        )
+        prefix = _runtime_result_text(query, cs, runtime_target, available, result) + "\n\n"
 
     text = prefix + await _runtime_panel_text(query, cs)
     try:
         await query.message.edit_text(
             text,
-            reply_markup=_runtime_keyboard(cs.runtime_id),
+            reply_markup=_runtime_keyboard(cs),
         )
     except Exception as exc:
         if "message is not modified" not in str(exc).lower():
@@ -437,7 +543,7 @@ def _model_keyboard(cs):
                 label = f"{title} · {effort}" if effort else title
                 buttons.append(InlineKeyboardButton(text=("✓ " if selected else "") + label,
                                                     callback_data=f"model:{runtime_id}:{index}:{effort}"))
-            rows.extend(buttons[i:i + 2] for i in range(0, len(buttons), 2))
+            rows.extend(buttons[i:i + 3] for i in range(0, len(buttons), 3))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -625,7 +731,7 @@ async def h_voice(msg: types.Message):
     if media is None:
         return
     cs, gen, media_gen = media
-    native = cs.runtime_id == "antigravity"
+    native = _uses_native_audio(cs)
     path = await download_file(msg.voice.file_id,
                                _media_name("voice", ".ogg" if native else ".oga", msg),
                                msg.voice.file_unique_id)
@@ -682,7 +788,7 @@ async def h_media_album(messages: list[types.Message]):
 
     parts = []
     audio_paths = []
-    native = media[0].runtime_id == "antigravity"
+    native = _uses_native_audio(media[0])
     for m in messages:
         if m.photo:
             path = await download_file(m.photo[-1].file_id, _media_name("photo", ".jpg", m), m.photo[-1].file_unique_id)
@@ -746,7 +852,7 @@ async def h_video_note(msg: types.Message):
     if media is None:
         return
     cs, gen, media_gen = media
-    native = cs.runtime_id == "antigravity"
+    native = _uses_native_audio(cs)
     path = await download_file(msg.video_note.file_id, _media_name("videonote", ".mp4", msg), msg.video_note.file_unique_id)
     if not path:
         await enqueue(msg, "[video_note: файл слишком большой]", media=media)
@@ -837,7 +943,7 @@ async def h_audio(msg: types.Message):
     ext = os.path.splitext(msg.audio.file_name or "audio.mp3")[1] or ".mp3"
     name = msg.audio.file_name or _media_name("audio", ext, msg)
     path = await download_file(msg.audio.file_id, name, msg.audio.file_unique_id)
-    if path and media[0].runtime_id == "antigravity":
+    if path and _uses_native_audio(media[0]):
         await _enqueue_native_voice(msg, media, path, msg.audio.duration, convert=True, source="audio")
         return
     tag = f"[audio: {path} ({name})]" if path else f"[audio: файл слишком большой ({name})]"
@@ -875,9 +981,13 @@ COMMANDS_RU = [
     BotCommand(command="clear", description="Сбросить сессию"),
     BotCommand(command="compact", description="Сжать контекст (сохранить краткую выжимку)"),
     BotCommand(command="model", description="Модель / Model"),
-    BotCommand(command="runtime", description="Рантайм и лимит (Claude/Codex)"),
-    BotCommand(command="claude", description="Переключиться на Claude"),
-    BotCommand(command="codex", description="Переключиться на Codex"),
+    BotCommand(command="runtime", description="Рантайм и пулы моделей"),
+    BotCommand(command="gemini", description="Antigravity Gemini (Neon Medium)"),
+    BotCommand(command="argon", description="Antigravity Argon (Medium)"),
+    BotCommand(command="claude", description="Antigravity Claude 3P (Sonnet 5.5)"),
+    BotCommand(command="sonnet", description="Antigravity Sonnet 5.5 Medium (3P)"),
+    BotCommand(command="opus", description="Antigravity Opus 5.5 Medium (3P)"),
+    BotCommand(command="codex", description="Переключиться на Codex (Sol 6.2)"),
     BotCommand(command="ping", description="Проверить сессию"),
     BotCommand(command="debounce", description="Задержка склейки сообщений"),
     BotCommand(command="debug", description="Вкл/выкл debug логи"),
@@ -894,9 +1004,13 @@ COMMANDS_EN = [
     BotCommand(command="clear", description="Clear session"),
     BotCommand(command="compact", description="Compact context (keep a summary)"),
     BotCommand(command="model", description="Модель / Model"),
-    BotCommand(command="runtime", description="Runtime and quota (Claude/Codex)"),
-    BotCommand(command="claude", description="Switch to Claude"),
-    BotCommand(command="codex", description="Switch to Codex"),
+    BotCommand(command="runtime", description="Runtime and model pools"),
+    BotCommand(command="gemini", description="Antigravity Gemini (Neon Medium)"),
+    BotCommand(command="argon", description="Antigravity Argon (Medium)"),
+    BotCommand(command="claude", description="Antigravity Claude 3P (Sonnet 5.5)"),
+    BotCommand(command="sonnet", description="Antigravity Sonnet 5.5 Medium (3P)"),
+    BotCommand(command="opus", description="Antigravity Opus 5.5 Medium (3P)"),
+    BotCommand(command="codex", description="Switch to Codex (Sol 6.2)"),
     BotCommand(command="ping", description="Check session"),
     BotCommand(command="debounce", description="Message batching delay"),
     BotCommand(command="debug", description="Toggle debug logs"),
@@ -951,7 +1065,11 @@ def register(dp: Dispatcher) -> None:
     dp.message.register(h_runtime, Command("runtime"))
     dp.message.register(h_model, Command("model"))
     dp.callback_query.register(h_model_callback, F.data.startswith("model:"))
+    dp.message.register(h_gemini, Command("gemini"))
+    dp.message.register(h_argon, Command("argon"))
     dp.message.register(h_claude, Command("claude"))
+    dp.message.register(h_sonnet, Command("sonnet"))
+    dp.message.register(h_opus, Command("opus"))
     dp.message.register(h_codex, Command("codex"))
     dp.callback_query.register(h_runtime_callback, F.data.startswith("runtime:"))
     dp.message.register(h_ping, Command("ping"))

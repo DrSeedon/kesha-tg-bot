@@ -15,7 +15,7 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()}
 WORK_DIR = os.getenv("WORK_DIR", ".")
-MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
+MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 RUNTIME = os.getenv("KESHA_RUNTIME", "claude")
 BOT_SERVICE_UNIT = "kesha-bot-vps"
 
@@ -159,7 +159,7 @@ STRINGS = {
         "compact_native_done": "✅ Контекст сжат средствами {runtime}: {before:.0f}% → {after:.0f}% ({tokens} токенов).",
         "compact_native_done_unmeasured": "✅ Контекст сжат средствами {runtime}. Было {before:.0f}%; новая загрузка измерится после следующего сообщения.",
         "compact_native_failed": "⚠️ Родное сжатие не удалось: {error}",
-        "runtime_status": "🧩 Рантайм: *{current}* ({model})\nДоступны: {available}\nЛимиты: /limits\nКоманды: /claude · /codex",
+        "runtime_status": "🧩 Рантайм: *{current}* (`{model}`)\nДоступны: {available}\nЛимиты: /limits\nПулы и модели: /gemini · /argon · /claude · /sonnet · /opus · /codex · /model",
         "runtime_switched": "🔄 Рантайм: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "Последние видимые сообщения переданы в новый рантайм.",
         "runtime_handoff_none": "История не передана (пустая или недоступна) — начинаю с чистого листа.",
@@ -251,7 +251,7 @@ STRINGS = {
         "compact_native_done": "✅ Context compacted via {runtime}: {before:.0f}% → {after:.0f}% ({tokens} tokens).",
         "compact_native_done_unmeasured": "✅ Context compacted via {runtime}. It was {before:.0f}%; the new usage will be measured after the next message.",
         "compact_native_failed": "⚠️ Native compaction failed: {error}",
-        "runtime_status": "🧩 Runtime: *{current}* ({model})\nAvailable: {available}\nLimits: /limits\nCommands: /claude · /codex",
+        "runtime_status": "🧩 Runtime: *{current}* (`{model}`)\nAvailable: {available}\nLimits: /limits\nPools & models: /gemini · /argon · /claude · /sonnet · /opus · /codex · /model",
         "runtime_switched": "🔄 Runtime: *{previous}* → *{current}* ({model}).\n{handoff}",
         "runtime_handoff_ok": "Recent visible messages were carried to the new runtime.",
         "runtime_handoff_none": "History not carried over (empty or unavailable) — starting fresh.",

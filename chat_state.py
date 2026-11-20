@@ -546,7 +546,11 @@ class ChatState:
         cheap request is not usable, and announcing a switch to it would strand
         the next message.
         """
-        if target == self.runtime_id and selection is None:
+        current_selection = (
+            getattr(self.session, "model", None),
+            getattr(self.session, "reasoning_effort", None),
+        )
+        if target == self.runtime_id and (selection is None or selection == current_selection):
             return {"ok": False, "reason": "same", "runtime": target}
 
         try:
@@ -578,6 +582,32 @@ class ChatState:
         old_runtime = self.runtime_id
         handoff_note = None
         new_session = None
+        if target == old_runtime == "antigravity" and selection is not None:
+            try:
+                self._activity_store.select_model(self.chat_id, target, *selection)
+                self.session.model = selection[0]
+                if hasattr(self.session, "reasoning_effort"):
+                    self.session.reasoning_effort = selection[1]
+            except Exception as exc:
+                logger.error(f"Chat {self.chat_id}: antigravity model switch failed: {exc}")
+                return {
+                    "ok": False,
+                    "reason": "unavailable",
+                    "runtime": target,
+                    "fallback": old_runtime,
+                    "error": str(exc),
+                }
+            finally:
+                await self._finish_reload()
+            return {
+                "ok": True,
+                "runtime": target,
+                "previous": old_runtime,
+                "model": selection[0],
+                "handoff": None,
+                "handoff_status": "same_runtime",
+                "quota": self._quota_of(self.session),
+            }
         try:
             if not self._build_runtime:
                 raise RuntimeError("runtime switching is not wired for this chat")

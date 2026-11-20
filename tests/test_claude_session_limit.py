@@ -777,7 +777,7 @@ async def test_stream_fallback_warns_and_restores_primary_model(tmp_path):
     chunks = await task
 
     warning = next(chunk["content"] for chunk in chunks if chunk["type"] == "warning")
-    assert "claude-opus-5-5" in warning
+    assert session.model in warning
     assert "claude-opus-4-8" in warning
     assert client.models == [session.expected_context_model]
     assert session._model_restore_required is False
