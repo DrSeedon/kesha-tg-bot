@@ -19,6 +19,7 @@ import socket
 import stat
 import struct
 import sys
+import time
 
 from runtime_handoff import write_private_json
 from runtime_protocol import RuntimeCapabilities
@@ -216,12 +217,29 @@ class AntigravitySession:
     async def probe_readiness(self):
         return {"ok": True, "passive": True}
 
+    def _last_turn_wall_ts(self) -> float | None:
+        val = self._state.get("lastTurnAt")
+        if type(val) in (int, float) and math.isfinite(val) and val > 0:
+            return float(val)
+        if self.session_id and self.session_file.exists():
+            try:
+                st = self.session_file.stat()
+                if math.isfinite(st.st_mtime) and st.st_mtime > 0:
+                    return float(st.st_mtime)
+            except OSError:
+                pass
+        return None
+
     async def get_context_usage(self, *, refresh=False, preserve_session=False):
         return self._state.get("context")
 
     async def check_context_reserve(self, combined="", *, manual=False):
         from claude_session import MANUAL_COMPACT_FLOOR_TOKENS
-        from config import ANTIGRAVITY_AUTO_COMPACT_TOKENS
+        from config import (
+            ANTIGRAVITY_AUTO_COMPACT_TOKENS,
+            ANTIGRAVITY_CACHE_TTL_SEC,
+            ANTIGRAVITY_HARD_COMPACT_PCT,
+        )
         from quota_gate import antigravity_cooldown_status
 
         cooldown = antigravity_cooldown_status()
@@ -239,11 +257,22 @@ class AntigravitySession:
         remaining = maximum - used
         required = MANUAL_COMPACT_FLOOR_TOKENS if manual else 0
         projected = used + (len(combined) // 4 if combined else 0)
-        should_compact = (not manual) and (used >= ANTIGRAVITY_AUTO_COMPACT_TOKENS or projected >= ANTIGRAVITY_AUTO_COMPACT_TOKENS)
-        return {"ok": remaining >= required, "reason": "reserve" if remaining < required else None,
-                "required": required, "remaining": remaining, "usage": context,
-                "should_compact": should_compact,
-                "compact_threshold_tokens": ANTIGRAVITY_AUTO_COMPACT_TOKENS}
+        hard_limit = int(maximum * ANTIGRAVITY_HARD_COMPACT_PCT / 100)
+        cold_limit = min(ANTIGRAVITY_AUTO_COMPACT_TOKENS, hard_limit)
+        last_ts = self._last_turn_wall_ts()
+        cache_cold = (last_ts is not None) and ((time.time() - last_ts) >= ANTIGRAVITY_CACHE_TTL_SEC)
+        active_threshold = cold_limit if cache_cold else hard_limit
+        should_compact = (not manual) and (used >= active_threshold or projected >= active_threshold)
+        return {
+            "ok": remaining >= required,
+            "reason": "reserve" if remaining < required else None,
+            "required": required,
+            "remaining": remaining,
+            "usage": context,
+            "should_compact": should_compact,
+            "compact_threshold_tokens": active_threshold,
+            "cache_cold": cache_cold,
+        }
 
     async def inject_context(self, text):
         self._state["handoff"] = text
@@ -259,6 +288,7 @@ class AntigravitySession:
         self._state = {}
 
     def commit_session_replacement(self, transaction):
+        self._state["lastTurnAt"] = round(time.time(), 3)
         write_private_json(self.session_file, self._state)
         self._replacement = None
         transaction.committed = True
@@ -474,13 +504,15 @@ class AntigravitySession:
         # agent_thought_chunk is intentionally never emitted.
 
     def _record_usage(self, result, *, output_chars: int = 0, tool_calls: int = 0):
+        from config import ANTIGRAVITY_CACHE_TTL_SEC
+
+        now_wall = time.time()
+        prev_ts = self._last_turn_wall_ts()
         accounting = dict(result.get("accounting") or {})
         context = self._state.get("context")
         ctx_tokens = context["totalTokens"] if isinstance(context, dict) else None
         if "cost_usd" not in accounting and ctx_tokens:
-            now_mono = asyncio.get_running_loop().time()
-            last_at = getattr(self, "_last_turn_completed_mono", None)
-            warm = last_at is not None and (now_mono - last_at) < 1800.0
+            warm = prev_ts is not None and (now_wall - prev_ts) < ANTIGRAVITY_CACHE_TTL_SEC
             api_calls = max(1, int(tool_calls or 0) + 1)
             prompt_total = int(ctx_tokens) * api_calls
             out_tok = max(1, int(output_chars or 0) // 4) if output_chars else 0
@@ -498,6 +530,8 @@ class AntigravitySession:
         if type(cost) in (float, int) and math.isfinite(cost) and cost >= 0:
             self.total_cost_usd = (self.total_cost_usd or 0) + cost
         self._last_turn_completed_mono = asyncio.get_running_loop().time()
+        self._state["lastTurnAt"] = round(now_wall, 3)
+        self._save()
         self.last_num_turns = self.last_response_usage["num_turns"]
         self.last_stop_reason = result.get("stopReason")
         if context:

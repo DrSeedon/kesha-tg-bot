@@ -46,7 +46,9 @@ PHOTO_CAPTION_REPLY_SEC = float(os.getenv("PHOTO_CAPTION_REPLY_SEC", "1"))
 # a single turn jumped past it and the chat died. 88% leaves ~89K.
 AUTO_COMPACT_TRIGGER_PCT = 88.0
 CODEX_AUTO_COMPACT_TRIGGER_PCT = 90.0
+ANTIGRAVITY_CACHE_TTL_SEC = int(os.getenv("ANTIGRAVITY_CACHE_TTL_SEC", "1800"))
 ANTIGRAVITY_AUTO_COMPACT_TOKENS = 180_000
+ANTIGRAVITY_HARD_COMPACT_PCT = 85.0
 TG_MSG_LIMIT = 4096
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "./storage/media")).resolve()
 LOG_DIR = Path(os.getenv("LOG_DIR", "./logs")).resolve()
