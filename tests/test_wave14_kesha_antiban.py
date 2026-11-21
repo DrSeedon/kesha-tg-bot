@@ -22,41 +22,37 @@ def test_model_choices_ban_xhigh():
     assert model_choices.resolve_choice("antigravity", 0, "medium") == ("gemini-4-neon-medium", None)
 
 
-def test_quota_gate_antigravity_cooldown_and_orchestra_kv(tmp_path, monkeypatch):
+def test_quota_gate_antigravity_cooldown_per_pool_and_capped_ttl(tmp_path, monkeypatch):
     cd_file = tmp_path / "cooldown.json"
-    orc_db = tmp_path / "orchestra.db"
     monkeypatch.setattr(quota_gate, "ANTIGRAVITY_COOLDOWN_PATH", cd_file)
-    monkeypatch.setattr(quota_gate, "ORCHESTRA_DB_PATH", orc_db)
+    assert not hasattr(quota_gate, "ORCHESTRA_DB_PATH")
+    assert not hasattr(quota_gate, "_read_orchestra_antigravity_cooldown")
 
     now = 1_763_622_420.0
     matched, until_ts, reset_s = quota_gate.parse_antigravity_quota_cooldown(
         "Individual quota reached. Resets in 1h56m11s", now=now
     )
-    assert matched and reset_s == 6971 and until_ts == now + 6971 + 90
+    assert matched and reset_s == 6971 and until_ts == now + 900
 
     m2, u2, r2 = quota_gate.parse_antigravity_quota_cooldown("quota reached 429", now=now)
-    assert m2 and r2 == 1800 and u2 == now + 1890
+    assert m2 and r2 == 900 and u2 == now + 900
 
-    info = quota_gate.record_antigravity_cooldown("Individual quota reached. Resets in 20m", now=now)
-    assert "⛔ Antigravity 5h лимит исчерпан — антибан-стоп до " in info["message"]
-    assert quota_gate.antigravity_cooldown_status(now=now + 5)["until"] == info["until"]
+    info = quota_gate.record_antigravity_cooldown(
+        "Individual quota reached. Resets in 20m", now=now, model="gemini-4-neon-medium"
+    )
+    assert "⛔ Antigravity (gemini) лимит исчерпан — антибан-стоп до " in info["message"]
+    assert quota_gate.antigravity_cooldown_status(model="gemini-4-neon-medium", now=now + 5)["until"] == info["until"]
+    assert quota_gate.antigravity_cooldown_status(model="gemini-4-argon-high", now=now + 5) is None
+    assert quota_gate.antigravity_cooldown_status(model="claude-sonnet-5-5-medium", now=now + 5) is None
 
     quota_gate.clear_antigravity_cooldown()
-    with sqlite3.connect(orc_db) as conn:
-        conn.execute("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute(
-            "INSERT INTO kv(key, value) VALUES (?, ?)",
-            ("antigravity_quota_cooldown", json.dumps({"until": now + 3600})),
-        )
-    st = quota_gate.antigravity_cooldown_status(now=now + 10)
-    assert st is not None and st["until"] == now + 3600
+    assert quota_gate.antigravity_cooldown_status(model="gemini-4-neon-medium", now=now + 10) is None
 
 
 @pytest.mark.asyncio
 async def test_antigravity_session_cooldown_and_180k_compact_and_cost(tmp_path, monkeypatch):
     cd_file = tmp_path / "cooldown.json"
     monkeypatch.setattr(quota_gate, "ANTIGRAVITY_COOLDOWN_PATH", cd_file)
-    monkeypatch.setattr(quota_gate, "ORCHESTRA_DB_PATH", tmp_path / "missing.db")
 
     sess = build_runtime(
         "antigravity",
@@ -115,7 +111,6 @@ async def test_antigravity_ttl_dependent_auto_compact_and_persistence(tmp_path, 
 
     cd_file = tmp_path / "cooldown.json"
     monkeypatch.setattr(quota_gate, "ANTIGRAVITY_COOLDOWN_PATH", cd_file)
-    monkeypatch.setattr(quota_gate, "ORCHESTRA_DB_PATH", tmp_path / "missing.db")
     quota_gate.clear_antigravity_cooldown()
 
     now = 1_795_000_000.0

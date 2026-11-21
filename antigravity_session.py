@@ -242,7 +242,7 @@ class AntigravitySession:
         )
         from quota_gate import antigravity_cooldown_status
 
-        cooldown = antigravity_cooldown_status()
+        cooldown = antigravity_cooldown_status(model=self.model)
         if cooldown is not None:
             return {
                 "ok": False,
@@ -731,7 +731,7 @@ class AntigravitySession:
             return
         from quota_gate import antigravity_cooldown_status
 
-        cooldown = antigravity_cooldown_status()
+        cooldown = antigravity_cooldown_status(model=self.model)
         if cooldown is not None:
             yield {"type": "error", "kind": "usage_limit", "content": cooldown["message"]}
             return
@@ -780,7 +780,7 @@ class AntigravitySession:
                     raw_exc = str(exc)
                     is_quota, until_ts, _ = parse_antigravity_quota_cooldown(raw_exc)
                     if is_quota or "антибан-стоп" in raw_exc:
-                        info = record_antigravity_cooldown(raw_exc, until_ts=until_ts) if is_quota else {"message": raw_exc}
+                        info = record_antigravity_cooldown(raw_exc, until_ts=until_ts, model=self.model) if is_quota else {"message": raw_exc}
                         await queue.put({"type": "error", "kind": "usage_limit", "content": info["message"]})
                     elif isinstance(exc, MuxError) or "ACP mux" in raw_exc:
                         await queue.put({"type": "error", "kind": "acp_mux_offline", "content": raw_exc or "ACP mux offline"})

@@ -551,6 +551,9 @@ class ChatState:
             getattr(self.session, "reasoning_effort", None),
         )
         if target == self.runtime_id and (selection is None or selection == current_selection):
+            if target == "antigravity":
+                from quota_gate import clear_antigravity_cooldown
+                clear_antigravity_cooldown()
             return {"ok": False, "reason": "same", "runtime": target}
 
         try:
@@ -584,6 +587,8 @@ class ChatState:
         new_session = None
         if target == old_runtime == "antigravity" and selection is not None:
             try:
+                from quota_gate import clear_antigravity_cooldown
+                clear_antigravity_cooldown()
                 self._activity_store.select_model(self.chat_id, target, *selection)
                 self.session.model = selection[0]
                 if hasattr(self.session, "reasoning_effort"):
@@ -658,6 +663,10 @@ class ChatState:
 
         # Once adopted, cancellation may suppress the command reply but must
         # not leave PROCESSING latched or the old process/bridge alive.
+        if target == "antigravity":
+            from quota_gate import clear_antigravity_cooldown
+            clear_antigravity_cooldown()
+
         await self._finish_cancel_safely(
             self._retire_runtime_and_finish(old_session, old_runtime)
         )
@@ -669,63 +678,6 @@ class ChatState:
             "model": getattr(new_session, "model", ""),
             "handoff": handoff_note,
             "handoff_status": handoff_status,
-            "quota": self._quota_of(new_session),
-        }
-
-    async def failover_to_codex(self, raw_error: object = "") -> dict:
-        """In-turn atomic failover from Antigravity to Codex (gpt-6.2-sol) on quota exhaustion."""
-        if self._shutdown or self.runtime_id != "antigravity" or not self._build_runtime:
-            return {"ok": False, "reason": "unavailable", "error": "failover not applicable"}
-
-        read_selection = getattr(self._activity_store, "get_model_selection", None)
-        existing = read_selection(self.chat_id, "codex") if callable(read_selection) else None
-        effort = existing[1] if existing and len(existing) > 1 and existing[1] else "high"
-        selection = ("gpt-6.2-sol", effort)
-
-        old_session = self.session
-        old_runtime = self.runtime_id
-        new_session = None
-        try:
-            new_session = self._build_runtime("codex", self.chat_id, selection=selection)
-            probe = await self._probe_runtime(new_session)
-            if not probe.get("ok"):
-                raise RuntimeError(probe.get("error") or "codex runtime did not respond")
-            handoff_note = await asyncio.wait_for(
-                self._handoff_transcript(), HANDOFF_TIMEOUT_SECONDS
-            )
-            self._activity_store.adopt_runtime(
-                self.chat_id, "codex", selection=selection, handoff=handoff_note
-            )
-            self.session = new_session
-            self.runtime_id = "codex"
-            self._listen_for_background_turns(new_session)
-        except Exception as exc:
-            logger.error("Chat %s: antigravity -> codex failover failed: %s", self.chat_id, exc)
-            if new_session is not None:
-                await self._disconnect_runtime_terminal(new_session, "candidate codex")
-            return {
-                "ok": False,
-                "reason": "unavailable",
-                "runtime": old_runtime,
-                "error": str(exc),
-            }
-
-        await self._finish_cancel_safely(
-            self._disconnect_runtime_terminal(old_session, f"old runtime {old_runtime}")
-        )
-        try:
-            from tool_bridge import revoke_chat_sessions
-            revoke_chat_sessions(self.chat_id, old_runtime)
-        except Exception as exc:
-            logger.warning("Chat %s: bridge revoke after failover failed: %s", self.chat_id, exc)
-
-        return {
-            "ok": True,
-            "runtime": "codex",
-            "previous": old_runtime,
-            "model": getattr(new_session, "model", selection[0]),
-            "effort": effort,
-            "handoff": handoff_note,
             "quota": self._quota_of(new_session),
         }
 
@@ -1280,29 +1232,7 @@ class ChatState:
             except Exception as e:
                 logger.error(f"Chat {self.chat_id}: lazy reminder injection failed: {e}")
 
-            pre_cooldown = None
-            if agy and interactive:
-                from quota_gate import antigravity_cooldown_status
-                pre_cooldown = antigravity_cooldown_status()
-            if pre_cooldown is not None and callable(self._build_runtime):
-                failover = await self.failover_to_codex(pre_cooldown.get("message") or "cooldown")
-                if failover.get("ok"):
-                    agy = False
-                    if callable(pending):
-                        pending_handoff = pending(self.chat_id, self.runtime_id)
-                        if pending_handoff and pending_handoff[1] not in combined:
-                            combined = pending_handoff[1] + "\n\n" + combined
-
             reserve = await self._check_batch_context(combined)
-            if agy and interactive and not reserve.get("ok") and reserve.get("reason") == "usage_limit" and callable(self._build_runtime):
-                failover = await self.failover_to_codex(reserve.get("message") or "usage_limit")
-                if failover.get("ok"):
-                    agy = False
-                    if callable(pending):
-                        pending_handoff = pending(self.chat_id, self.runtime_id)
-                        if pending_handoff and pending_handoff[1] not in combined:
-                            combined = pending_handoff[1] + "\n\n" + combined
-                    reserve = await self._check_batch_context(combined)
             # An unmeasured context yields no compact decision — `elif` keeps us
             # out of a branch whose trigger we could not evaluate.
             if not reserve.get("ok"):
@@ -1403,13 +1333,12 @@ class ChatState:
             if len(batch) != 1 or pending_handoff or lazy_ids or self.background_agents_open():
                 trace.reason = "combined_or_background"
             if agy:
-                ask_result = await self._ask_fn(
+                turn_ran = bool(await self._ask_fn(
                     reply_msg, combined, self.chat_id,
                     interactive_user=interactive, origin="telegram" if interactive else "owned_reminder",
                     reminder=batch[0].reminder if not interactive else None,
                     audio_paths=tuple(path for entry in batch for path in entry.audio_paths),
-                )
-                turn_ran = bool(ask_result) if ask_result is not None else (self.runtime_id != "antigravity")
+                ))
             else:
                 await self._ask_fn(reply_msg, combined, self.chat_id)
                 turn_ran = True

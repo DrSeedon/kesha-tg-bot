@@ -229,8 +229,6 @@ def _agents_still_running(cid: int) -> bool:
 async def _ask_inner(message, prompt, cid, typer, **send_options):
     background = prompt is None
     no_replay = getattr(_get_session(cid), "no_prompt_replay", False) is True
-    failover_done = False
-    agy_quota_text_match = None
     native_success = False
     observation_completed = False
     observation_error = False
@@ -628,81 +626,10 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
         else:
             session.reconnect()
 
-    async def _delete_draft_msg():
-        nonlocal current_msg_id, last_edit_time, last_edit_text
-        if current_msg_id is not None:
-            with contextlib.suppress(Exception):
-                await _bot.delete_message(cid, current_msg_id)
-            current_msg_id = None
-            last_edit_time = 0.0
-            last_edit_text = ""
-
-    async def _try_agy_failover(err_text: str) -> bool:
-        nonlocal parts, has_deltas, send_options, current_prompt, failover_done
-        nonlocal turn_had_output, answer_seen, native_success, observation_completed
-        nonlocal observation_error, native_text_delivered, native_text_failed
-        nonlocal terminal_handled, agy_quota_text_match, status, no_replay
-
-        if background or failover_done or _runtime_label(cid) != "antigravity":
-            return False
-        try:
-            cs_obj = _registry.get(cid)
-        except Exception:
-            return False
-        failover_fn = getattr(cs_obj, "failover_to_codex", None)
-        if not callable(failover_fn):
-            return False
-        result = await failover_fn(err_text)
-        if not isinstance(result, dict) or not result.get("ok"):
-            return False
-        failover_done = True
-        if status is not None:
-            if status.tools:
-                mid = await status.finalize()
-                if mid:
-                    finalized.append(mid)
-            else:
-                await status.cancel_empty()
-            status = None
-        await _delete_draft_msg()
-        parts.clear()
-        completed_text_blocks.clear()
-        has_deltas = False
-        turn_had_output = False
-        answer_seen = False
-        native_success = False
-        observation_completed = False
-        observation_error = False
-        native_text_delivered = False
-        native_text_failed = False
-        terminal_handled = False
-        agy_quota_text_match = None
-        send_options = {}
-        handoff = result.get("handoff")
-        if handoff and isinstance(current_prompt, str):
-            store = getattr(cs_obj, "_activity_store", None)
-            if callable(getattr(store, "pending_handoff", None)) and callable(getattr(store, "consume_handoff", None)):
-                ph = store.pending_handoff(cid, "codex")
-                if ph:
-                    with contextlib.suppress(Exception):
-                        store.consume_handoff(cid, "codex", ph[0])
-            if handoff not in current_prompt:
-                current_prompt = handoff + "\n\n" + current_prompt
-        no_replay = getattr(_get_session(cid), "no_prompt_replay", False) is True
-        return True
-
     while retries <= MAX_RETRIES:
         need_retry = False
-        agy_quota_text_match = None
         _last_chunk_type = None
         open_work = 0
-        no_replay = getattr(_get_session(cid), "no_prompt_replay", False) is True
-        if not background and not failover_done and _runtime_label(cid) == "antigravity":
-            from quota_gate import antigravity_cooldown_status
-            if (cd := antigravity_cooldown_status()) is not None:
-                if await _try_agy_failover(cd.get("message") or "antigravity cooldown"):
-                    logger.info("Chat %s: pre-turn Antigravity cooldown failover -> codex", cid)
-                    no_replay = getattr(_get_session(cid), "no_prompt_replay", False) is True
         logger.info(f"Chat {cid}: retry loop iteration retries={retries}/{MAX_RETRIES}")
         if retries:
             reserve = await _get_session(cid).check_context_reserve(current_prompt)
@@ -853,36 +780,14 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                     elif not has_deltas:
                         parts.append(chunk["content"])
                     continue
-                if ct == "text_delta" or (ct == "text" and not has_deltas):
-                    if ct == "text_delta":
-                        has_deltas = True
-                    chunk_text = chunk["content"]
-                    candidate_text = "".join(parts) + chunk_text
-                    from quota_gate import (
-                        looks_like_antigravity_quota_prefix,
-                        looks_like_antigravity_quota_text,
-                    )
-                    rt_now = _runtime_label(cid)
-                    tools_now = len(status.tools) if status else 0
-                    matched_q, q_until, _ = looks_like_antigravity_quota_text(
-                        candidate_text, runtime=rt_now, tools=tools_now
-                    )
-                    if matched_q:
-                        parts.append(chunk_text)
-                        agy_quota_text_match = (candidate_text, q_until)
-                        await _delete_draft_msg()
-                        continue
-                    if agy_quota_text_match is not None:
-                        parts.append(chunk_text)
-                        agy_quota_text_match = (candidate_text, agy_quota_text_match[1])
-                        continue
-                    if current_msg_id is None and looks_like_antigravity_quota_prefix(
-                        candidate_text, runtime=rt_now, tools=tools_now
-                    ):
-                        parts.append(chunk_text)
-                        continue
+                if ct == "text_delta":
+                    has_deltas = True
                     await _open_text_block()
-                    parts.append(chunk_text)
+                    parts.append(chunk["content"])
+                    await _edit_update()
+                elif ct == "text" and not has_deltas:
+                    await _open_text_block()
+                    parts.append(chunk["content"])
                     await _edit_update()
                 elif ct == "warning":
                     await _answer(chunk["content"])
@@ -908,20 +813,19 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                     if status is not None:
                         await status.complete_current()
                 elif ct == "turn_done":
-                    if agy_quota_text_match is not None:
-                        from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
-                        q_text = "".join(parts) or agy_quota_text_match[0]
-                        _, parsed_until, _ = parse_antigravity_quota_cooldown(q_text)
-                        record_antigravity_cooldown(q_text, until_ts=parsed_until or agy_quota_text_match[1])
-                        parts.clear()
-                        has_deltas = False
-                        turn_had_output = False
-                        await _delete_draft_msg()
-                        if await _try_agy_failover(q_text):
-                            need_retry = True
-                            break
-                        await _handle_usage_limit(q_text)
-                        break
+                    if parts and _runtime_label(cid) == "antigravity":
+                        from quota_gate import looks_like_antigravity_quota_text, record_antigravity_cooldown
+                        q_text = "".join(parts)
+                        tools_now = len(status.tools) if status else 0
+                        matched_q, q_until, _ = looks_like_antigravity_quota_text(
+                            q_text, runtime="antigravity", tools=tools_now
+                        )
+                        if matched_q:
+                            record_antigravity_cooldown(
+                                q_text,
+                                until_ts=q_until,
+                                model=getattr(_get_session(cid), "model", None),
+                            )
                     native_success = chunk.get("ok", False) is True
                     if chunk.get("ours", True):
                         observation_completed = chunk.get("ok", not no_replay) is True
@@ -984,10 +888,11 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                     reset = _session_limit_reset(err)
                     if chunk.get("kind") == "usage_limit" or reset is not None or is_agy_quota:
                         if is_agy_quota:
-                            record_antigravity_cooldown(err, until_ts=agy_until)
-                        if _runtime_label(cid) == "antigravity" and await _try_agy_failover(err):
-                            need_retry = True
-                            break
+                            record_antigravity_cooldown(
+                                err,
+                                until_ts=agy_until,
+                                model=getattr(_get_session(cid), "model", None),
+                            )
                         # лимит сессии — НЕ ретраить (reconnect бесполезен), сообщить и выйти
                         logger.warning(f"Chat {cid}: session limit hit, NOT retrying: {err}")
                         await _handle_usage_limit(err)
@@ -1028,20 +933,19 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
                             break
                     parts.append(f"Error: {err}")
                     terminal_handled = True
-            if agy_quota_text_match is not None and not need_retry and not terminal_handled:
-                from quota_gate import parse_antigravity_quota_cooldown, record_antigravity_cooldown
-                q_text = "".join(parts) or agy_quota_text_match[0]
-                _, parsed_until, _ = parse_antigravity_quota_cooldown(q_text)
-                record_antigravity_cooldown(q_text, until_ts=parsed_until or agy_quota_text_match[1])
-                parts.clear()
-                has_deltas = False
-                turn_had_output = False
-                await _delete_draft_msg()
-                if await _try_agy_failover(q_text):
-                    need_retry = True
-                else:
-                    await _handle_usage_limit(q_text)
-                    break
+            if parts and not need_retry and not terminal_handled and _runtime_label(cid) == "antigravity":
+                from quota_gate import looks_like_antigravity_quota_text, record_antigravity_cooldown
+                q_text = "".join(parts)
+                tools_now = len(status.tools) if status else 0
+                matched_q, q_until, _ = looks_like_antigravity_quota_text(
+                    q_text, runtime="antigravity", tools=tools_now
+                )
+                if matched_q:
+                    record_antigravity_cooldown(
+                        q_text,
+                        until_ts=q_until,
+                        model=getattr(_get_session(cid), "model", None),
+                    )
             if not need_retry:
                 logger.info(f"Chat {cid}: inner loop done, no retry needed")
                 break
@@ -1055,9 +959,11 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
             reset = _session_limit_reset(str(e))
             if reset is not None or is_agy_quota:
                 if is_agy_quota:
-                    record_antigravity_cooldown(str(e), until_ts=agy_until)
-                if _runtime_label(cid) == "antigravity" and await _try_agy_failover(str(e)):
-                    continue
+                    record_antigravity_cooldown(
+                        str(e),
+                        until_ts=agy_until,
+                        model=getattr(_get_session(cid), "model", None),
+                    )
                 logger.warning(f"Chat {cid}: session limit (exception), NOT retrying: {e}")
                 await _handle_usage_limit(str(e))
                 break
@@ -1121,4 +1027,4 @@ async def _ask_inner(message, prompt, cid, typer, **send_options):
     skillcache_terminal(
         cid, usage_ref, observation_completed and not observation_error and not background and retries == 0
     )
-    return (native_success and native_text_delivered and not native_text_failed) if no_replay else (True if failover_done else None)
+    return native_success and native_text_delivered and not native_text_failed if no_replay else None
