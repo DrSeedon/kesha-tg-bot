@@ -257,3 +257,57 @@ def clear_antigravity_cooldown() -> None:
     except Exception:
         pass
 
+
+
+_AGY_QUOTA_PREFIX_MARKERS = (
+    "individual quota reached",
+    "quota reached",
+    "quota limit reached",
+    "quota exhausted",
+    "resource_exhausted",
+)
+
+
+def looks_like_antigravity_quota_prefix(
+    text: object, *, runtime: str, tools: int = 0
+) -> bool:
+    """True while short Antigravity output before tool use looks like a quota warning."""
+    if runtime != "antigravity" or tools > 0:
+        return False
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 220:
+        return False
+    low = raw.casefold()
+    if raw.startswith("⚠"):
+        return True
+    for marker in _AGY_QUOTA_PREFIX_MARKERS:
+        if marker in low or (len(low) >= 4 and marker.startswith(low)):
+            return True
+    return False
+
+
+def looks_like_antigravity_quota_text(
+    text: object, *, runtime: str, tools: int = 0
+) -> tuple[bool, float | None, int | None]:
+    """Detect raw Antigravity quota refusal emitted as assistant prose instead of error chunk."""
+    if runtime != "antigravity" or tools > 0:
+        return False, None, None
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 500:
+        return False, None, None
+    matched, until_ts, reset_s = parse_antigravity_quota_cooldown(raw)
+    if not matched:
+        return False, None, None
+    low = raw.casefold()
+    if (
+        "individual quota reached" in low
+        or "resets in" in low
+        or "upgrade your subscription" in low
+        or "quota reached" in low
+        or "quota limit reached" in low
+        or "quota exhausted" in low
+        or "resource_exhausted" in low
+        or raw.startswith("⚠")
+    ):
+        return True, until_ts, reset_s
+    return False, None, None
