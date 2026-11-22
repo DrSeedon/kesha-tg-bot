@@ -235,11 +235,7 @@ class AntigravitySession:
 
     async def check_context_reserve(self, combined="", *, manual=False):
         from claude_session import MANUAL_COMPACT_FLOOR_TOKENS
-        from config import (
-            ANTIGRAVITY_AUTO_COMPACT_TOKENS,
-            ANTIGRAVITY_CACHE_TTL_SEC,
-            ANTIGRAVITY_HARD_COMPACT_PCT,
-        )
+        from config import ANTIGRAVITY_HARD_COMPACT_PCT
         from quota_gate import antigravity_cooldown_status
 
         cooldown = antigravity_cooldown_status(model=self.model)
@@ -258,11 +254,7 @@ class AntigravitySession:
         required = MANUAL_COMPACT_FLOOR_TOKENS if manual else 0
         projected = used + (len(combined) // 4 if combined else 0)
         hard_limit = int(maximum * ANTIGRAVITY_HARD_COMPACT_PCT / 100)
-        cold_limit = min(ANTIGRAVITY_AUTO_COMPACT_TOKENS, hard_limit)
-        last_ts = self._last_turn_wall_ts()
-        cache_cold = (last_ts is not None) and ((time.time() - last_ts) >= ANTIGRAVITY_CACHE_TTL_SEC)
-        active_threshold = cold_limit if cache_cold else hard_limit
-        should_compact = (not manual) and (used >= active_threshold or projected >= active_threshold)
+        should_compact = (not manual) and (used >= hard_limit or projected >= hard_limit)
         return {
             "ok": remaining >= required,
             "reason": "reserve" if remaining < required else None,
@@ -270,8 +262,7 @@ class AntigravitySession:
             "remaining": remaining,
             "usage": context,
             "should_compact": should_compact,
-            "compact_threshold_tokens": active_threshold,
-            "cache_cold": cache_cold,
+            "compact_threshold_tokens": hard_limit,
         }
 
     async def inject_context(self, text):

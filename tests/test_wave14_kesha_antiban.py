@@ -74,17 +74,21 @@ async def test_antigravity_session_cooldown_and_180k_compact_and_cost(tmp_path, 
     assert res_cd["ok"] is False and res_cd["reason"] == "usage_limit"
 
     quota_gate.clear_antigravity_cooldown()
-    assert config.ANTIGRAVITY_AUTO_COMPACT_TOKENS == 180_000
+    assert not hasattr(config, "ANTIGRAVITY_AUTO_COMPACT_TOKENS")
     assert config.ANTIGRAVITY_CACHE_TTL_SEC == 1800
     assert config.ANTIGRAVITY_HARD_COMPACT_PCT == 85.0
 
-    # Cold cache triggers compact at 180K; warm/new session stays open until 85%
+    # Even after idle time (>= 1800s), compact threshold stays strictly 85% (850K), never 180K
     import time as _time
-    sess._state["lastTurnAt"] = _time.time() - 1900
-    sess._state["context"] = {"totalTokens": 180_000, "maxTokens": 1_000_000, "percentage": 18.0}
-    res_cold = await sess.check_context_reserve("")
-    assert res_cold["ok"] is True and res_cold["should_compact"] is True
-    assert res_cold["cache_cold"] is True and res_cold["compact_threshold_tokens"] == 180_000
+    sess._state["lastTurnAt"] = _time.time() - 7200
+    sess._state["context"] = {"totalTokens": 221_000, "maxTokens": 1_000_000, "percentage": 22.1}
+    res_idle_221k = await sess.check_context_reserve("")
+    assert res_idle_221k["ok"] is True and res_idle_221k["should_compact"] is False
+    assert res_idle_221k["compact_threshold_tokens"] == 850_000
+    sess._state["context"] = {"totalTokens": 850_000, "maxTokens": 1_000_000, "percentage": 85.0}
+    res_hard = await sess.check_context_reserve("")
+    assert res_hard["ok"] is True and res_hard["should_compact"] is True
+    assert res_hard["compact_threshold_tokens"] == 850_000
     res_manual = await sess.check_context_reserve("", manual=True)
     assert res_manual["should_compact"] is False
 
@@ -105,9 +109,8 @@ async def test_antigravity_session_cooldown_and_180k_compact_and_cost(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_antigravity_ttl_dependent_auto_compact_and_persistence(tmp_path, monkeypatch):
+async def test_antigravity_compact_ignores_idle_ttl_and_triggers_only_at_85pct(tmp_path, monkeypatch):
     import os
-    import time
 
     cd_file = tmp_path / "cooldown.json"
     monkeypatch.setattr(quota_gate, "ANTIGRAVITY_COOLDOWN_PATH", cd_file)
@@ -117,70 +120,39 @@ async def test_antigravity_ttl_dependent_auto_compact_and_persistence(tmp_path, 
     monkeypatch.setattr(agy.time, "time", lambda: now)
 
     sess_path = tmp_path / "720740564.antigravity"
-
-    # 1) Warm cache (420s < 1800s) at 185K/1M (18.5%) -> DO NOT compact, ceiling 850K
     sess = build_runtime("antigravity", RuntimeBuildContext(720740564, str(tmp_path), "gemini-4-neon-medium", "", {}, sess_path))
+
+    # 1) Morning incident repro: 221K/1M (22.1%) after 2h (7200s) idle -> MUST NOT compact (threshold stays 850K)
     sess._state.update({
-        "sessionId": "sid-warm",
-        "context": {"totalTokens": 185_000, "maxTokens": 1_000_000, "percentage": 18.5},
-        "lastTurnAt": now - 420,
+        "sessionId": "sid-idle-2h",
+        "context": {"totalTokens": 221_000, "maxTokens": 1_000_000, "percentage": 22.1},
+        "lastTurnAt": now - 7200,
     })
-    res_warm_185 = await sess.check_context_reserve("")
-    assert res_warm_185["should_compact"] is False
-    assert res_warm_185["cache_cold"] is False
-    assert res_warm_185["compact_threshold_tokens"] == 850_000
+    res_morning = await sess.check_context_reserve("")
+    assert res_morning["should_compact"] is False
+    assert res_morning["compact_threshold_tokens"] == 850_000
 
-    # 2) Warm cache (420s < 1800s) at 860K/1M (86%) -> DO compact (85% emergency cap)
-    sess._state["context"] = {"totalTokens": 860_000, "maxTokens": 1_000_000, "percentage": 86.0}
-    res_warm_860 = await sess.check_context_reserve("")
-    assert res_warm_860["should_compact"] is True
-    assert res_warm_860["cache_cold"] is False
-    assert res_warm_860["compact_threshold_tokens"] == 850_000
-
-    # 3) Cold cache (1900s >= 1800s) at 185K/1M (18.5%) -> DO compact (180K cold threshold)
-    sess._state["lastTurnAt"] = now - 1900
-    sess._state["context"] = {"totalTokens": 185_000, "maxTokens": 1_000_000, "percentage": 18.5}
-    res_cold_185 = await sess.check_context_reserve("")
-    assert res_cold_185["should_compact"] is True
-    assert res_cold_185["cache_cold"] is True
-    assert res_cold_185["compact_threshold_tokens"] == 180_000
-
-    # 4) Cold cache (1900s >= 1800s) at 120K/1M (12%) -> DO NOT compact
-    sess._state["context"] = {"totalTokens": 120_000, "maxTokens": 1_000_000, "percentage": 12.0}
-    res_cold_120 = await sess.check_context_reserve("")
-    assert res_cold_120["should_compact"] is False
-    assert res_cold_120["cache_cold"] is True
-    assert res_cold_120["compact_threshold_tokens"] == 180_000
-
-    # 5) Persistence across restart from session_file + st_mtime fallback when lastTurnAt absent
-    sess._state["context"] = {"totalTokens": 185_000, "maxTokens": 1_000_000, "percentage": 18.5}
-    sess._state["lastTurnAt"] = now - 420
+    # 2) Below 850K even with st_mtime 1900s ago -> MUST NOT compact
     sess._save()
-    restarted = build_runtime("antigravity", RuntimeBuildContext(720740564, str(tmp_path), "gemini-4-neon-medium", "", {}, sess_path))
-    assert (await restarted.check_context_reserve(""))["cache_cold"] is False
-
-    # Strip lastTurnAt from disk and use st_mtime fallback
     data_no_ts = json.loads(sess_path.read_text())
     data_no_ts.pop("lastTurnAt", None)
     sess_path.write_text(json.dumps(data_no_ts))
-    os.utime(sess_path, (now - 300, now - 300))
-    from_mtime_warm = build_runtime("antigravity", RuntimeBuildContext(720740564, str(tmp_path), "gemini-4-neon-medium", "", {}, sess_path))
-    res_mtime_warm = await from_mtime_warm.check_context_reserve("")
-    assert res_mtime_warm["cache_cold"] is False and res_mtime_warm["should_compact"] is False
-
     os.utime(sess_path, (now - 1900, now - 1900))
-    from_mtime_cold = build_runtime("antigravity", RuntimeBuildContext(720740564, str(tmp_path), "gemini-4-neon-medium", "", {}, sess_path))
-    res_mtime_cold = await from_mtime_cold.check_context_reserve("")
-    assert res_mtime_cold["cache_cold"] is True and res_mtime_cold["should_compact"] is True
+    restarted = build_runtime("antigravity", RuntimeBuildContext(720740564, str(tmp_path), "gemini-4-neon-medium", "", {}, sess_path))
+    res_mtime_idle = await restarted.check_context_reserve("")
+    assert res_mtime_idle["should_compact"] is False
+    assert res_mtime_idle["compact_threshold_tokens"] == 850_000
 
-    # 6) commit_session_replacement updates lastTurnAt -> cache_cold False afterwards
-    tx = restarted.begin_session_replacement()
-    restarted.start_session_candidate(tx)
-    restarted._state = {"sessionId": "sid-after-compact", "context": {"totalTokens": 185_000, "maxTokens": 1_000_000, "percentage": 18.5}}
-    restarted.commit_session_replacement(tx)
-    assert restarted._state["lastTurnAt"] == round(now, 3)
-    res_post_compact = await restarted.check_context_reserve("")
-    assert res_post_compact["cache_cold"] is False and res_post_compact["should_compact"] is False
+    # 3) Hard 85% ceiling (850K exact & projected >= 850K) -> MUST compact
+    restarted._state["context"] = {"totalTokens": 850_000, "maxTokens": 1_000_000, "percentage": 85.0}
+    res_850 = await restarted.check_context_reserve("")
+    assert res_850["should_compact"] is True
+    assert res_850["compact_threshold_tokens"] == 850_000
+
+    restarted._state["context"] = {"totalTokens": 849_500, "maxTokens": 1_000_000, "percentage": 85.0}
+    res_proj = await restarted.check_context_reserve("x" * 2400)  # +600 projected -> 850_100
+    assert res_proj["should_compact"] is True
+    assert res_proj["compact_threshold_tokens"] == 850_000
 
 
 @pytest.mark.asyncio
