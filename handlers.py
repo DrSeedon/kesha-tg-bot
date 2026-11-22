@@ -699,9 +699,13 @@ async def h_stop(msg: types.Message):
 
 def _native_voice_tag(path, duration, source="voice", video=None):
     if source == "video_note":
-        return (f"[video_note: {video} | audio: {path} ({duration}s) — "
-                "прослушай звук через read_file, кадры при необходимости извлеки через ffmpeg. "
-                "Не открывай исходный .mp4 через read_file.]")
+        dur = f" ({duration}s)" if duration else ""
+        return (f"[video_note: {video or path}{dur} — кружочек: "
+                "посмотри и прослушай исходный .mp4 нативно через read_file и ответь по сути]")
+    if source == "video":
+        dur = f" ({duration}s)" if duration else ""
+        return (f"[video: {video or path}{dur} — видео: "
+                "посмотри и прослушай .mp4 нативно через read_file]")
     if source == "audio":
         return f"[audio: {path} ({duration}s) — прослушай аудиофайл через read_file]"
     return (f"[voice: {path} ({duration}s) — голосовое сообщение (без Deepgram): "
@@ -796,7 +800,10 @@ async def h_media_album(messages: list[types.Message]):
             parts.append(tag)
         elif m.video:
             path = await download_file(m.video.file_id, m.video.file_name or _media_name("video", ".mp4", m), m.video.file_unique_id)
-            tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
+            if path and native:
+                tag = _native_voice_tag(path, getattr(m.video, "duration", None), "video", path)
+            else:
+                tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
             parts.append(tag)
         elif m.document:
             doc = m.document
@@ -858,7 +865,8 @@ async def h_video_note(msg: types.Message):
         await enqueue(msg, "[video_note: файл слишком большой]", media=media)
         return
     if native:
-        await _enqueue_native_voice(msg, media, path, msg.video_note.duration, convert=True, video_note=True)
+        tag = _native_voice_tag(path, msg.video_note.duration, "video_note", path)
+        await enqueue(msg, tag, media=media)
         return
     from config import DEEPGRAM as _DG
     if not _DG:
@@ -930,7 +938,10 @@ async def h_video(msg: types.Message):
         return
     path = await download_file(msg.video.file_id, msg.video.file_name or _media_name("video", ".mp4", msg), msg.video.file_unique_id)
     caption = f"\n{extract_caption_with_urls(msg)}" if msg.caption else ""
-    tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
+    if path and _uses_native_audio(media[0]):
+        tag = _native_voice_tag(path, getattr(msg.video, "duration", None), "video", path)
+    else:
+        tag = f"[video: {path}]" if path else "[video: файл слишком большой]"
     await enqueue(msg, f"{tag}{caption}", media=media)
 
 

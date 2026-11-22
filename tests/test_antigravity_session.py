@@ -141,14 +141,18 @@ async def test_native_telegram_voice_paths_never_use_deepgram(tmp_path, monkeypa
     setattr(msg, kind, SimpleNamespace(file_id="voice-test", file_unique_id="unique",
                                        duration=6, file_name=None))
     await getattr(handlers, f"h_{kind}")(msg)
-    converter.assert_awaited_once_with(str(tmp_path / "incoming"), convert=convert)
-    assert f"{ogg} (6s)" in enqueue.await_args.args[1]
-    assert enqueue.await_args.kwargs["audio_paths"] == (str(ogg),)
     handlers.transcribe.assert_not_awaited()
-    if kind == "voice":
-        assert download.await_args.args[1].endswith(".ogg")
     if kind == "video_note":
-        assert "Не открывай исходный .mp4" in enqueue.await_args.args[1]
+        converter.assert_not_awaited()
+        assert f"{tmp_path / 'incoming'} (6s)" in enqueue.await_args.args[1]
+        assert "нативно через read_file" in enqueue.await_args.args[1]
+        assert "Не открывай исходный .mp4" not in enqueue.await_args.args[1]
+    else:
+        converter.assert_awaited_once_with(str(tmp_path / "incoming"), convert=convert)
+        assert f"{ogg} (6s)" in enqueue.await_args.args[1]
+        assert enqueue.await_args.kwargs["audio_paths"] == (str(ogg),)
+        if kind == "voice":
+            assert download.await_args.args[1].endswith(".ogg")
 
 
 def test_selection_and_active_runtime_persist_together(tmp_path):
