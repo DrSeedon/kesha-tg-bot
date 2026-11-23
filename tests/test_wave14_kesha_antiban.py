@@ -75,7 +75,7 @@ async def test_antigravity_session_cooldown_and_180k_compact_and_cost(tmp_path, 
 
     quota_gate.clear_antigravity_cooldown()
     assert not hasattr(config, "ANTIGRAVITY_AUTO_COMPACT_TOKENS")
-    assert config.ANTIGRAVITY_CACHE_TTL_SEC == 1800
+    assert config.ANTIGRAVITY_CACHE_TTL_SEC == 3300
     assert config.ANTIGRAVITY_HARD_COMPACT_PCT == 85.0
 
     # Even after idle time (>= 1800s), compact threshold stays strictly 85% (850K), never 180K
@@ -106,6 +106,13 @@ async def test_antigravity_session_cooldown_and_180k_compact_and_cost(tmp_path, 
     assert sess.last_response_usage["input_tokens"] == 0
     assert sess.last_response_usage["cache_read_tokens"] == 100_000
     assert sess.last_response_usage["cost_usd"] == pytest.approx(0.0512, abs=1e-6)
+
+    # 40 min (2400s < 3300s) remains warm in cost accounting
+    sess.reset_response_usage()
+    sess._state["lastTurnAt"] = sess._state["lastTurnAt"] - 2400
+    sess._record_usage({"stopReason": "end_turn"}, output_chars=400, tool_calls=0)
+    assert sess.last_response_usage["input_tokens"] == 0
+    assert sess.last_response_usage["cache_read_tokens"] == 100_000
 
 
 @pytest.mark.asyncio
