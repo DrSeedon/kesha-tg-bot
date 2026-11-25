@@ -162,14 +162,21 @@ async def send_file(args):
     if isinstance(chat_id, dict):
         return chat_id
     try:
-        p, _blob = open_sendable(path)
+        from file_access import CLOUD_MAX_SEND_BYTES, validate_sendable_path
+        real, size = validate_sendable_path(path)
+        if size <= CLOUD_MAX_SEND_BYTES:
+            p, _blob = open_sendable(path)
+            from aiogram.types import BufferedInputFile
+            doc = BufferedInputFile(_blob, filename=p.name)
+        else:
+            from aiogram.types import FSInputFile
+            p = real
+            doc = FSInputFile(str(real), filename=real.name)
     except (FileNotAllowed, OSError) as exc:
         return {"content": [{"type": "text", "text": f"Blocked: {exc}"}], "is_error": True}
     try:
-        from aiogram.types import BufferedInputFile
-        doc = BufferedInputFile(_blob, filename=p.name)
         await _bot_ref.bot.send_document(chat_id=chat_id, document=doc, caption=caption or None)
-        logger.info(f"Sent file {path} to {chat_id}")
+        logger.info(f"Sent file {path} ({size} bytes) to {chat_id}")
         return {"content": [{"type": "text", "text": f"File sent: {p.name}"}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Failed to send file: {e}"}], "is_error": True}

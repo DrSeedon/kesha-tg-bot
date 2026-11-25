@@ -14,9 +14,17 @@ from pathlib import Path
 
 logger = logging.getLogger("kesha.file_access")
 
-# Telegram's own cap is 50MB for documents; refuse earlier so a huge file
-# cannot be read fully into memory just to be rejected by the API.
-MAX_SEND_BYTES = 50 * 1024 * 1024
+# Cloud Bot API caps documents at 50MB; local telegram-bot-api (--local) raises
+# the cap to 2000MB. Keep RAM-buffered reads <= 50MB and stream larger files.
+CLOUD_MAX_SEND_BYTES = 50 * 1024 * 1024
+LOCAL_MAX_SEND_BYTES = 2000 * 1024 * 1024
+
+
+def max_send_bytes() -> int:
+    return LOCAL_MAX_SEND_BYTES if os.getenv("TELEGRAM_API_BASE", "").strip() else CLOUD_MAX_SEND_BYTES
+
+
+MAX_SEND_BYTES = CLOUD_MAX_SEND_BYTES
 
 # Not bare /tmp: on the production host it is shared with other services, and a
 # default must be safe on its own rather than safe-if-nothing-else-is-breached.
@@ -83,6 +91,26 @@ def _link_stays_inside(real: Path, info: os.stat_result) -> bool:
                 if len(seen) >= info.st_nlink:
                     return True
     return False
+
+
+def validate_sendable_path(path: str) -> tuple[Path, int]:
+    """Validate path and size for streaming delivery (used for large local-API files)."""
+    real = resolve_sendable(path)
+    fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not _stat.S_ISREG(info.st_mode):
+            raise FileNotAllowed("not a regular file")
+        if info.st_nlink > 1 and not _link_stays_inside(real, info):
+            raise FileNotAllowed("file is hard-linked outside the allowed directories")
+        limit = max_send_bytes()
+        if info.st_size > limit:
+            raise FileNotAllowed(
+                f"file is larger than the {limit // (1024 * 1024)}MB limit"
+            )
+        return real, info.st_size
+    finally:
+        os.close(fd)
 
 
 def open_sendable(path: str) -> tuple[Path, bytes]:

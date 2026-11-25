@@ -46,8 +46,19 @@ import response_stream as _rs
 import handlers as _handlers
 
 # Wire up bot object via set_bot() late binding after bot is created
-_tg_proxy = os.getenv("TG_PROXY") or os.getenv("HTTPS_PROXY") or None
-_bot_session = AiohttpSession(timeout=120, proxy=_tg_proxy)
+_tg_api_base = os.getenv("TELEGRAM_API_BASE", "").strip()
+if _tg_api_base:
+    from aiogram.client.telegram import TelegramAPIServer
+    _is_local_api = any(h in _tg_api_base for h in ("127.0.0.1", "localhost", "::1"))
+    _tg_api = TelegramAPIServer.from_base(_tg_api_base, is_local=_is_local_api)
+    _bot_session = AiohttpSession(
+        timeout=600,
+        api=_tg_api,
+        proxy=None if _is_local_api else (os.getenv("TG_PROXY") or os.getenv("HTTPS_PROXY") or None),
+    )
+else:
+    _tg_proxy = os.getenv("TG_PROXY") or os.getenv("HTTPS_PROXY") or None
+    _bot_session = AiohttpSession(timeout=120, proxy=_tg_proxy)
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN), session=_bot_session)
 dp = Dispatcher()
 
