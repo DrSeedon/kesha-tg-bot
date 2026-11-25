@@ -163,6 +163,42 @@ def test_antigravity_session_wraps_all_external_mcps_via_launcher(tmp_path, monk
     asyncio.run(sess.apply_mcp_servers(mcps))
 
 
+def test_antigravity_bridge_auth_path_is_canonical_across_release_symlinks(tmp_path, monkeypatch):
+    monkeypatch.setenv("KESHA_BRIDGE_AUTH_TOKEN", "test-bridge-token")
+    import tool_bridge
+    monkeypatch.setattr(tool_bridge, "TOKEN_ENV", "KESHA_BRIDGE_AUTH_TOKEN")
+    monkeypatch.setattr(tool_bridge, "issue_session", lambda *a, **kw: "bridge-sess-1")
+    monkeypatch.setattr(tool_bridge, "session_valid_for", lambda *a, **kw: False)
+    monkeypatch.setattr(tool_bridge, "revoke_session", lambda *a, **kw: None)
+
+    real_storage = tmp_path / "storage" / "sessions"
+    real_storage.mkdir(parents=True)
+    rel_a = tmp_path / "releases" / "aaa1111"
+    rel_b = tmp_path / "releases" / "bbb2222"
+    rel_a.mkdir(parents=True)
+    rel_b.mkdir(parents=True)
+    (rel_a / "storage").symlink_to(tmp_path / "storage")
+    (rel_b / "storage").symlink_to(tmp_path / "storage")
+
+    mcps = {"kesha": {"type": "sdk", "name": "kesha"}}
+    sess_a = AntigravitySession(RuntimeBuildContext(
+        chat_id=893553748, cwd=str(tmp_path), model="gemini-4-neon-medium",
+        system_prompt="test", mcp_servers=mcps,
+        session_file=rel_a / "storage" / "sessions" / "893553748.antigravity",
+    ))
+    sess_b = AntigravitySession(RuntimeBuildContext(
+        chat_id=893553748, cwd=str(tmp_path), model="gemini-4-neon-medium",
+        system_prompt="test", mcp_servers=mcps,
+        session_file=rel_b / "storage" / "sessions" / "893553748.antigravity",
+    ))
+    servers_a = sess_a._acp_mcp_servers()
+    servers_b = sess_b._acp_mcp_servers()
+    expected = str((real_storage / "893553748.bridge-auth.json").resolve())
+    assert servers_a[0]["env"]["KESHA_BRIDGE_AUTH_FILE"] == expected
+    assert servers_b[0]["env"]["KESHA_BRIDGE_AUTH_FILE"] == expected
+    assert AntigravitySession._mcp_signature(servers_a) == AntigravitySession._mcp_signature(servers_b)
+
+
 def test_mailru_mail_send_535_hint_and_attachment(tmp_path, monkeypatch):
     import importlib
     import smtplib

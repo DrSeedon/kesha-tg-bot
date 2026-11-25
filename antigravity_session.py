@@ -337,7 +337,7 @@ class AntigravitySession:
                         self._bridge_session, self.chat_id, "antigravity", min_ttl=3700):
                     self._revoke_bridge()
                     self._bridge_session = issue_session(self.chat_id, ttl=7200, runtime="antigravity")
-                auth_file = self.session_file.with_suffix(".bridge-auth.json")
+                auth_file = self.session_file.with_suffix(".bridge-auth.json").resolve()
                 write_private_json(auth_file, {"token": token, "session": self._bridge_session,
                                               "socket": str(SOCKET_PATH)})
                 servers.append({
@@ -357,7 +357,15 @@ class AntigravitySession:
 
     @staticmethod
     def _mcp_signature(acp_servers):
-        stable = [(s.get("name"), s.get("command"), list(s.get("args") or [])) for s in acp_servers]
+        stable = [
+            (
+                s.get("name"),
+                s.get("command"),
+                list(s.get("args") or []),
+                sorted((s.get("env") or {}).items()),
+            )
+            for s in acp_servers
+        ]
         return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
 
     async def _build_mcp_handoff(self):

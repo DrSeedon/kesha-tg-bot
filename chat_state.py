@@ -1731,7 +1731,7 @@ class ChatRegistry:
     @staticmethod
     def _session_file(runtime_id: str, chat_id: int) -> Path:
         name = str(chat_id) if runtime_id == "claude" else f"{chat_id}.{runtime_id}"
-        return Path(__file__).parent / "storage" / "sessions" / name
+        return (Path(__file__).parent / "storage" / "sessions").resolve() / name
 
     async def reset_runtime_sessions(
         self,
